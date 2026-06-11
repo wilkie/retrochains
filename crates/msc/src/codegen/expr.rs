@@ -2989,6 +2989,17 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         emit_mem_op_at(op, disp, out);
         return;
     }
+    // Same swap for a runtime multiply on the RHS: `a + b*c` evaluates b*c
+    // (imul leaves it in AX) and folds `a` as the memory operand —
+    // `mov ax,[b]; imul [c]; add ax,[a]`. Fixtures 2936, 3514.
+    if commutative
+        && matches!(right, Expr::BinOp { op: BinOp::Mul, .. })
+        && let Some(disp) = bp_disp(left, locals)
+    {
+        emit_expr_to_ax(right, locals, out, fixups);
+        emit_mem_op_at(op, disp, out);
+        return;
+    }
     // Commutative swap: when RIGHT is a char (char param, or a 1-byte field of
     // a by-value struct param) and LEFT is a non-char bp-rel operand, MSC loads
     // the char first (byte+cbw) and uses the other operand as a word mem source.
