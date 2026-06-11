@@ -989,6 +989,9 @@ pub(crate) fn cmp_is_unsigned(cond: &Cond, locals: &Locals<'_>) -> bool {
             Expr::Param(i) => locals.is_unsigned_param(*i) || locals.param_pointee_size(*i) > 0,
             Expr::Local(i) => locals.is_unsigned_local(*i) || locals.local_pointee_size(*i) > 0,
             Expr::Global(g) => locals.is_unsigned_global(*g),
+            // A materialized address (`&g`/`&x`, from pointer-alias
+            // substitution) is an unsigned operand. Fixtures 3938-3943.
+            Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) | Expr::AddrOfIndexedGlobal { .. } => true,
             _ => false,
         }
     }

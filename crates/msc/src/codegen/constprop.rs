@@ -956,13 +956,14 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
                     return;
                 }
             }
-            // `if (p == q)` over two pointer locals holding `&x`/`&g` (offset 0)
-            // whose bases aren't a foldable same-global pair: substitute each
-            // with its address so emit materializes both. Fixtures 1235 (locals),
-            // 3944-3947 (distinct globals).
-            if matches!(op, RelOp::Eq | RelOp::Ne)
-                && let (Some(la), Some(ra)) = (ptr_local_addr(left, cp), ptr_local_addr(right, cp))
-            {
+            // `if (p == q)` / `if (p < q)` over two pointer locals holding
+            // `&x`/`&g` (offset 0) whose bases aren't a foldable same-global
+            // pair: substitute each with its address so emit materializes both
+            // and compares them (unsigned). Distinct globals have a
+            // link-time-unknown relative order, so the relational compare stays
+            // runtime. Fixtures 1235 (==, locals), 3944-3947 (==, globals),
+            // 3938-3943 (relational, globals).
+            if let (Some(la), Some(ra)) = (ptr_local_addr(left, cp), ptr_local_addr(right, cp)) {
                 *left = la;
                 *right = ra;
                 return;
