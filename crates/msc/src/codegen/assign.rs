@@ -1882,6 +1882,7 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         && let Expr::Global(li) = left.as_ref()
         && *li == global_idx
         && matches!(op, BinOp::Add | BinOp::Sub)
+        && !contains_assign_expr(right)
         && let Some(k) = right.fold(locals.inits)
     {
         match (op, k) {
@@ -1939,7 +1940,7 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         && let Expr::BinOp { op, left, right } = value
         && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
         && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
-        && right.fold(locals.inits).is_none()
+        && (right.fold(locals.inits).is_none() || contains_assign_expr(right))
         && !long_operand(right, locals)
     {
         emit_expr_to_ax(right, locals, out, fixups); // rhs → AX
