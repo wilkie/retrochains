@@ -303,7 +303,7 @@ pub(crate) fn parse_struct_brace_group(p: &mut Parser<'_>, sidx: usize, stotal: 
     }
     Ok(slots)
 }
-pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> Result<(), EmitError> {
+pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool, is_const: bool) -> Result<(), EmitError> {
     // Accept either `struct <Tag> <var>;` or `union <Tag> <var>;` — both tags
     // live in the shared `p.structs` registry.
     if matches!(p.peek(), Some(Tok::Kw("union"))) { p.eat(&Tok::Kw("union"))?; }
@@ -421,6 +421,7 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
         is_extern: false,
         is_unsigned: false,
         is_float: false,
+        is_const,
     });
         // More declarators after a comma, else the terminating semicolon.
         if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
@@ -785,7 +786,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
             p.globals.push(Global {
                 name, init, array_len, element_size: 1, is_pointer,
                 struct_idx: Some(sidx), is_long: false, is_static: false,
-                is_extern: false, is_unsigned: false, is_float: false,
+                is_extern: false, is_unsigned: false, is_float: false, is_const: false,
             });
             match p.peek() {
                 Some(Tok::Comma) => { p.bump(); }
@@ -809,14 +810,16 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     let mut is_static = false;
     let mut is_extern = false;
     let mut is_unsigned = false;
+    let mut is_const = false;
     while let Some(t) = p.toks.get(i) {
         match t {
             Tok::Kw("static") => { is_static = true; i += 1; }
             Tok::Kw("extern") => { is_extern = true; i += 1; }
             Tok::Kw("unsigned") => { is_unsigned = true; i += 1; }
+            Tok::Kw("const") => { is_const = true; i += 1; }
             Tok::Kw("signed")
                 | Tok::Kw("register") | Tok::Kw("auto")
-                | Tok::Kw("volatile") | Tok::Kw("const")
+                | Tok::Kw("volatile")
                 | Tok::Kw("short") => { i += 1; }
             _ => break,
         }
@@ -828,7 +831,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // routed through a separate parse path because the size + element
     // model differ from primitive types.
     if matches!(p.peek(), Some(Tok::Kw("struct")) | Some(Tok::Kw("union"))) {
-        return parse_struct_global_decl(p, is_static);
+        return parse_struct_global_decl(p, is_static, is_const);
     }
     // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`,
     // and minimal `long` support (storage only; arithmetic not yet).
@@ -933,7 +936,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         p.global_names.push(name.clone());
         p.globals.push(Global {
             name, init, array_len: n as usize, element_size: 2, is_pointer: true,
-            struct_idx: None, is_long: false, is_static, is_extern, is_unsigned: false, is_float: false,
+            struct_idx: None, is_long: false, is_static, is_extern, is_unsigned: false, is_float: false, is_const,
         });
         return Ok(());
     }
@@ -977,7 +980,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         p.fn_ptr_globals.insert(name.clone());
         p.globals.push(Global {
             name, init, array_len: 1, element_size: 2, is_pointer: true,
-            struct_idx: None, is_long: false, is_static, is_extern, is_unsigned: false, is_float: false,
+            struct_idx: None, is_long: false, is_static, is_extern, is_unsigned: false, is_float: false, is_const,
         });
         return Ok(());
     }
@@ -1287,7 +1290,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // A long POINTER (`long *p`) is just a near pointer; its long-ness belongs
     // to the pointee, so it must not be flagged is_long (else `p = a` would be
     // treated as a 4-byte long store).
-    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long: is_long && !is_pointer, is_static, is_extern, is_unsigned, is_float: is_float && !is_pointer });
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long: is_long && !is_pointer, is_static, is_extern, is_unsigned, is_float: is_float && !is_pointer, is_const });
     // Another declarator after a comma, or end of statement.
     match p.peek() {
         Some(Tok::Comma) => {

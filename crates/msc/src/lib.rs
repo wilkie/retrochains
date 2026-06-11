@@ -146,6 +146,11 @@ pub struct Global {
     /// bytes (4 or 8); loads/stores use x87 `fld`/`fstp` and an `(int)`
     /// cast lowers to `call __ftol`.
     pub is_float: bool,
+    /// `true` for a `const`-qualified global with an initializer. MSC places
+    /// these in the CONST segment (not _DATA); references target CONST (fixup
+    /// byte `9c`) and the PUBDEF references the CONST segment. Fixtures
+    /// 2068/928/2662/3241/475/3260.
+    pub is_const: bool,
 }
 
 impl Global {
@@ -1884,8 +1889,23 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // 2-byte boundary, leaving a zero pad byte after any string of
     // odd length (fixture 4113). The last entry isn't padded — the
     // CONST segment ends at the end of its trailing string.
-    let mut string_offsets: Vec<usize> = Vec::with_capacity(unit.strings.len());
     let mut const_cursor: usize = 0;
+    // `const`-qualified initialized globals live in the CONST segment, at the
+    // START (before the string pool), word-aligned. Fixtures 2068/928/.../3260.
+    let mut const_global_offsets: Vec<Option<usize>> = Vec::with_capacity(unit.globals.len());
+    for g in &unit.globals {
+        if g.is_const && let Some(values) = &g.init {
+            const_global_offsets.push(Some(const_cursor));
+            let bytes: usize = values.iter().map(|v| v.size_bytes()).sum();
+            const_cursor += bytes;
+            if const_cursor % 2 != 0 {
+                const_cursor += 1;
+            }
+        } else {
+            const_global_offsets.push(None);
+        }
+    }
+    let mut string_offsets: Vec<usize> = Vec::with_capacity(unit.strings.len());
     for (i, s) in unit.strings.iter().enumerate() {
         string_offsets.push(const_cursor);
         const_cursor += s.len();
@@ -2024,7 +2044,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let mut data_offsets: Vec<Option<usize>> = Vec::with_capacity(unit.globals.len());
     let mut data_cursor: usize = 0;
     for g in &unit.globals {
-        if let Some(values) = &g.init {
+        // const globals go in CONST (handled above), not _DATA.
+        if !g.is_const && let Some(values) = &g.init {
             data_offsets.push(Some(data_cursor));
             let bytes: usize = values.iter().map(|v| v.size_bytes()).sum();
             data_cursor += bytes;
@@ -2401,12 +2422,20 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     for entry in &pub_walk {
         let (grp, seg, sym, off) = match entry {
             TopDecl::Global(i) => {
-                let Some(off) = data_offsets[*i] else { continue };
                 // `static` globals are TU-private — skip PUBDEF.
                 if unit.globals[*i].is_static { continue; }
-                let sym = symbol_name(&unit.globals[*i].name);
-                let off = u16::try_from(off).expect("offset fits");
-                (1u8, 2u8, sym, off)
+                // const globals are published in the CONST segment (SEGDEF #3).
+                if unit.globals[*i].is_const {
+                    let Some(off) = const_global_offsets[*i] else { continue };
+                    let sym = symbol_name(&unit.globals[*i].name);
+                    let off = u16::try_from(off).expect("offset fits");
+                    (1u8, 3u8, sym, off)
+                } else {
+                    let Some(off) = data_offsets[*i] else { continue };
+                    let sym = symbol_name(&unit.globals[*i].name);
+                    let off = u16::try_from(off).expect("offset fits");
+                    (1u8, 2u8, sym, off)
+                }
             }
             TopDecl::Function(i) => {
                 let sym = fn_symbol(&unit.functions[*i]);
@@ -2546,7 +2575,9 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     // `b` at _DATA offset 2; without this patch
                     // every PUBDEF-global access resolves to the
                     // first global.
-                    if let Some(off) = data_offsets[*global_idx] {
+                    // A const global is patched with its CONST offset; an
+                    // initialized _DATA global with its _DATA offset.
+                    if let Some(off) = data_offsets[*global_idx].or(const_global_offsets[*global_idx]) {
                         let off = u16::try_from(off).expect("global offset fits");
                         let existing = u16::from_le_bytes([
                             fe.bytes[fx.body_offset + 1],
@@ -2635,10 +2666,34 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // them sequentially in source order, little-endian. StrAddr
     // slots emit a 2-byte placeholder and pick up a FIXUPP record
     // emitted immediately after the LEDATA.
+    //
+    // CONST-segment const globals (before the _DATA block, matching MSC's record
+    // order where the const value LEDATA sits where _DATA would). One LEDATA per
+    // const global at its CONST offset. Fixtures 2068/3260.
+    for (gi, g) in unit.globals.iter().enumerate() {
+        if let (true, Some(off), Some(values)) = (g.is_const, const_global_offsets[gi], &g.init) {
+            let mut bytes: Vec<u8> = Vec::new();
+            for v in values {
+                match v {
+                    GlobalInit::Int(k) => bytes.extend_from_slice(&((*k as u32 & 0xFFFF) as u16).to_le_bytes()),
+                    GlobalInit::Byte(bb) => bytes.push(*bb),
+                    GlobalInit::FloatBits(bits, width) => {
+                        if *width == 4 {
+                            bytes.extend_from_slice(&(f64::from_bits(*bits) as f32).to_bits().to_le_bytes());
+                        } else {
+                            bytes.extend_from_slice(&bits.to_le_bytes());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            b.write_ledata16(3, u16::try_from(off).expect("const offset fits"), &bytes);
+        }
+    }
     if data_cursor > 0 {
         let mut data_bytes: Vec<u8> = Vec::with_capacity(data_cursor);
         for g in &unit.globals {
-            if let Some(values) = &g.init {
+            if !g.is_const && let Some(values) = &g.init {
                 for v in values {
                     match v {
                         GlobalInit::Int(k) => {
@@ -2797,7 +2852,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
             }
             FixupKind::GlobalAddr { global_idx } => {
-                if unit.globals[*global_idx].init.is_some() {
+                if unit.globals[*global_idx].is_const {
+                    // CONST-segment target (DGROUP frame + CONST thread).
+                    payload.extend_from_slice(&[0xC4, off, 0x9C]);
+                } else if unit.globals[*global_idx].init.is_some() {
                     payload.extend_from_slice(&[0xC4, off, 0x9D]);
                 } else {
                     let sym = symbol_name(&unit.globals[*global_idx].name);
