@@ -2951,6 +2951,141 @@ pub(crate) fn emit_partial_switch_with_continuation(
 
     false // caller must not add another epilogue (handled internally)
 }
+/// Whether a switch lowers to a jump table: at least 7 distinct singleton
+/// case values forming an exactly-dense range. 6 dense cases stay a compare
+/// chain (3971/1603/4031); 8 and 10 dense go through the table (158/1898/
+/// 2337/3480/4027). The table is never const-folded — MSC can't track the
+/// scrutinee through the indirect jmp (1898 keeps the full table with x
+/// known).
+pub(crate) fn switch_is_table(cases: &[SwitchArm]) -> bool {
+    let vals: Vec<i32> = cases.iter().filter_map(|a| a.value).collect();
+    if vals.len() < 7 {
+        return false;
+    }
+    // Shared labels (an empty-bodied value arm) keep the chain lowering.
+    if cases.iter().any(|a| a.value.is_some() && a.body.is_empty()) {
+        return false;
+    }
+    let mut sorted = vals.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted.len() == vals.len()
+        && (i64::from(sorted[sorted.len() - 1]) - i64::from(sorted[0]) + 1)
+            == vals.len() as i64
+}
+
+/// Jump-table switch (fixtures 158/1898/2337/3480/4027):
+///
+///   [scrutinee→ax] [sub ax,lo]? cmp ax,hi-lo; ja DEFAULT-or-END;
+///   add ax,ax; xchg ax,bx; jmp WORD PTR cs:$Ltab[bx]; [nop?]
+///   bodies (source order, each nop-padded to even):
+///     - break bodies jmp to the post-switch fall-out (1898/158)
+///     - `return e` bodies NOT among the last 5 (default counts as a body)
+///       load the value and jmp to the shared exit epilogue $EX
+///       (EPILOGUE_LABEL); the last 5 inline their epilogue (2337/3480/4027)
+///   $Ltab: DW per value — _TEXT-relative body offsets (each word carries a
+///   `c4 off 8e` FIXUP; the dispatch disp16 a `c4 off 5e` one)
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_table_switch(
+    scrutinee: &Expr,
+    cases: &[SwitchArm],
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    let default_idx = cases.iter().position(|c| c.value.is_none());
+    let lo = cases.iter().filter_map(|a| a.value).min().unwrap();
+    let hi = cases.iter().filter_map(|a| a.value).max().unwrap();
+
+    // The epilogue byte pattern, used to convert an inline `return e` into
+    // the shared-exit jmp form (strip the tail, append `jmp $EX`).
+    let mut epi: Vec<u8> = Vec::new();
+    crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, &mut epi);
+
+    emit_expr_to_ax(scrutinee, locals, out, fixups);
+    if lo != 0 {
+        out.push(0x2D); // sub ax, lo
+        out.extend_from_slice(&((lo as u32 & 0xFFFF) as u16).to_le_bytes());
+    }
+    out.push(0x3D); // cmp ax, hi-lo
+    out.extend_from_slice(&(((hi - lo) as u32 & 0xFFFF) as u16).to_le_bytes());
+    out.push(0x77); // ja → default body / post-switch
+    let ja_patch = out.len();
+    out.push(0x00);
+    out.extend_from_slice(&[0x03, 0xC0]); // add ax, ax
+    out.push(0x93); // xchg ax, bx
+    out.extend_from_slice(&[0x2E, 0xFF, 0xA7]); // jmp word cs:[bx+disp16]
+    let table_disp_pos = out.len();
+    out.extend_from_slice(&[0x00, 0x00]);
+    fixups.push(Fixup { body_offset: table_disp_pos, kind: FixupKind::SwitchTableJmp });
+    if out.len() % 2 != 0 { out.push(0x90); }
+
+    // Bodies in source order. `breaks` collect (placeholder pos) for the
+    // post-switch patch; body starts recorded per arm for the table words.
+    let mut body_starts: Vec<usize> = vec![0; cases.len()];
+    let mut break_patches: Vec<usize> = Vec::new();
+    for (i, arm) in cases.iter().enumerate() {
+        body_starts[i] = out.len();
+        let from_end = cases.len() - 1 - i;
+        // Early `return e` body → value load + jmp $EX (shared exit).
+        if from_end >= 5
+            && return_int && !return_long
+            && arm.body.len() == 1
+            && let Stmt::Return(_) = &arm.body[0]
+        {
+            let mut buf: Vec<u8> = Vec::new();
+            let mut fxs: Vec<Fixup> = Vec::new();
+            emit_stmt(&arm.body[0], locals, frame, return_int, return_long, &mut buf, &mut fxs);
+            assert!(buf.ends_with(&epi), "return body must end with the epilogue");
+            buf.truncate(buf.len() - epi.len());
+            let base = out.len();
+            for mut f in fxs { f.body_offset += base; fixups.push(f); }
+            out.extend_from_slice(&buf);
+            out.push(0xEB);
+            let pos = out.len();
+            out.push(0x00);
+            locals.label_fixups.borrow_mut().push((EPILOGUE_LABEL.to_owned(), pos));
+        } else {
+            for s in &arm.body {
+                if matches!(s, Stmt::Break) {
+                    out.push(0xEB);
+                    break_patches.push(out.len());
+                    out.push(0x00);
+                    break;
+                }
+                emit_stmt(s, locals, frame, return_int, return_long, out, fixups);
+                if stmt_always_returns(s, locals) { break; }
+            }
+        }
+        if out.len() % 2 != 0 { out.push(0x90); }
+    }
+
+    // The table itself: one word per value, ascending from lo.
+    let table_off = out.len();
+    for v in lo..=hi {
+        let arm = cases.iter().position(|a| a.value == Some(v))
+            .expect("dense table covers every value");
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::SwitchTableWord });
+        out.extend_from_slice(&(body_starts[arm] as u16).to_le_bytes());
+    }
+
+    // Patch the dispatch disp16 with the table's function-relative offset
+    // (lib.rs rebases it to the segment and emits the OMF fixup).
+    out[table_disp_pos] = (table_off & 0xFF) as u8;
+    out[table_disp_pos + 1] = ((table_off >> 8) & 0xFF) as u8;
+
+    // `ja` and break jmps target the default body / post-switch fall-out.
+    let switch_end = out.len();
+    let ja_target = default_idx.map(|d| body_starts[d]).unwrap_or(switch_end);
+    out[ja_patch] = (ja_target as i32 - (ja_patch + 1) as i32) as u8;
+    for p in break_patches {
+        out[p] = (switch_end as i32 - (p + 1) as i32) as u8;
+    }
+}
+
 /// Runtime `switch (<scrutinee>) { case K0: body0 case K1: body1 default: ... }`.
 /// Matches MSC layout: short cmp+jcc chain (with `jl`/`jle` range pairs for
 /// contiguous shared-label runs); `jmp short; nop` fallthrough; non-default
@@ -2972,6 +3107,11 @@ pub(crate) fn emit_runtime_switch(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    if switch_is_table(cases) {
+        emit_table_switch(scrutinee, cases, locals, frame, return_int, return_long, out, fixups);
+        return;
+    }
+
     struct CaseBuf {
         buf: Vec<u8>,
         fixups: Vec<Fixup>,

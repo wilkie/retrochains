@@ -1578,6 +1578,17 @@ enum FixupKind {
     /// FIXUP `c4 off 56 <idx>` targeting the function's EXTDEF index (every
     /// defined function already has one). Placeholder offset stays 0. Fixture 110.
     FuncAddr { target: String },
+    /// A switch jump-table word (`DW $SCn`): the placeholder holds the
+    /// FUNCTION-relative body offset; resolution adds the function's _TEXT
+    /// offset in-band and emits a _TEXT-frame/_TEXT-target seg-relative FIXUP
+    /// (`c4 off 8e`). The fixup offset lands on the word itself (no +1).
+    /// Fixtures 158/1898/2337.
+    SwitchTableWord,
+    /// The disp16 of the table dispatch `jmp WORD PTR cs:$Ltab[bx]`
+    /// (`2e ff a7 <disp16>`): placeholder holds the table's function-relative
+    /// offset; resolution adds the function's _TEXT offset and emits the
+    /// frame-by-target shape `c4 off 5e`. Fixup offset lands on the disp16.
+    SwitchTableJmp,
 }
 
 /// Same as `Fixup` but with the body_offset translated to the
@@ -2656,6 +2667,24 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                         kind: FixupKind::FuncAddr { target: target.clone() },
                     });
                 }
+                FixupKind::SwitchTableWord | FixupKind::SwitchTableJmp => {
+                    // The word holds a function-relative _TEXT offset; rebase
+                    // it to the segment by adding the function's offset. The
+                    // OMF fixup sits ON the word (no +1).
+                    let fn_rel = u16::from_le_bytes([
+                        fe.bytes[fx.body_offset],
+                        fe.bytes[fx.body_offset + 1],
+                    ]);
+                    let abs = fn_rel.wrapping_add(
+                        u16::try_from(caller_off).expect("function offset fits"),
+                    );
+                    fe.bytes[fx.body_offset] = (abs & 0xFF) as u8;
+                    fe.bytes[fx.body_offset + 1] = ((abs >> 8) & 0xFF) as u8;
+                    ledata_fixups.push(ResolvedFixup {
+                        ledata_offset: caller_off + fx.body_offset,
+                        kind: fx.kind.clone(),
+                    });
+                }
                 FixupKind::GlobalAddr { global_idx } => {
                     // Patch placeholder bytes with the global's
                     // in-_DATA offset for PUBDEF targets. COMDEF
@@ -2976,6 +3005,16 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     .get(target)
                     .unwrap_or_else(|| panic!("EXTDEF index missing for function `{target}`"));
                 payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
+            }
+            FixupKind::SwitchTableWord => {
+                // Seg-relative, frame thread 0 (_TEXT) + target thread 2
+                // (_TEXT), P=1 → 0x8E. The table word holds the displacement.
+                payload.extend_from_slice(&[0xC4, off, 0x8E]);
+            }
+            FixupKind::SwitchTableJmp => {
+                // Seg-relative, frame-by-target (F5) + target thread 2
+                // (_TEXT), P=1 → 0x5E.
+                payload.extend_from_slice(&[0xC4, off, 0x5E]);
             }
             FixupKind::TuLocalCall { .. } => unreachable!(),
         }

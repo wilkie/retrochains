@@ -772,7 +772,8 @@ pub(crate) fn emit_function(
             // shapes keep the plain emit_runtime_switch layout (1281, 3350),
             // as do its special forms (empty / default-only / single-case-jne
             // — all break-free).
-            let use_partial = !fold.ops.is_empty()
+            let use_partial = !crate::codegen::statements::switch_is_table(cases)
+                && !fold.ops.is_empty()
                 && match known_k {
                     Some(_) => ft.is_some() || live_nonterm,
                     None => live_nonterm
@@ -806,6 +807,32 @@ pub(crate) fn emit_function(
             i + 1 == body.len() || matches!(body.get(i + 1), Some(Stmt::Return(_))),
         );
         locals_view.final_top_stmt.set(i + 1 == body.len());
+
+        // A top-level `return e` in a function whose shared exit ($EX /
+        // EPILOGUE_LABEL) is already targeted (jump-table return bodies)
+        // emits only the value load and FALLS into the labeled trailing
+        // epilogue — one epilogue, shared. Fixture 4027.
+        if func.return_int
+            && !func.return_long
+            && matches!(stmt, Stmt::Return(_))
+            && label_fixups.borrow().iter()
+                .any(|(n, _)| n == crate::codegen::statements::EPILOGUE_LABEL)
+        {
+            let mut buf: Vec<u8> = Vec::new();
+            let mut fxs: Vec<crate::Fixup> = Vec::new();
+            let mut epi: Vec<u8> = Vec::new();
+            push_epilogue(frame, pascal_cleanup, &mut epi);
+            emit_stmt(stmt, &locals_view, frame, func.return_int, func.return_long,
+                      &mut buf, &mut fxs);
+            assert!(buf.ends_with(&epi), "return must end with the epilogue");
+            buf.truncate(buf.len() - epi.len());
+            let base = bytes.len();
+            for mut f in fxs { f.body_offset += base; fixups.push(f); }
+            bytes.extend_from_slice(&buf);
+            reachable = false;
+            break;
+        }
+
         emit_stmt(
             stmt,
             &locals_view,

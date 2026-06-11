@@ -790,7 +790,9 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             if let Some(k) = eval_const_int(scrutinee) {
                 *scrutinee = Expr::IntLit(k);
             }
-            if let Expr::IntLit(k) = scrutinee {
+            if let Expr::IntLit(k) = scrutinee
+                && !crate::codegen::statements::switch_is_table(cases)
+            {
                 let k = *k;
                 // Resolve the compare chain against K. Tests survive unless
                 // they compare against exactly K (or the case-0 `or ax,ax`):
