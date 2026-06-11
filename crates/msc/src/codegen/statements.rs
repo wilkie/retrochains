@@ -315,6 +315,56 @@ pub(crate) fn emit_stmt(
                 }
                 return;
             }
+            // `if (c) r = e1; else r = e2;` — both branches one assignment to
+            // the SAME plain int local, with non-literal values: the arms load
+            // AX and share a single `mov [r],ax` store at the merge, and a
+            // following `return r` reuses the live AX (the barrier is left at
+            // the store). Literal arm values keep the per-arm immediate-store
+            // shape (2434/2461). Fixture 2865.
+            if let Some(eb) = else_branch
+                && let Some((t1, v1)) = single_word_local_assign(then_branch, locals)
+                && let Some((t2, v2)) = single_word_local_assign(eb, locals)
+                && t1 == t2
+                && v1.fold(locals.inits).is_none()
+                && v2.fold(locals.inits).is_none()
+            {
+                let mut then_buf = Vec::new();
+                let mut then_fixups = Vec::new();
+                emit_expr_to_ax(v1, locals, &mut then_buf, &mut then_fixups);
+                let cond_size = {
+                    let mut sz = out.clone();
+                    let base = sz.len();
+                    emit_cond_skip(cond, 0i8, locals, &mut sz, &mut Vec::new());
+                    sz.len() - base
+                };
+                // Alignment NOP for the else label (after then + over-else jmp),
+                // same rule as the generic if/else path.
+                let needs_nop = (out.len() + cond_size + then_buf.len() + 2) % 2 != 0;
+                let skip = i8::try_from(then_buf.len() + 2 + usize::from(needs_nop))
+                    .expect("then-arm short enough for jcc rel8");
+                emit_cond_skip(cond, skip, locals, out, fixups);
+                let base = out.len();
+                for mut f in then_fixups { f.body_offset += base; fixups.push(f); }
+                out.extend_from_slice(&then_buf);
+                let mut else_buf = Vec::new();
+                let mut else_fixups = Vec::new();
+                emit_expr_to_ax(v2, locals, &mut else_buf, &mut else_fixups);
+                let over = i8::try_from(else_buf.len() + usize::from(needs_nop))
+                    .expect("else-arm short enough for jmp rel8");
+                out.push(0xEB);
+                out.push(over as u8);
+                if needs_nop { out.push(0x90); }
+                let base = out.len();
+                for mut f in else_fixups { f.body_offset += base; fixups.push(f); }
+                out.extend_from_slice(&else_buf);
+                // Shared store at the merge; leave the AX-reuse barrier here so
+                // a following read of the target reuses the live AX.
+                let store_pos = out.len();
+                let d = locals.disp(t1);
+                out.push(0x89); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                locals.merge_barrier.set(Some(store_pos));
+                return;
+            }
             // Build the then-branch into a scratch buffer so we know
             // its byte count for the conditional-jump displacement.
             let mut then_buf = Vec::new();
@@ -429,7 +479,7 @@ pub(crate) fn emit_stmt(
         // A do-while-form loop with no break/continue always runs its body, so
         // AX at the merge is the body's last write — emit_loop leaves a barrier
         // inside the loop instead of at its end (fixture 1411).
-        let barrier = locals.loop_exit_barrier.take().unwrap_or(out.len());
+        let barrier = locals.merge_barrier.take().unwrap_or(out.len());
         locals.last_branch_barrier.set(barrier);
     }
 }
@@ -747,6 +797,26 @@ fn try_lift_ternary_return(expr: &Expr) -> Option<Expr> {
         });
     }
     None
+}
+/// A branch that is exactly one assignment to a plain int word LOCAL
+/// (optionally wrapped in a one-statement block): `(local_idx, value)`.
+/// Long/float/register/array locals bail — they don't share the merged
+/// `mov [r],ax` store shape. Fixture 2865.
+fn single_word_local_assign<'e>(s: &'e Stmt, locals: &Locals<'_>) -> Option<(usize, &'e Expr)> {
+    let s = match s {
+        Stmt::Block(v) if v.len() == 1 => &v[0],
+        other => other,
+    };
+    let Stmt::Assign { target: AssignTarget::Local(i), value } = s else { return None };
+    if locals.size(*i) != 2
+        || locals.is_long_local(*i)
+        || locals.is_float_local(*i)
+        || locals.reg_for_local(*i).is_some()
+        || locals.array_locals.get(*i).copied().unwrap_or(false)
+    {
+        return None;
+    }
+    Some((*i, value))
 }
 pub(crate) fn emit_return(
     expr: &Expr,
@@ -2024,7 +2094,7 @@ pub(crate) fn emit_threaded_for(
         elide_call_cleanup: std::cell::Cell::new(false),
         ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
-        loop_exit_barrier: std::cell::Cell::new(None),
+        merge_barrier: std::cell::Cell::new(None),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
     };
@@ -2446,7 +2516,7 @@ pub(crate) fn emit_loop(
         elide_call_cleanup: std::cell::Cell::new(false),
         ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
-        loop_exit_barrier: std::cell::Cell::new(None),
+        merge_barrier: std::cell::Cell::new(None),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
     };
@@ -2659,7 +2729,7 @@ pub(crate) fn emit_loop(
         } else {
             cmp_base
         };
-        locals.loop_exit_barrier.set(Some(barrier));
+        locals.merge_barrier.set(Some(barrier));
     }
 }
 /// `do <body> while (<cond>);` (fixture 4098). When the body's last
@@ -3555,7 +3625,7 @@ pub(crate) fn emit_do_while(
         elide_call_cleanup: std::cell::Cell::new(false),
         ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
-        loop_exit_barrier: std::cell::Cell::new(None),
+        merge_barrier: std::cell::Cell::new(None),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
     };

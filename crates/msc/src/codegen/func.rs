@@ -746,7 +746,7 @@ pub(crate) fn emit_function(
         elide_call_cleanup: std::cell::Cell::new(false),
         ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
-        loop_exit_barrier: std::cell::Cell::new(None),
+        merge_barrier: std::cell::Cell::new(None),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
     };
