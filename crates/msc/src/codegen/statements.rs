@@ -538,10 +538,12 @@ pub(crate) fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
         Stmt::Break | Stmt::Continue => false,
         Stmt::Switch { cases, .. } => {
             // A switch always returns when there is a default arm (all values
-            // covered) and every arm body contains at least one returning stmt.
+            // covered) and every entry point returns — walking C fall-through
+            // across arms, so empty shared-label arms (`case 1: case 2: ret`)
+            // count via the body they fall into. Fixture 3350.
             let has_default = cases.iter().any(|a| a.value.is_none());
             has_default
-                && cases.iter().all(|a| a.body.iter().any(|s| stmt_always_returns(s, locals)))
+                && (0..cases.len()).all(|i| arm_body_terminates(cases, i, locals))
         }
         Stmt::Block(stmts) => stmts.iter().any(|s| stmt_always_returns(s, locals)),
         Stmt::If { cond, then_branch, else_branch } => {
@@ -2695,9 +2697,13 @@ pub(crate) fn emit_partial_switch_with_continuation(
     // Bodies referenced by the surviving tests, in op order, deduped. A
     // surviving `jl` half targets the default body when one exists (appended
     // here), or the continuation (RL) when there is none (fixture 520).
+    // Tests targeting the fall-through arm itself resolve to its inline copy
+    // right after the chain — it is never re-emitted as a trailing body
+    // (fixture 2224: `jl default` with ft == default).
     let mut nfc_idxs: Vec<usize> = Vec::new();
     for op in &fold.ops {
         if let TestOp::JeBody { arm, .. } | TestOp::JleBody { arm, .. } = op
+            && Some(*arm) != ft_idx
             && !nfc_idxs.contains(arm)
         {
             nfc_idxs.push(*arm);
@@ -2710,6 +2716,7 @@ pub(crate) fn emit_partial_switch_with_continuation(
         None
     };
     if let Some(d) = jl_default_arm
+        && Some(d) != ft_idx
         && !nfc_idxs.contains(&d)
     {
         nfc_idxs.push(d);
@@ -2809,6 +2816,7 @@ pub(crate) fn emit_partial_switch_with_continuation(
 
     // ── emit ft body ─────────────────────────────────────────────────────
 
+    let ft_start = out.len();
     {
         let base = out.len();
         for mut f in ft_fxs { f.body_offset += base; fixups.push(f); }
@@ -2941,6 +2949,7 @@ pub(crate) fn emit_partial_switch_with_continuation(
     // default arm targets the continuation (RL).
     for &(p, target) in &jcc_patches {
         let dest = match target {
+            Some(arm) if Some(arm) == ft_idx => ft_start,
             Some(arm) => nfc_starts.iter().find(|&&(a, _)| a == arm)
                 .map(|&(_, s)| s)
                 .expect("chain test targets an unemitted body"),
@@ -3206,11 +3215,19 @@ pub(crate) fn emit_runtime_switch(
         }
     };
 
+    // A scrutinee ending in an add/sub on AX leaves ZF reflecting AX==0, so a
+    // leading case-0 test needs no `or ax,ax` — the `je` follows the
+    // arithmetic directly. Fixture 3650 (`switch (x - 1)`).
+    let scrutinee_sets_zf =
+        matches!(scrutinee, Expr::BinOp { op: BinOp::Sub | BinOp::Add, .. });
+
     // Chain length: per test:
-    //   v == 0 je: `0b c0` (2) + `74 rel8` (2) = 4 bytes
+    //   v == 0 je: `0b c0` (2) + `74 rel8` (2) = 4 bytes (2 when the
+    //   scrutinee already set ZF and this is the first test)
     //   otherwise: `3d v v` (3) + jcc rel8 (2) = 5 bytes
-    let chain_len: usize = ops.iter()
-        .map(|op| match op {
+    let chain_len: usize = ops.iter().enumerate()
+        .map(|(i, op)| match op {
+            TestOp::JeBody { v: 0, .. } if i == 0 && scrutinee_sets_zf => 2,
             TestOp::JeBody { v: 0, .. } => 4,
             _ => 5,
         })
@@ -3262,7 +3279,7 @@ pub(crate) fn emit_runtime_switch(
 
     // Emit the chain tests. `jl` halves target the default body when one
     // exists, else the post-switch fall-out (fixtures 3084, 3965).
-    for op in &ops {
+    for (i, op) in ops.iter().enumerate() {
         let (v, jcc, target_off) = match *op {
             TestOp::JeBody { v, arm } => (v, 0x74u8, body_offsets[arm]),
             TestOp::JleBody { v, arm } => (v, 0x7E, body_offsets[arm]),
@@ -3273,7 +3290,9 @@ pub(crate) fn emit_runtime_switch(
             ),
         };
         if v == 0 && matches!(op, TestOp::JeBody { .. }) {
-            out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
+            if !(i == 0 && scrutinee_sets_zf) {
+                out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
+            }
         } else {
             let v16 = (v as u32 & 0xFFFF) as u16;
             out.push(0x3D);
