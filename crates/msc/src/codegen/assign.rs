@@ -2949,6 +2949,38 @@ pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u
             return;
         }
     }
+    // Int (word) field compound `s.f op= <simple int operand>` (add/sub/and/or/
+    // xor): MSC evaluates the RHS into AX then applies an in-place memory-with-
+    // register op `<op> word [base+byte_off],ax` (`mov ax,[v]; add [s.x],ax`)
+    // rather than load-field/op/store-field. Scoped to a single-word RHS operand
+    // (plain int param/local/global) so the AX load is one `mov`. Fixture 3443.
+    if size == 2
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left.as_ref(), Expr::GlobalField { global: g, byte_off: bo, .. } if *g == global_idx && *bo == byte_off)
+        && match right.as_ref() {
+            Expr::Param(i) => !locals.is_long_param(*i) && !locals.is_char_param(*i) && locals.param_pointee_size(*i) == 0,
+            Expr::Local(i) => !locals.is_long_local(*i) && locals.size(*i) == 2,
+            Expr::Global(gi) => !locals.is_long_global(*gi) && !locals.is_char_global(*gi),
+            _ => false,
+        }
+    {
+        emit_expr_to_ax(right, locals, out, fixups); // mov ax,<word operand>
+        let opcode = match op {
+            BinOp::Add => 0x01u8,
+            BinOp::Sub => 0x29,
+            BinOp::BitAnd => 0x21,
+            BinOp::BitOr => 0x09,
+            BinOp::BitXor => 0x31,
+            _ => unreachable!(),
+        };
+        out.push(opcode);
+        out.push(0x06); // mod=00 reg=000(ax) rm=110(disp16)
+        let p = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     // Compound `s.f op= rhs` (preserved self-read): a struct field is a global at
     // `byte_off`, structurally identical to a global-array element — rewrite the
     // self-read to Index/IndexByte and reuse the indexed-global compound codegen.
