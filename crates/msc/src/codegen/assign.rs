@@ -512,6 +512,35 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         }
         return;
     }
+    // Int (word) local compound `l op= rhs` (add/sub/and/or/xor) with a
+    // NON-const, non-long, non-pointer RHS: MSC evaluates the RHS into AX then
+    // applies the in-place memory-with-register op `<op> word [bp+disp],ax`
+    // (e.g. `a |= b[0]` → `mov ax,[b]; or [a],ax`) instead of load-l/op/store-l.
+    // Pointer locals are excluded — `p += n` scales by pointee size via the
+    // const arm and would mis-encode here. Fixture 1404.
+    if locals.size(local_idx) == 2
+        && !locals.is_long_local(local_idx)
+        && locals.local_pointee_size(local_idx) == 0
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left.as_ref(), Expr::Local(li) if *li == local_idx)
+        && right.fold(locals.inits).is_none()
+        && !long_operand(right, locals)
+    {
+        emit_expr_to_ax(right, locals, out, fixups); // rhs → AX
+        let opcode = match op {
+            BinOp::Add => 0x01u8,
+            BinOp::Sub => 0x29,
+            BinOp::BitAnd => 0x21,
+            BinOp::BitOr => 0x09,
+            BinOp::BitXor => 0x31,
+            _ => unreachable!(),
+        };
+        out.push(opcode);
+        out.push(bp_modrm(0x46, disp)); // reg=ax(000), rm=[bp+disp]
+        push_bp_disp(out, disp);
+        return;
+    }
     // Peephole: `x = x ± K` for int locals collapses to an in-place
     // memory op:
     //   K == 1: `inc/dec word ptr [bp-disp]`     (3 bytes)
