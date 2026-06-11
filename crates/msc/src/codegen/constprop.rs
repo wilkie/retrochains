@@ -790,6 +790,20 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             if let Some(k) = eval_const_int(scrutinee) {
                 *scrutinee = Expr::IntLit(k);
             }
+            // A long-local scrutinee with a known literal init folds to its
+            // low word — MSC dispatches the switch on a plain int chain
+            // (`mov ax,2` for `long x = 2L; switch (x)`). Long locals are
+            // deliberately absent from l_known (reads stay slot loads), so
+            // recover the value from the spec. Fixture 1913.
+            if let Expr::Local(i) = scrutinee
+                && let Some(spec) = cp.local_specs.get(*i)
+                && spec.is_long
+                && spec.init_is_literal
+                && !cp.mutated_locals.contains(i)
+                && let Some(k) = spec.init
+            {
+                *scrutinee = Expr::IntLit(k);
+            }
             if let Expr::IntLit(k) = scrutinee
                 && !crate::codegen::statements::switch_is_table(cases)
             {
