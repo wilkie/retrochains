@@ -3457,13 +3457,10 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             emit_imm_op(op, *k, out);
             return;
         }
-    } else if let Expr::Global(idx) = left {
-        let body_offset = out.len();
-        out.extend_from_slice(&[0xA1, 0x00, 0x00]);
-        fixups.push(Fixup {
-            body_offset,
-            kind: FixupKind::GlobalAddr { global_idx: *idx },
-        });
+    } else if let Expr::Global(_) = left {
+        // Route through the Global arm so a just-stored AX (`g = x, g + 1` —
+        // out ends `a3 <g>`) is reused instead of reloaded. Fixture 3509.
+        emit_expr_to_ax(left, locals, out, fixups);
         if let Expr::IntLit(k) = right {
             emit_imm_op(op, *k, out);
             return;
