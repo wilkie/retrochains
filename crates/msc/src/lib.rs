@@ -567,6 +567,12 @@ pub struct Locals<'a> {
     /// SP. Sub-scope (loop/block) views keep this false: a call inside a loop
     /// repeats and must clean up each iteration. Fixtures 4044, 2439, 2299.
     pub elide_call_cleanup: std::cell::Cell<bool>,
+    /// When a void function's FINAL statement is a discarded runtime ternary,
+    /// the value emitter replaces the then-arm's over-else jmp with these
+    /// inline epilogue bytes (the if/else 3614 rule applied to the ternary
+    /// shape — fixture 3328). Set by the ExprStmt arm; taken by the Ternary
+    /// arm of emit_expr_to_ax.
+    pub ternary_tail_epilogue: std::cell::RefCell<Option<Vec<u8>>>,
     /// `out.len()` just after the most recent branch-merge (the end of an
     /// `if`/loop/switch statement). A compare's AX-reuse of a just-stored local
     /// is only valid for a STRAIGHT-LINE store — one emitted at or past this

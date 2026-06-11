@@ -1217,7 +1217,12 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 emit_cond_skip(&cond_c, 0, locals, &mut buf, &mut Vec::new());
                 buf.len()
             };
-            let then_block = then_buf.len() + 2; // then arm + 2-byte jmp
+            // The then-arm normally ends with a 2-byte jmp over the else; a
+            // void function's final discarded ternary inlines the epilogue
+            // there instead (fixture 3328 — see `ternary_tail_epilogue`).
+            let tail_epi = locals.ternary_tail_epilogue.borrow_mut().take();
+            let then_tail_len = tail_epi.as_ref().map_or(2, |e| e.len());
+            let then_block = then_buf.len() + then_tail_len;
             let needs_nop = (out.len() + cond_size + then_block) % 2 != 0;
             let skip = i8::try_from(then_block + needs_nop as usize)
                 .expect("ternary then-block fits in rel8");
@@ -1225,10 +1230,14 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             let then_base = out.len();
             for mut f in then_fixups { f.body_offset += then_base; fixups.push(f); }
             out.extend_from_slice(&then_buf);
-            // jmp over pad + else.
-            out.push(0xEB);
-            out.push(i8::try_from(needs_nop as usize + else_buf.len())
-                .expect("ternary else arm fits in rel8") as u8);
+            if let Some(epi) = tail_epi {
+                out.extend_from_slice(&epi);
+            } else {
+                // jmp over pad + else.
+                out.push(0xEB);
+                out.push(i8::try_from(needs_nop as usize + else_buf.len())
+                    .expect("ternary else arm fits in rel8") as u8);
+            }
             if needs_nop { out.push(0x90); }
             let else_base = out.len();
             for mut f in else_fixups { f.body_offset += else_base; fixups.push(f); }

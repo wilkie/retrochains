@@ -112,6 +112,21 @@ pub(crate) fn emit_stmt(
                 locals, frame, return_int, return_long, out, fixups,
             );
         }
+        Stmt::ExprStmt(other @ Expr::Ternary { cond, .. })
+            if final_top && !return_int && !return_long
+                && cond.fold(locals.inits).is_none() =>
+        {
+            // A discarded runtime ternary as a void function's FINAL
+            // statement: the then-arm's over-else jmp would land on the
+            // trailing epilogue — emit the epilogue inline instead (the
+            // 3614 if/else rule applied to the ternary shape). The value
+            // emitter takes the bytes from `ternary_tail_epilogue`.
+            // Fixture 3328.
+            *locals.ternary_tail_epilogue.borrow_mut() =
+                Some(crate::codegen::func::epilogue_vec(frame, locals.pascal_cleanup));
+            emit_expr_to_ax(other, locals, out, fixups);
+            *locals.ternary_tail_epilogue.borrow_mut() = None;
+        }
         Stmt::ExprStmt(other) => {
             // A discarded expression statement with NO side effects emits
             // nothing — MSC drops dead value computations like `x + 1;`.
@@ -1948,6 +1963,7 @@ pub(crate) fn emit_threaded_for(
         int_cast_ptrs: locals.int_cast_ptrs,
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
+        ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
@@ -2357,6 +2373,7 @@ pub(crate) fn emit_loop(
         int_cast_ptrs: locals.int_cast_ptrs,
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
+        ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
@@ -3434,6 +3451,7 @@ pub(crate) fn emit_do_while(
         int_cast_ptrs: locals.int_cast_ptrs,
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
+        ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),

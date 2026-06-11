@@ -729,6 +729,7 @@ pub(crate) fn emit_function(
         fpu_pending_fwait: &fpu_pending_fwait,
         struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
+        ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),

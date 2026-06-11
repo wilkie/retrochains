@@ -1417,6 +1417,17 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // 588 (globals). Truthy-cond ternaries keep their arms as runtime
             // loads (fixture 1038), and compound arms (e.g. `-a`) stay non-
             // literal so the load / two-epilogue paths still fire (fixture 430).
+            // A SOURCE-literal cond (`1 ? &a : &b`) is compile-time: collapse
+            // to the chosen arm outright — downstream init/alias machinery
+            // sees the plain arm expression. A truthy cond that merely
+            // SUBSTITUTED to a literal stays a runtime ternary (1038, 2501).
+            // Fixture 2318.
+            if !cp.substituted && let Expr::IntLit(k) = cond.as_ref() {
+                let mut arm = if *k != 0 { (**then_arm).clone() } else { (**else_arm).clone() };
+                prop_expr(&mut arm, cp);
+                *e = arm;
+                return;
+            }
             if matches!(cond.as_ref(), Expr::BinOp { op, .. }
                 if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge))
                 && let Some(c) = cond.fold(&[])
@@ -1495,6 +1506,15 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                         *e = Expr::IntLit(if c != 0 { *tv } else { *ev });
                     }
                 }
+            } else {
+                // Runtime ternary: walk DISCARDED arm clones so side effects
+                // (`y ? y++ : z--`) register their mutations — later reads
+                // must not fold stale values. The arms themselves emit
+                // unsubstituted. Fixture 2501.
+                let mut t = (**then_arm).clone();
+                prop_expr(&mut t, cp);
+                let mut e2 = (**else_arm).clone();
+                prop_expr(&mut e2, cp);
             }
         }
         Expr::Seq { sides, value } => {
