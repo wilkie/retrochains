@@ -2347,7 +2347,11 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                             if !matches!(cond.as_ref(), Expr::BinOp {
                                 op: BinOp::Eq | BinOp::Ne | BinOp::Lt
                                     | BinOp::Le | BinOp::Gt | BinOp::Ge, ..
-                            }));
+                            }))
+                        // An init containing an assignment-expression has a SIDE
+                        // EFFECT (the inner store); folding it to a constant would
+                        // drop that store. Keep it a runtime assign. Fixture 1217.
+                        || crate::codegen::contains_assign_expr(&init_expr);
                     let fold_k = if skip_fold { None } else { init_expr.fold(&init_view) };
                     if let Some(k) = fold_k {
                         locals[local_idx].init = Some(k);

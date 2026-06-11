@@ -5,6 +5,19 @@ use crate::*;
 /// (fixture 4096: `x = x - 1;` in a while body). The general path
 /// — `mov ax, <expr>; mov [bp-disp], ax` — is reserved for a
 /// future fixture that exercises a non-peephole shape.
+/// True when an expression tree contains an assignment-expression (a store side
+/// effect) anywhere — folding such a value to an immediate would drop the store.
+pub(crate) fn contains_assign_expr(e: &Expr) -> bool {
+    match e {
+        Expr::AssignExpr { .. } => true,
+        Expr::BinOp { left, right, .. } => contains_assign_expr(left) || contains_assign_expr(right),
+        Expr::CastChar { value, .. } => contains_assign_expr(value),
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            contains_assign_expr(cond) || contains_assign_expr(then_arm) || contains_assign_expr(else_arm)
+        }
+        _ => false,
+    }
+}
 pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // `t = (s1, ..., v)` — run the comma side effects, then assign v to t so a
     // constant v keeps the c7 immediate store (`mov [t],K`) instead of being
@@ -897,14 +910,21 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
     // 1466). For ternary: skip fold only when the condition is a
     // non-comparison truthy check — e.g. `a ? b : c` where a is a
     // local (fixture 1038). Comparison conditions fold normally.
-    let fold_val = match value {
-        Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. } => None,
-        Expr::Ternary { cond, .. }
-            if !matches!(cond.as_ref(), Expr::BinOp {
-                op: BinOp::Eq | BinOp::Ne | BinOp::Lt
-                    | BinOp::Le | BinOp::Gt | BinOp::Ge, ..
-            }) => None,
-        _ => value.fold(locals.inits),
+    let fold_val = if contains_assign_expr(value) {
+        // The RHS contains an assignment-expression (a store side effect) —
+        // folding it to an immediate would drop that store. Compute at runtime.
+        // Fixture 1217 (`int b = (a=7)+3`).
+        None
+    } else {
+        match value {
+            Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. } => None,
+            Expr::Ternary { cond, .. }
+                if !matches!(cond.as_ref(), Expr::BinOp {
+                    op: BinOp::Eq | BinOp::Ne | BinOp::Lt
+                        | BinOp::Le | BinOp::Gt | BinOp::Ge, ..
+                }) => None,
+            _ => value.fold(locals.inits),
+        }
     };
     if let Some(k) = fold_val {
         if is_byte {

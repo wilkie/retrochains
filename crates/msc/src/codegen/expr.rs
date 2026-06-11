@@ -3312,14 +3312,18 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     // Foldable side — recurse with the folded literal substituted.
     // Lets `(2 + x)` collapse to `(<lit> + <local>)` etc. Guard against
     // recursing when the operand is already an IntLit (the fold returns
-    // its own value), which would spin forever.
+    // its own value), which would spin forever. Also skip an operand that
+    // contains an assignment-expression — its `fold()` returns the assigned
+    // value but materializing that drops the store side effect. Fixture 1217.
     if !matches!(left, Expr::IntLit(_))
+        && !contains_assign_expr(left)
         && let Some(k) = left.fold(locals.inits)
     {
         emit_binop(op, &Expr::IntLit(k), right, locals, out, fixups);
         return;
     }
     if !matches!(right, Expr::IntLit(_))
+        && !contains_assign_expr(right)
         && let Some(k) = right.fold(locals.inits)
     {
         emit_binop(op, left, &Expr::IntLit(k), locals, out, fixups);
