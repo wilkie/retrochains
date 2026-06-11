@@ -1315,6 +1315,30 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
 /// or `int a = x + y` (x=5, y=10 → 15 ≠ 5 and 15 ≠ 10), which MSC does NOT
 /// fold into later uses.  The size check prevents cross-type-size detection
 /// like `int n = c` where c is a char (fixture 1043).
+/// True when an initializer is a zero-producing algebraic identity that MSC
+/// propagates as a literal-0 init (so a later `return r` is `sub ax,ax`, not a
+/// reload): `e * 0` / `0 * e` and `e - e`. NOTE `e ^ e` is deliberately
+/// EXCLUDED — MSC reloads it (fixture 2015 `xor-self-no-fold` vs 2016 `x - x`).
+/// Only consulted in the constant-folded branch, where a call would already
+/// have blocked folding, so the dropped operand is side-effect free. Fixtures
+/// 2011 (`x * 0`), 2016 (`x - x`).
+pub(crate) fn init_is_zero_const_identity(e: &Expr) -> bool {
+    fn same_simple(l: &Expr, r: &Expr) -> bool {
+        match (l, r) {
+            (Expr::Local(a), Expr::Local(b)) => a == b,
+            (Expr::Global(a), Expr::Global(b)) => a == b,
+            (Expr::Param(a), Expr::Param(b)) => a == b,
+            _ => false,
+        }
+    }
+    match e {
+        Expr::BinOp { op: BinOp::Mul, left, right } => {
+            matches!(left.as_ref(), Expr::IntLit(0)) || matches!(right.as_ref(), Expr::IntLit(0))
+        }
+        Expr::BinOp { op: BinOp::Sub, left, right } => same_simple(left, right),
+        _ => false,
+    }
+}
 pub(crate) fn init_expr_has_matching_literal_leaf(
     e: &Expr,
     fold_val: i32,
@@ -2344,11 +2368,14 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         // See `init_expr_has_matching_literal_leaf` for the rule.
                         let identity_literal = !init_via_type_cast
                             && init_expr_has_matching_literal_leaf(&init_expr, k, size, &locals);
-                        locals[local_idx].init_is_literal = pure_literal || chained_literal || identity_literal;
+                        // `x * 0` / `x - x` fold to a constant 0 that MSC
+                        // propagates like a literal init (fixtures 2011/2016).
+                        let zero_identity = !init_via_type_cast && init_is_zero_const_identity(&init_expr);
+                        locals[local_idx].init_is_literal = pure_literal || chained_literal || identity_literal || zero_identity;
                         locals[local_idx].init_via_cast = init_via_cast && size == 1;
                         locals[local_idx].init_via_type_cast = init_via_type_cast;
                         if let Some(spec) = p.local_specs.get_mut(local_idx) {
-                            spec.init_is_literal = pure_literal || chained_literal || identity_literal;
+                            spec.init_is_literal = pure_literal || chained_literal || identity_literal || zero_identity;
                             spec.init_via_cast = init_via_cast && size == 1;
                             spec.init_via_type_cast = init_via_type_cast;
                         }
