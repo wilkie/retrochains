@@ -556,10 +556,11 @@ pub(crate) fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
         // A label is a reachable join point; a bare goto isn't treated as a
         // function exit here (so a following label still emits).
         Stmt::Label(_) | Stmt::Goto(_) => false,
-        // Loops with a runtime cond can fall through; the
-        // const-true infinite-loop case isn't exercised yet so we
-        // conservatively answer false.
-        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => false,
+        // A const-true loop with no loop-level break never falls through —
+        // control can't reach past it, so the function epilogue after it is
+        // dead (fixtures 3396/3397). Runtime-cond loops can fall through.
+        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } =>
+            infinite_loop_body(stmt).is_some(),
         Stmt::Break | Stmt::Continue => false,
         Stmt::Switch { cases, .. } => {
             // A switch always returns when there is a default arm (all values
@@ -1625,6 +1626,13 @@ pub(crate) fn emit_while(
         emit_do_while(&dw_body, &neg, locals, frame, return_int, return_long, out, fixups);
         return;
     }
+    // `while (1)` with no break at all: infinite loop, no test (3396).
+    if matches!(cond, Cond::Truthy(Expr::IntLit(k)) if *k != 0)
+        && !stmt_has_loop_break(body_stmt)
+    {
+        emit_infinite_loop(body_stmt, locals, frame, return_int, return_long, out, fixups);
+        return;
+    }
     emit_loop(cond, &[body_stmt], None, None, None, false, locals, frame, return_int, return_long, out, fixups);
 }
 /// The RelOp for the same comparison with operands swapped (`a OP b` ⟺
@@ -1666,6 +1674,52 @@ fn stmt_has_loop_break(s: &Stmt) -> bool {
         Stmt::Block(ss) => ss.iter().any(stmt_has_loop_break),
         _ => false, // nested While/DoWhile/For/Switch own their break/continue
     }
+}
+/// `while (1)` / `for (;;)` / `do {} while (1)` with NO loop-level break:
+/// a genuinely infinite loop. Returns its body. The cond must be a SOURCE
+/// literal (same gate as `match_once_loop`); `for` only matches the bare
+/// `for (;;)` shape. Fixtures 3396/3397.
+fn infinite_loop_body(s: &Stmt) -> Option<&Stmt> {
+    let const_true = |c: &Cond| matches!(c, Cond::Truthy(Expr::IntLit(k)) if *k != 0);
+    let body: &Stmt = match s {
+        Stmt::While { cond, body } if const_true(cond) => body,
+        Stmt::DoWhile { body, cond } if const_true(cond) => body,
+        Stmt::For { init, cond, step, body }
+            if const_true(cond)
+                && matches!(init.as_ref(), Stmt::Empty)
+                && matches!(step.as_ref(), Stmt::Empty) => body,
+        _ => return None,
+    };
+    if stmt_has_loop_break(body) { return None; }
+    Some(body)
+}
+/// Emit an infinite loop (see [`infinite_loop_body`]): the body once, then a
+/// short jmp back to its first byte. No cond test, no initial jmp, and no
+/// loop-top alignment NOP (gold 3396 loops back to an odd offset). The
+/// epilogue after it is suppressed via `stmt_always_returns`.
+fn emit_infinite_loop(
+    body_stmt: &Stmt,
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    // Body fold view: clear init values for locals mutated in the body,
+    // matching emit_loop (later iterations read the slot, not the init).
+    let body_mutations = collect_loop_body_mutations(&[body_stmt]);
+    let body_inits: Vec<Option<i32>> = locals.inits.iter().enumerate()
+        .map(|(i, &v)| if body_mutations.contains(&i) { None } else { v })
+        .collect();
+    let body_locals = locals.with_inits(&body_inits);
+    let top = out.len();
+    // The body appends directly to `out` (nothing is inserted before it, so
+    // no fixup/label rebase is needed). No LoopCtx: the body has no breaks.
+    emit_stmt(body_stmt, &body_locals, frame, return_int, return_long, out, fixups);
+    let disp = top as i64 - (out.len() as i64 + 2);
+    out.push(0xeb);
+    out.push(i8::try_from(disp).expect("infinite-loop back jmp fits rel8") as u8);
 }
 /// If a loop body is `{ prefix...; if (c) break; }` with no other loop-level
 /// break/continue, return the (cloned) prefix and the negated break condition
@@ -2096,6 +2150,14 @@ pub(crate) fn emit_for(
     // the outer cond-continuation). Handled before the normal init emission since
     // the threaded emitter lays down the outer init itself.
     if emit_threaded_for(init, cond, step, body_stmt, locals, frame, return_int, return_long, out, fixups) {
+        return;
+    }
+    // `for (;;)` with no break at all: infinite loop, no test (3397).
+    if matches!(init, Stmt::Empty) && matches!(step, Stmt::Empty)
+        && matches!(cond, Cond::Truthy(Expr::IntLit(k)) if *k != 0)
+        && !stmt_has_loop_break(body_stmt)
+    {
+        emit_infinite_loop(body_stmt, locals, frame, return_int, return_long, out, fixups);
         return;
     }
     // Normalize a `<register local> OP <memory operand>` loop cond by swapping
@@ -3397,6 +3459,13 @@ pub(crate) fn emit_do_while(
         let dw_body = Stmt::Block(prefix);
         // `neg` is never a compile-time constant, so this does not re-trigger.
         emit_do_while(&dw_body, &neg, locals, frame, return_int, return_long, out, fixups);
+        return;
+    }
+    // `do {} while (1)` with no break at all: infinite loop, no test.
+    if matches!(cond, Cond::Truthy(Expr::IntLit(k)) if *k != 0)
+        && !stmt_has_loop_break(body_stmt)
+    {
+        emit_infinite_loop(body_stmt, locals, frame, return_int, return_long, out, fixups);
         return;
     }
     // Clear init values for any local mutated in the body, matching

@@ -622,6 +622,63 @@ impl Locals<'_> {
     pub fn struct_field_temp_disp(&self, idx: u16) -> i16 {
         self.struct_field_temp_base - 4 * idx as i16
     }
+    /// A sub-scope view of the same frame with a replacement const-prop fold
+    /// view (`inits`). Shares every table and RefCell with `self` but resets
+    /// the per-statement Cell state — the same shape as the body-view copies
+    /// built inline in `emit_loop` / `emit_do_while`.
+    pub fn with_inits<'b>(&'b self, inits: &'b [Option<i32>]) -> Locals<'b> {
+        Locals {
+            inits,
+            disps: self.disps,
+            sizes: self.sizes,
+            long_globals: self.long_globals,
+            char_globals: self.char_globals,
+            global_elem_sizes: self.global_elem_sizes,
+            unsigned_globals: self.unsigned_globals,
+            float_globals: self.float_globals,
+            long_locals: self.long_locals,
+            init_literals: self.init_literals,
+            far_ptr_locals: self.far_ptr_locals,
+            array_locals: self.array_locals,
+            unsigned_locals: self.unsigned_locals,
+            local_pointee_sizes: self.local_pointee_sizes,
+            float_locals: self.float_locals,
+            char_params: self.char_params,
+            param_struct_bytes: self.param_struct_bytes,
+            long_params: self.long_params,
+            unsigned_params: self.unsigned_params,
+            param_float_widths: self.param_float_widths,
+            param_pointee_sizes: self.param_pointee_sizes,
+            char_returners: self.char_returners,
+            long_returners: self.long_returners,
+            pascal_fns: self.pascal_fns,
+            static_fns: self.static_fns,
+            pascal_cleanup: self.pascal_cleanup,
+            si_local: self.si_local,
+            di_local: self.di_local,
+            long_param_funcs: self.long_param_funcs,
+            struct_param_funcs: self.struct_param_funcs,
+            struct_return_funcs: self.struct_return_funcs,
+            float_returners: self.float_returners,
+            loop_stack: self.loop_stack,
+            labels: self.labels,
+            label_fixups: self.label_fixups,
+            fpu_live: self.fpu_live,
+            return_float_width: self.return_float_width,
+            return_struct_bytes: self.return_struct_bytes,
+            struct_temp_bss_offset: self.struct_temp_bss_offset,
+            float_call_temp_disp: self.float_call_temp_disp,
+            fpu_pending_fwait: self.fpu_pending_fwait,
+            param_struct_ptr_bytes: self.param_struct_ptr_bytes,
+            int_cast_ptrs: self.int_cast_ptrs,
+            struct_field_temp_base: self.struct_field_temp_base,
+            elide_call_cleanup: std::cell::Cell::new(false),
+            ternary_tail_epilogue: std::cell::RefCell::new(None),
+            last_branch_barrier: std::cell::Cell::new(0),
+            last_top_stmt: std::cell::Cell::new(false),
+            final_top_stmt: std::cell::Cell::new(false),
+        }
+    }
     pub fn size(&self, idx: usize) -> usize {
         self.sizes[idx]
     }
