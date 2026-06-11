@@ -2313,6 +2313,24 @@ pub(crate) fn emit_loop(
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
     locals.loop_stack.borrow_mut().push(LoopCtx::default());
+    // `goto`/early-return label fixups and label definitions emitted INSIDE the
+    // body land in the shared label tables with body-buffer-relative offsets.
+    // They must be rebased by the same deltas as `body_fixups` so that a goto
+    // to a label outside the loop (and vice-versa) resolves against a single
+    // out-relative offset space. Snapshot what exists before the body. Fixtures
+    // 438/440/442 (goto out of while/for/do-while).
+    let lf_start = locals.label_fixups.borrow().len();
+    let labels_before: std::collections::HashSet<String> =
+        locals.labels.borrow().keys().cloned().collect();
+    let rebase_body_labels = |delta: usize| {
+        if delta == 0 { return; }
+        for (_, pos) in locals.label_fixups.borrow_mut().iter_mut().skip(lf_start) {
+            *pos += delta;
+        }
+        for (name, pos) in locals.labels.borrow_mut().iter_mut() {
+            if !labels_before.contains(name) { *pos += delta; }
+        }
+    };
     // For a `for` loop, `continue` jumps to the step segment, not the cond.
     // Record the body-buffer offset at the start of that segment.
     let mut cont_off: Option<usize> = None;
@@ -2335,6 +2353,7 @@ pub(crate) fn emit_loop(
         emit_cond_skip(cond_b, b_exit_disp, &body_locals, &mut b_cond_buf, &mut b_cond_fixups);
         let b_cond_len = b_cond_buf.len();
         for c in &mut body_fixups { c.body_offset += b_cond_len; }
+        rebase_body_labels(b_cond_len);
         for off in &mut loop_ctx.breaks { *off += b_cond_len; }
         for off in &mut loop_ctx.continues { *off += b_cond_len; }
         if let Some(o) = cont_off.as_mut() { *o += b_cond_len; }
@@ -2468,6 +2487,7 @@ pub(crate) fn emit_loop(
     // Patch break/continue placeholders (rel8 `eb/jcc XX`). break → loop_end;
     // continue → the for-loop step (cont_off) if present, else cmp_base. Each
     // offset points at the disp byte.
+    rebase_body_labels(body_base);
     let cont_target = cont_off.map(|o| body_base + o).unwrap_or(cmp_base);
     for &off in &loop_ctx.breaks {
         let abs = body_base + off;
@@ -2994,6 +3014,20 @@ pub(crate) fn emit_do_while(
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
     locals.loop_stack.borrow_mut().push(LoopCtx::default());
+    // Rebase body-relative `goto`/label fixups into out-relative space, same as
+    // emit_loop (fixture 442: goto out of a do-while).
+    let lf_start = locals.label_fixups.borrow().len();
+    let labels_before: std::collections::HashSet<String> =
+        locals.labels.borrow().keys().cloned().collect();
+    let rebase_body_labels = |delta: usize| {
+        if delta == 0 { return; }
+        for (_, pos) in locals.label_fixups.borrow_mut().iter_mut().skip(lf_start) {
+            *pos += delta;
+        }
+        for (name, pos) in locals.labels.borrow_mut().iter_mut() {
+            if !labels_before.contains(name) { *pos += delta; }
+        }
+    };
     emit_stmt(body_stmt, &body_locals, frame, return_int, return_long, &mut body_buf, &mut body_fixups);
     let loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
     let body_len = body_buf.len();
@@ -3004,6 +3038,7 @@ pub(crate) fn emit_do_while(
     if matches!(fold_cond(cond, locals), Some(0)) && !cond_references_local(cond) {
         let body_base = out.len();
         for mut c in body_fixups { c.body_offset += body_base; fixups.push(c); }
+        rebase_body_labels(body_base);
         out.extend_from_slice(&body_buf);
         return;
     }
@@ -3041,6 +3076,7 @@ pub(crate) fn emit_do_while(
         c.body_offset += body_base;
         fixups.push(c);
     }
+    rebase_body_labels(body_base);
     let cmp_base = out.len();
     out.extend_from_slice(&cmp_buf);
     for mut c in cmp_fixups {
