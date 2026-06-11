@@ -1258,11 +1258,23 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 cp.substituted = true;
             }
         }
-        Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. } => {
+        Expr::BinOp { op: op @ (BinOp::LogOr | BinOp::LogAnd), left, .. } => {
             // MSC does NOT substitute constant locals inside || / && operands:
             // `return x || y` with x=1 always emits `cmp [bp-x], 0`, not
             // `cmp 1, 0`. The fold() path (for if-condition dead-branch
             // elimination) still works because fold() reads l_known directly.
+            //
+            // But a SOURCE-literal left short-circuits at compile time:
+            // `0 && <e>` is 0 and `K || <e>` (K != 0) is 1 without ever
+            // evaluating the right side — its side effects (calls, ++) are
+            // dropped. Fixture 2311.
+            if matches!(op, BinOp::LogAnd) && matches!(left.as_ref(), Expr::IntLit(0)) {
+                *e = Expr::IntLit(0);
+            } else if matches!(op, BinOp::LogOr)
+                && matches!(left.as_ref(), Expr::IntLit(k) if *k != 0)
+            {
+                *e = Expr::IntLit(1);
+            }
         }
         Expr::BinOp { op, left, right } => {
             // Pointer subtraction / equality over two same-GLOBAL-base address
