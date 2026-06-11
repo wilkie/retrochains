@@ -1258,7 +1258,13 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
                 out.push(0x98); // cbw
             } else {
-                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                // Reuse AX when the field was just stored from it (`b = a` then
+                // `return b.v` — the copy left b.v in AX). Fixture 2892.
+                let load = { let mut v = vec![0x8B, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+                let store_self = { let mut v = vec![0x89, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+                if !ax_holds_word_operand(out, &load, &store_self, locals.last_branch_barrier.get()) {
+                    out.extend_from_slice(&load);
+                }
             }
         }
         Expr::ParamField { param, byte_off, size } => {
