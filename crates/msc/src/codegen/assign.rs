@@ -29,6 +29,19 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         emit_assign(target, inner, locals, out, fixups);
         return;
     }
+    // `t op= (s1, ..., v)` — a comma-operator RHS in a compound assign: run the
+    // side effects, then re-process the compound with the comma's VALUE. So a
+    // constant `v` uses the in-place immediate form (`add [t],K`) instead of the
+    // register form. Fixture 1345 (`a += (b=3, b+1)`).
+    if let Expr::BinOp { op, left, right } = value
+        && let Expr::Seq { sides, value: inner } = right.as_ref()
+    {
+        for s in sides {
+            emit_stmt(s, locals, Frame::BpOnly, true, false, out, fixups);
+        }
+        let unwrapped = Expr::BinOp { op: *op, left: left.clone(), right: inner.clone() };
+        return emit_assign(target, &unwrapped, locals, out, fixups);
+    }
     // Chained assignment `a = b = c = V`: the RHS is an AssignExpr with its own
     // store side effects. Emit it (storing into the inner targets, leaving V in
     // AX), then store AX into this target too — `mov ax,V; mov [c],ax; mov [b],ax;
