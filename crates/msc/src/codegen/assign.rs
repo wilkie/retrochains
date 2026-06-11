@@ -1819,22 +1819,28 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             }
         }
     }
-    // Int (word) global self-compound bitop with a non-const RHS, e.g.
-    // `g ^= g`: MSC evaluates the RHS into AX then applies an in-place
-    // memory-with-register op `<op> word [g],ax` (e.g. `mov ax,[g]; xor
-    // [g],ax`) instead of computing in AX and storing back. Scoped to the
-    // SELF case (`left` and `right` are this same int global) so the AX load
-    // reads the old value before the in-place op. Fixture 3587 (`g ^= g`).
+    // Int (word) global compound `g op= rhs` (add/sub/and/or/xor) with a
+    // NON-const RHS: MSC evaluates the RHS into AX (emitting any side effects)
+    // then applies an in-place memory-with-register op `<op> word [g],ax`
+    // (e.g. `mov ax,[g]; xor [g],ax`, or `mov ax,5; mov [y],ax; add [g],ax`)
+    // instead of load-g/op/store-g. `left` is `g` itself (compound shape); the
+    // const-RHS add/sub and bitop forms are handled by their own arms above/
+    // below, so this only fires for register/side-effecting RHS. The RHS is
+    // evaluated before the `[g]` read, matching MSC's order. Fixtures 3587
+    // (`g ^= g`), 859 (`g += (y=5)`), 858 (`g += (...,z)`).
     if !locals.is_long_global(global_idx)
         && !locals.is_char_global(global_idx)
         && let Expr::BinOp { op, left, right } = value
-        && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
         && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
-        && matches!(right.as_ref(), Expr::Global(r) if *r == global_idx)
+        && right.fold(locals.inits).is_none()
+        && !long_operand(right, locals)
     {
-        emit_expr_to_ax(right, locals, out, fixups); // mov ax,[g]
+        emit_expr_to_ax(right, locals, out, fixups); // rhs → AX
         let opcode = match op {
-            BinOp::BitAnd => 0x21u8,
+            BinOp::Add => 0x01u8,
+            BinOp::Sub => 0x29,
+            BinOp::BitAnd => 0x21,
             BinOp::BitOr => 0x09,
             BinOp::BitXor => 0x31,
             _ => unreachable!(),
