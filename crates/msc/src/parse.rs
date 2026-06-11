@@ -2244,6 +2244,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 (2usize, array_len, false)
             } else if is_long_decl && array_len == 1 {
                 (2usize, 2usize, true)
+            } else if is_long_decl {
+                // `long a[N]`: N elements of 4 bytes each. Element K lives at
+                // byte offset K*4 (low word) / K*4+2 (high word). Fixtures 304/306.
+                (4usize, array_len, true)
             } else {
                 (size, array_len, false)
             };

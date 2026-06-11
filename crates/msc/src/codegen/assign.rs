@@ -2642,6 +2642,32 @@ pub(crate) fn emit_assign_indexed_local(local_idx: usize, byte_off: u16, value: 
         fixups.push(Fixup { body_offset, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
         return;
     }
+    // Long array element store `a[K] = <long>`: write both words — low at the
+    // element disp, high at disp+2 — mirroring the scalar-long-local store.
+    // Fixtures 304/306. A known constant uses two `c7` immediates (or the
+    // `sub ax,ax` zero idiom for 0); a runtime long evaluates into DX:AX.
+    if locals.is_long_local(local_idx) {
+        let hi_disp = disp + 2;
+        if let Some(k) = value.fold(locals.inits) {
+            if k == 0 {
+                out.extend_from_slice(&[0x2B, 0xC0]); // sub ax,ax
+                out.push(0x89); out.push(bp_modrm(0x46, hi_disp)); push_bp_disp(out, hi_disp);
+                out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            } else {
+                let low = (k as u32 & 0xFFFF) as u16;
+                let high = (((k as i32) >> 16) as u32 & 0xFFFF) as u16;
+                out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.extend_from_slice(&low.to_le_bytes());
+                out.push(0xC7); out.push(bp_modrm(0x46, hi_disp)); push_bp_disp(out, hi_disp);
+                out.extend_from_slice(&high.to_le_bytes());
+            }
+        } else {
+            crate::codegen::calls::emit_long_to_dx_ax(value, locals, out, fixups);
+            out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);   // mov [lo],ax
+            out.push(0x89); out.push(bp_modrm(0x56, hi_disp)); push_bp_disp(out, hi_disp); // mov [hi],dx
+        }
+        return;
+    }
     // Compound-assign peepholes for `a[k] op= K` (int/word array).
     // Must check BEFORE value.fold() to avoid const-folding the whole expr
     // when MSC emits runtime ops (fixtures 1210, and similar add/sub cases).
