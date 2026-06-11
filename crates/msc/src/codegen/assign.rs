@@ -2047,15 +2047,17 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         }
         return;
     }
-    // Long globals get a special 4-byte store: low word at [g],
-    // sign-extended high word at [g+2]. Only the constant-RHS shape
-    // is wired up (most-common `long g = K;` pattern); a runtime RHS
-    // would require DX:AX widening from the int RHS, deferred.
+    // Long globals get a special 4-byte store: low word at [g], high word at
+    // [g+2]. The high word is the actual upper 16 bits of the 32-bit value
+    // (`k >> 16`), which also yields the correct sign extension for literals
+    // that fit in a signed 16-bit int. Only the constant-RHS shape is wired up
+    // (most-common `long g = K;` pattern); a runtime RHS would require DX:AX
+    // widening from the int RHS, deferred. Fixture 446 (`g = 0x12345678`).
     if locals.is_long_global(global_idx)
         && let Some(k) = value.fold(locals.inits)
     {
         let low = (k as u32 & 0xFFFF) as u16;
-        let high = (((k as i32) >> 31) as u32 & 0xFFFF) as u16;
+        let high = (((k as i32) >> 16) as u32 & 0xFFFF) as u16;
         // c7 06 <addr> <low>
         out.push(0xC7);
         out.push(0x06);
