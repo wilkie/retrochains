@@ -3168,6 +3168,30 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             return;
         }
     }
+    // `charptr + int` loads the INT side and adds the pointer from memory:
+    // `return p + n` → `mov ax,[n]; add ax,[p]` (2711, 3381). Stride-1
+    // pointers only — wider strides scale the int side through other paths.
+    {
+        // A pointer that the source casts with `(int)` participates as a
+        // plain int and keeps left-first order (3429: `(int)p + n`).
+        let pointee = |e: &Expr| match e {
+            Expr::Param(i) if !locals.int_cast_ptrs.contains(&(true, *i)) =>
+                locals.param_pointee_size(*i),
+            Expr::Local(i) if !locals.int_cast_ptrs.contains(&(false, *i)) =>
+                locals.local_pointee_size(*i),
+            _ => 0,
+        };
+        if matches!(op, BinOp::Add)
+            && pointee(left) == 1
+            && pointee(right) == 0
+            && let Some(ldisp) = bp_disp(left, locals)
+            && let Some(rload) = bp_load(right, locals)
+        {
+            rload(out);
+            emit_mem_op_at(op, ldisp, out);
+            return;
+        }
+    }
     // Left as a BP-rel operand we can load into AX.
     if let Some(load) = bp_load(left, locals) {
         load(out);

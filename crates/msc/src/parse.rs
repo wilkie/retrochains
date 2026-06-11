@@ -31,6 +31,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         strings: Vec::new(),
         enum_consts: std::collections::HashMap::new(),
         typedefs: std::collections::HashMap::new(),
+        int_cast_ptrs: std::collections::HashSet::new(),
         fn_ptr_globals: std::collections::HashSet::new(),
         fn_ptr_params: std::collections::HashSet::new(),
         fn_ptr_locals: std::collections::HashSet::new(),
@@ -1526,6 +1527,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     while matches!(p.peek(), Some(Tok::Star)) { p.bump(); return_struct_bytes = 0; return_struct_idx = None; }
     // Reset the per-function `make().field` temp counter.
     p.struct_field_temp_count = 0;
+    p.int_cast_ptrs.clear();
     let name = match p.bump().cloned() {
         Some(Tok::Kw("main")) => "main".to_owned(),
         Some(Tok::Ident(s)) => s,
@@ -2489,7 +2491,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // while the body was parsed. For functions without nested-block
     // declarations the two are identical.
     let locals = p.local_specs.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body, struct_field_temp_count: p.struct_field_temp_count, is_pascal, is_static: is_static_fn })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, int_cast_ptrs: std::mem::take(&mut p.int_cast_ptrs), body, struct_field_temp_count: p.struct_field_temp_count, is_pascal, is_static: is_static_fn })
 }
 /// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
 /// and `)` at `close_idx`) and return each param's `is_long` flag. A param is
@@ -4692,6 +4694,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
                 | Some(Tok::Kw("float")) | Some(Tok::Kw("double"))) {
                 let cast_char = matches!(p.peek(), Some(Tok::Kw("char")));
+                let cast_int = matches!(p.peek(), Some(Tok::Kw("int")));
                 p.bump();
                 // Accept `long int`, then skip any pointer-distance
                 // qualifiers (`far`/`near`/`huge`) that may appear between
@@ -4722,6 +4725,25 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     let from_var = matches!(value.as_ref(),
                         Expr::Local(_) | Expr::Param(_) | Expr::Global(_));
                     return Ok(Expr::CastChar { value, unsigned: cast_unsigned, from_var });
+                }
+                // `(int)<ptr>` strips pointer-ness for binop operand-order
+                // decisions: record the cast pointer so `(int)p + n` keeps
+                // the plain int left-first order (3429) while an uncast
+                // `p + n` swaps to int-side-first (2711).
+                if cast_int && !had_star {
+                    match &inner {
+                        Expr::Param(i)
+                            if p.param_pointee_sizes.get(*i).copied().unwrap_or(0) > 0 =>
+                        {
+                            p.int_cast_ptrs.insert((true, *i));
+                        }
+                        Expr::Local(i)
+                            if p.local_specs.get(*i).map(|s| s.pointee_size).unwrap_or(0) > 0 =>
+                        {
+                            p.int_cast_ptrs.insert((false, *i));
+                        }
+                        _ => {}
+                    }
                 }
                 return Ok(inner);
             }
@@ -4991,8 +5013,20 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             }
         }
         Some(Tok::Bang) => {
-            // `!<expr>` — equivalent to `<expr> == 0`.
+            // `!<expr>` — equivalent to `<expr> == 0`. A nested not
+            // (`!!x` → `(x == 0) == 0`) collapses to `x != 0` / `x == 0`
+            // so the value form takes the carry-trick path (`cmp [x],1;
+            // sbb ax,ax; inc ax`) like a source-level `x != 0`. 3140, 3415.
             let inner = parse_atom(p)?;
+            if let Expr::BinOp { op: op @ (BinOp::Eq | BinOp::Ne), left, right } = &inner
+                && matches!(right.as_ref(), Expr::IntLit(0))
+            {
+                return Ok(Expr::BinOp {
+                    op: if matches!(op, BinOp::Eq) { BinOp::Ne } else { BinOp::Eq },
+                    left: left.clone(),
+                    right: Box::new(Expr::IntLit(0)),
+                });
+            }
             Ok(Expr::BinOp {
                 op: BinOp::Eq,
                 left: Box::new(inner),

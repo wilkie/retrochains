@@ -243,6 +243,9 @@ pub struct Function {
     /// Names parallel to `locals` — used to compute MSC's hash-table
     /// traversal order for frame slot assignment.
     pub local_names: Vec<String>,
+    /// Pointer params/locals `(is_param, idx)` that appear under an `(int)`
+    /// cast in this function's body (see `Locals::int_cast_ptrs`).
+    pub int_cast_ptrs: std::collections::HashSet<(bool, usize)>,
     pub body: Vec<Stmt>,
     /// Number of `make().field` struct-return temps the body uses. Each reserves
     /// a 4-byte frame slot (deepest, source order) for the spilled DX:AX result.
@@ -474,6 +477,10 @@ pub struct Locals<'a> {
     /// (0 for non-pointers). Drives pointer-difference element scaling
     /// (`p - q` → byte sub then `sar` to convert bytes → elements).
     pub param_pointee_sizes: &'a [usize],
+    /// Pointer params/locals that appear under an `(int)` cast somewhere in
+    /// the function — keyed (is_param, idx). An int-cast pointer behaves as
+    /// a plain int in binop operand-order decisions (3429 vs 2711).
+    pub int_cast_ptrs: &'a std::collections::HashSet<(bool, usize)>,
     /// Map of function names that return `char`. The caller inserts
     /// `cbw` after the call to widen AL to AX (fixture 1006).
     pub char_returners: &'a std::collections::HashSet<String>,
@@ -1415,6 +1422,8 @@ struct Parser<'a> {
     /// `typedef <type> <alias>;` aliases. Each alias maps to one of
     /// the recognized primitive type names ("int", "char", "long").
     typedefs: std::collections::HashMap<String, &'static str>,
+    /// Pointer params/locals cast with `(int)` in the current function.
+    int_cast_ptrs: std::collections::HashSet<(bool, usize)>,
     /// Names of file-scope function-pointer variables (`int (*fp)(args);`).
     /// A call `fp(...)` whose name is here lowers to an indirect `CallPtr`
     /// (`call WORD PTR _fp`) rather than a direct `call _fp`.
