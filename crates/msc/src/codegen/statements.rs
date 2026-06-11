@@ -182,6 +182,15 @@ pub(crate) fn emit_stmt(
             emit_for(init, cond, step, body, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::If { cond, then_branch, else_branch } => {
+            // `if (pure-cond) ;` — empty then-body, no else, side-effect-free
+            // condition: MSC emits nothing at all (no compare, no branch).
+            // Fixture 3048 (`if (x > 0) ;`).
+            if else_branch.is_none()
+                && stmt_is_empty(then_branch)
+                && cond_is_pure(cond)
+            {
+                return;
+            }
             // `if (cond) goto L;` — and `if (cond) return;` in a VOID function,
             // which MSC routes to a SHARED end epilogue label (EPILOGUE_LABEL,
             // recorded at the function tail) — lower to a single conditional jump
@@ -455,6 +464,23 @@ pub(crate) fn expr_is_pure(e: &Expr) -> bool {
         | Expr::AddrOfIndexedGlobal { index, .. }
         | Expr::StructArrayField { index, .. } => expr_is_pure(index),
         Expr::Index2D { row, col, .. } => expr_is_pure(row) && expr_is_pure(col),
+        _ => false,
+    }
+}
+/// True when a condition evaluates with no side effects (so an `if` with an
+/// empty body can be dropped). Mirrors [`expr_is_pure`] across the Cond tree.
+pub(crate) fn cond_is_pure(cond: &Cond) -> bool {
+    match cond {
+        Cond::Truthy(e) => expr_is_pure(e),
+        Cond::Cmp { left, right, .. } => expr_is_pure(left) && expr_is_pure(right),
+        Cond::And(a, b) | Cond::Or(a, b) => cond_is_pure(a) && cond_is_pure(b),
+    }
+}
+/// True when a statement produces no code — `;` or a block of only such.
+pub(crate) fn stmt_is_empty(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Empty => true,
+        Stmt::Block(v) => v.iter().all(stmt_is_empty),
         _ => false,
     }
 }
