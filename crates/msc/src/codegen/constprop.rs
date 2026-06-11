@@ -737,7 +737,30 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             // into each branch with an isolated copy so writes don't
             // leak across paths. After the if, conservatively clear.
             cp.substituted = false;
+            // Pre-substitution shape: a BARE truthy variable test (`if (x)`),
+            // unlike a comparison (`if (x != 0)`), consumes its knowledge even
+            // on a TRUE fold — the next test of x emits a runtime cmp
+            // (fixture 2024 pins the asymmetry between the two forms).
+            let bare_truthy_var: Option<(bool, usize)> = match cond {
+                Cond::Truthy(Expr::Local(i)) => Some((false, *i)),
+                Cond::Truthy(Expr::Global(g)) => Some((true, *g)),
+                _ => None,
+            };
             prop_cond(cond, cp);
+            if cp.substituted
+                && matches!(crate::codegen::statements::fold_cond_raw(cond, &[]), Some(k) if k != 0)
+                && let Some((is_global, idx)) = bare_truthy_var
+            {
+                cp.l_known.clear();
+                cp.g_known.clear();
+                cp.la_known.clear();
+                cp.ga_known.clear();
+                if is_global {
+                    cp.mutated_globals.insert(idx);
+                } else {
+                    cp.mutated_locals.insert(idx);
+                }
+            }
             // A condition that became fully constant-FALSE through
             // substitution consumes the knowledge it used: the arm is elided
             // at emit time and MSC re-tests the same variable at runtime in
@@ -764,11 +787,28 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     chain = else_branch.as_deref();
                 }
             }
-            let mut sub = cp_clone(cp);
-            prop_stmt(then_branch, &mut sub);
-            if let Some(eb) = else_branch {
-                let mut sub2 = cp_clone(cp);
-                prop_stmt(eb, &mut sub2);
+            // A cond folded to a literal selects a live branch — only that
+            // branch is walked (the dead one is elided at emit and its writes
+            // never happen). Each walked branch propagates through an isolated
+            // clone so value knowledge doesn't leak across paths, but its
+            // MUTATION marks merge back: a (maybe-)taken write must strip the
+            // emit-time fold view, else `if (x) a = 1; return a + b` folds the
+            // return from a's stale decl init (fixture 2024).
+            let live = crate::codegen::statements::fold_cond_raw(cond, &[]);
+            let mut walk = |branch: &mut Stmt, cp: &mut ConstProp| {
+                let mut sub = cp_clone(cp);
+                prop_stmt(branch, &mut sub);
+                cp.mutated_locals.extend(sub.mutated_locals.iter().copied());
+                cp.mutated_globals.extend(sub.mutated_globals.iter().copied());
+                cp.loop_mutated_locals.extend(sub.loop_mutated_locals.iter().copied());
+            };
+            if live.is_none_or(|k| k != 0) {
+                walk(then_branch, cp);
+            }
+            if live.is_none_or(|k| k == 0)
+                && let Some(eb) = else_branch
+            {
+                walk(eb, cp);
             }
             // After a branch we don't know which path was taken.
             cp.g_known.clear();
