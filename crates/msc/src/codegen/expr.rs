@@ -1799,6 +1799,19 @@ fn simple_word_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     }
 }
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `x++ + K` / `++x + K` (and `- K`): a pre/post-increment leaves its value in
+    // AX, so MSC adds the trailing constant directly (`inc ax` / `add ax,K`)
+    // rather than parking K in BX first. Fixtures 970 (`g++ + 1`), 973 (`++g + 1`).
+    if matches!(op, BinOp::Add | BinOp::Sub)
+        && let Expr::IntLit(k) = right
+        && matches!(left,
+            Expr::PostMutateLocal { .. } | Expr::PostMutateGlobal { .. } | Expr::PostMutateParam { .. }
+            | Expr::PreMutateLocal { .. } | Expr::PreMutateGlobal { .. } | Expr::PreMutateParam { .. })
+    {
+        emit_expr_to_ax(left, locals, out, fixups);
+        emit_imm_op(op, *k, out);
+        return;
+    }
     // `make().a OP make().b` — two by-value struct-return field reads. Eval both
     // calls left-to-right (each spilling DX:AX to its temp), then combine: left's
     // field is reloaded from its temp (AX was clobbered by the 2nd call), right's
