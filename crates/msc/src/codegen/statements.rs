@@ -1359,6 +1359,20 @@ pub(crate) fn emit_return(
                 emit_expr_to_ax(expr, locals, out, fixups);
             }
         } else if let Expr::Ternary { cond, then_arm, else_arm } = expr
+            && let Some(c) = cond.fold(locals.inits)
+            && {
+                let arm = if c != 0 { then_arm } else { else_arm };
+                matches!(arm.as_ref(), Expr::Ternary { .. })
+            }
+        {
+            // A nested ternary whose OUTER condition folds (e.g. const-prop
+            // substituted `x=1`): select the arm and recurse so an inner runtime
+            // ternary reaches the two-epilogue structure rather than the shared-
+            // tail expr fallthrough. Fixture 2413 (`x?(y?10:20):(z?30:40)`).
+            let arm = if c != 0 { then_arm } else { else_arm };
+            emit_return(arm, locals, frame, return_int, return_long, out, fixups);
+            return;
+        } else if let Expr::Ternary { cond, then_arm, else_arm } = expr
             && cond.fold(locals.inits).is_none()
             && !is_ternary_select_operand(cond, then_arm, else_arm, locals)
         {
