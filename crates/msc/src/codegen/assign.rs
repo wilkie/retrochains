@@ -2880,6 +2880,18 @@ pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is
     // (Self-compound `arr[i] op= rhs` keeps the generic path below.) Fixture 3297.
     let is_self_compound = matches!(value, Expr::BinOp { left, .. }
         if matches!(left.as_ref(), Expr::Index { array, .. } | Expr::IndexByte { array, .. } if *array == global_idx));
+    // A const-foldable index (`int i = 1; a[i] = v`) resolves to a fixed element
+    // — delegate to the direct moffs const-index store. Fixture 305.
+    if !is_self_compound
+        && let Some(k) = index.fold(locals.inits)
+    {
+        let elem = if is_byte { 1 } else { locals.global_elem_size(global_idx).max(2) };
+        let byte_off = (k as u32).wrapping_mul(elem as u32) as u16;
+        if is_byte {
+            return emit_assign_indexed_global_byte(global_idx, byte_off, value, locals, out, fixups);
+        }
+        return emit_assign_indexed_global(global_idx, byte_off, value, locals, out, fixups);
+    }
     if locals.is_long_global(global_idx) && !is_self_compound {
         crate::codegen::expr::emit_load_bx(index, locals, out, fixups);
         out.extend_from_slice(&[0xD1, 0xE3, 0xD1, 0xE3]); // shl bx,1; shl bx,1
