@@ -22,6 +22,10 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     // `*d++ = *s++` reads the source through SI so dst (BX) survives.
                     || matches!(target, AssignTarget::DerefPostMutateParam { .. }
                         if matches!(value, Expr::PostIncDeref { .. }))
+                    // `p->f = q->g` (struct-pointer field copy) reads q->g via SI
+                    // so p (BX) survives the store. Fixture 1401.
+                    || (matches!(target, AssignTarget::DerefParamField { .. } | AssignTarget::DerefLocalField { .. })
+                        && matches!(value, Expr::DerefParamField { .. } | Expr::DerefLocalField { .. }))
                     || expr_si(value, inits)
             }
             Stmt::Return(e) => expr_si(e, inits),

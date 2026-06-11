@@ -3523,6 +3523,34 @@ pub(crate) fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, siz
         }
         return;
     }
+    // `p->f = q->g` (store through one struct pointer from a field deref of
+    // ANOTHER): keep p in BX (reusing a live BX from a preceding `t = p->f`),
+    // read the source via SI, then store. `mov bx,[p]; mov si,[q];
+    // mov ax,[si+g]; mov [bx+f],ax`. Fixture 1401 (struct-pointer swap).
+    if size != 4
+        && let Some((q_disp, g_off, src_byte)) = match value {
+            Expr::DerefParamField { ptr_param: q, byte_off: g, size: s } =>
+                Some((param_disp(*q), *g, *s == 1)),
+            Expr::DerefLocalField { ptr_local: q, byte_off: g, size: s } =>
+                Some((locals.disp(*q), *g, *s == 1)),
+            _ => None,
+        }
+        && (src_byte == (size == 1))
+    {
+        if !bx_holds_param_after_temp_copy(out, p_disp, locals.last_branch_barrier.get()) {
+            out.extend_from_slice(&[0x8B, 0x5E, p_disp as u8]); // mov bx,[bp+p]
+        }
+        out.push(0x8B); out.push(bp_modrm(0x76, q_disp)); push_bp_disp(out, q_disp); // mov si,[bp+q]
+        // mov ax/al,[si+g_off]
+        let load = if size == 1 { 0x8Au8 } else { 0x8B };
+        if g_off == 0 { out.extend_from_slice(&[load, 0x04]); }
+        else { out.extend_from_slice(&[load, 0x44, g_off as u8]); }
+        // mov [bx+f_off],ax/al
+        let store = if size == 1 { 0x88u8 } else { 0x89 };
+        if byte_off == 0 { out.extend_from_slice(&[store, 0x07]); }
+        else { out.extend_from_slice(&[store, 0x47, byte_off as u8]); }
+        return;
+    }
     out.push(0x8B);
     out.push(0x5E);
     out.push(p_disp as u8);
