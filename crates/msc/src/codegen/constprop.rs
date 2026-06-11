@@ -1065,6 +1065,25 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
         }
         Cond::And(a, b) => {
             prop_cond(a, cp);
+            // Left side of `&&` folded TRUE through substitution: the AND
+            // reduces to its right side (a TRUE fold keeps knowledge —
+            // mirroring the if/ternary rules). `if (a && ++b)` with a=1
+            // emits just the `++b` test (fixture 1238). But when the right
+            // side ALSO folds (the whole group resolves), keep the And node:
+            // an enclosing `||` keys its knowledge-consume on a failed `&&`
+            // GROUP (1358/1862).
+            if cp.substituted
+                && matches!(crate::codegen::statements::fold_cond_raw(a, &[]), Some(k) if k != 0)
+            {
+                let mut survivor = (**b).clone();
+                prop_cond(&mut survivor, cp);
+                if crate::codegen::statements::fold_cond_raw(&survivor, &[]).is_some() {
+                    **b = survivor;
+                } else {
+                    *cond = survivor;
+                }
+                return;
+            }
             prop_cond(b, cp);
         }
         Cond::Or(a, b) => {
