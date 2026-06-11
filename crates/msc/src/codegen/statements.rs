@@ -433,6 +433,14 @@ pub(crate) fn emit_stmt(
                 let stack = locals.loop_stack.borrow();
                 stack.last().map(|t| (t.breaks.len(), t.continues.len())).unwrap_or((0, 0))
             };
+            // `goto`/label entries recorded while the then-branch goes into the
+            // scratch buffer are buffer-relative; snapshot so they can be
+            // rebased once the buffer's position in `out` is known. Without
+            // this a nested `if (c) goto L;` backpatches a bogus offset,
+            // corrupting earlier bytes (fixture 441).
+            let lf_start = locals.label_fixups.borrow().len();
+            let labels_before: std::collections::HashSet<String> =
+                locals.labels.borrow().keys().cloned().collect();
             emit_stmt(then_branch, locals, frame, return_int, return_long, &mut then_buf, &mut then_fixups);
             let then_len = then_buf.len();
             // Alignment NOP: MSC aligns branch-target labels to even byte
@@ -475,7 +483,11 @@ pub(crate) fn emit_stmt(
             let merge_is_epilogue = locals.last_top_stmt.get()
                 && else_branch.is_none()
                 && !stmt_always_returns(then_branch, locals);
+            // A then-branch containing a `goto` suppresses the merge-alignment
+            // pad (441 — gold leaves the merge odd).
+            let then_has_goto = locals.label_fixups.borrow().len() > lf_start;
             let needs_nop = !merge_is_epilogue
+                && !then_has_goto
                 && (out.len() + cond_size + then_len + jmp_len) % 2 != 0;
             let nop_pad = usize::from(needs_nop);
             let take_then_disp = i8::try_from(then_len + jmp_len + nop_pad)
@@ -489,6 +501,16 @@ pub(crate) fn emit_stmt(
             for mut c in then_fixups {
                 c.body_offset += then_base;
                 fixups.push(c);
+            }
+            // Rebase then-branch goto fixups / label definitions into
+            // out-relative space (fixture 441).
+            if then_base != 0 {
+                for (_, pos) in locals.label_fixups.borrow_mut().iter_mut().skip(lf_start) {
+                    *pos += then_base;
+                }
+                for (name, pos) in locals.labels.borrow_mut().iter_mut() {
+                    if !labels_before.contains(name) { *pos += then_base; }
+                }
             }
             // Shift break/continue offsets recorded during the then
             // emit by `then_base` so they point at the correct bytes.
