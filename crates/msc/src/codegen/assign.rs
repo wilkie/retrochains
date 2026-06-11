@@ -2341,6 +2341,18 @@ pub(crate) fn emit_long_global_4byte(
         }
         return true;
     }
+    // In-place long compound with a non-const long RHS (`a[K] += y`): load the
+    // RHS into DX:AX, then `add/sub [lo],ax; adc/sbb [hi],dx`. Fixture 394.
+    if self_matches
+        && let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), right, .. } = value
+        && crate::codegen::calls::long_operand(right, locals)
+    {
+        crate::codegen::calls::emit_long_to_dx_ax(right, locals, out, fixups);
+        let (lo_op, hi_op) = if matches!(op, BinOp::Add) { (0x01u8, 0x11u8) } else { (0x29u8, 0x19u8) };
+        out.push(lo_op); out.push(0x06); put_addr(out, fixups, lo); // add/sub [lo], ax
+        out.push(hi_op); out.push(0x16); put_addr(out, fixups, hi); // adc/sbb [hi], dx
+        return true;
+    }
     // General long RHS (`a[K] = <long global/expr>`): evaluate into DX:AX and
     // store both words — `mov [lo],ax` / `mov [hi],dx`. Fixtures 361 (`a[1]=g`),
     // 359 (`a[1]=g+h`, a two-word add/adc through memory).
