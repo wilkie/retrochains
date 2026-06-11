@@ -350,6 +350,31 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             emit_cond_cmp_inner(&rewritten, locals, out, fixups);
             return;
         }
+        // `if (i++ < n)` — a POST-mutation on the LEFT compares the OLD value:
+        // load it into AX, bump the slot in place, then compare AX against the
+        // right-hand memory operand. Fixture 3527.
+        let post = match left {
+            Expr::PostMutateParam { param_idx, step }
+                if !locals.is_long_param(*param_idx) && !locals.is_char_param(*param_idx) =>
+                Some((param_disp(*param_idx), *step)),
+            Expr::PostMutateLocal { local_idx, step }
+                if locals.size(*local_idx) == 2 && !locals.is_long_local(*local_idx) =>
+                Some((locals.disp(*local_idx), *step)),
+            _ => None,
+        };
+        let right_mem = match right {
+            Expr::Param(i) if !locals.is_long_param(*i) && !locals.is_char_param(*i) =>
+                Some(param_disp(*i)),
+            Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i) =>
+                Some(locals.disp(*i)),
+            _ => None,
+        };
+        if let (Some((ld, step)), Some(rd)) = (post, right_mem) {
+            out.push(0x8B); out.push(bp_modrm(0x46, ld)); push_bp_disp(out, ld); // mov ax,[bp+ld]
+            crate::codegen::assign::emit_postmutate_local(step, 2, ld, out);     // inc/dec word [bp+ld]
+            out.push(0x3B); out.push(bp_modrm(0x46, rd)); push_bp_disp(out, rd); // cmp ax,[bp+rd]
+            return;
+        }
     }
     // Arithmetic result compared against zero — MSC reuses the ALU flags
     // rather than a separate compare:

@@ -336,7 +336,15 @@ pub(crate) fn emit_stmt(
             // handled before). Fixture 2434.
             let emit_else_jmp =
                 else_branch.is_some() && !stmt_always_returns(then_branch, locals);
-            let jmp_len = if emit_else_jmp { 2 } else { 0 };
+            // A void function whose FINAL statement is this if/else: the
+            // then-branch's over-else jmp would land on the trailing
+            // epilogue — MSC emits the epilogue inline instead (3614).
+            let then_tail_epilogue = emit_else_jmp
+                && final_top
+                && !return_int
+                && !return_long;
+            let epi_len = crate::codegen::func::epilogue_vec(frame, locals.pascal_cleanup).len();
+            let jmp_len = if then_tail_epilogue { epi_len } else if emit_else_jmp { 2 } else { 0 };
             // The alignment nop aligns the else-label (the je target), which
             // sits past the then-block and the over-else jmp. MSC omits it when
             // this is the function's last top-level statement with no else and a
@@ -377,7 +385,9 @@ pub(crate) fn emit_stmt(
             // size is known). It precedes the alignment nop so the nop lands
             // immediately before the else-label.
             let jmp_pos = out.len();
-            if emit_else_jmp {
+            if then_tail_epilogue {
+                crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
+            } else if emit_else_jmp {
                 out.push(0xEB);
                 out.push(0x00);
             }
@@ -385,7 +395,7 @@ pub(crate) fn emit_stmt(
             if let Some(else_branch) = else_branch {
                 emit_stmt(else_branch, locals, frame, return_int, return_long, out, fixups);
             }
-            if emit_else_jmp {
+            if emit_else_jmp && !then_tail_epilogue {
                 let disp = i8::try_from(out.len() - (jmp_pos + 2))
                     .expect("else-body short enough for jmp rel8");
                 out[jmp_pos + 1] = disp as u8;
