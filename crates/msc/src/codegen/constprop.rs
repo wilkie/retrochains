@@ -752,6 +752,42 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.g_known.clear();
                 cp.la_known.clear();
                 cp.ga_known.clear();
+                // Init-seeded knowledge also lives in the EMIT-time fold view
+                // (locals.inits) — mark the surviving else-if chain's cond
+                // reads as mutated so the emitter re-tests them at runtime,
+                // mirroring the ternary-chain rule. `if (a>0)...else if (a<0)`
+                // with `int a = 0;` elides the first arm but emits a real
+                // `cmp [a],0` for the second (fixture 1201).
+                fn mark_cond_reads(c: &Cond, cp: &mut ConstProp) {
+                    fn mark_expr(e: &Expr, cp: &mut ConstProp) {
+                        match e {
+                            Expr::Local(i) => { cp.mutated_locals.insert(*i); }
+                            Expr::Global(g) => { cp.mutated_globals.insert(*g); }
+                            Expr::BinOp { left, right, .. } => {
+                                mark_expr(left, cp);
+                                mark_expr(right, cp);
+                            }
+                            Expr::CastChar { value, .. } => mark_expr(value, cp),
+                            _ => {}
+                        }
+                    }
+                    match c {
+                        Cond::Truthy(e) => mark_expr(e, cp),
+                        Cond::Cmp { left, right, .. } => {
+                            mark_expr(left, cp);
+                            mark_expr(right, cp);
+                        }
+                        Cond::And(a, b) | Cond::Or(a, b) => {
+                            mark_cond_reads(a, cp);
+                            mark_cond_reads(b, cp);
+                        }
+                    }
+                }
+                let mut chain: Option<&Stmt> = else_branch.as_deref();
+                while let Some(Stmt::If { cond, else_branch, .. }) = chain {
+                    mark_cond_reads(cond, cp);
+                    chain = else_branch.as_deref();
+                }
             }
             let mut sub = cp_clone(cp);
             prop_stmt(then_branch, &mut sub);
