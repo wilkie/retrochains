@@ -2387,6 +2387,19 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                                 op: BinOp::Eq | BinOp::Ne | BinOp::Lt
                                     | BinOp::Le | BinOp::Gt | BinOp::Ge, ..
                             }))
+                        // Ternary CHAIN whose folding cond survives into a
+                        // nested ternary arm: the fold CONSUMES the knowledge
+                        // (the surviving arm re-tests at runtime), so the init
+                        // must not collapse to a literal — route it through
+                        // the runtime-assign prelude where const-prop applies
+                        // the chain rule. Fixture 1824.
+                        || matches!(&init_expr, Expr::Ternary { cond, then_arm, else_arm }
+                            if matches!(cond.as_ref(), Expr::BinOp {
+                                op: BinOp::Eq | BinOp::Ne | BinOp::Lt
+                                    | BinOp::Le | BinOp::Gt | BinOp::Ge, ..
+                            }) && cond.fold(&init_view).is_some_and(|c| matches!(
+                                if c != 0 { then_arm.as_ref() } else { else_arm.as_ref() },
+                                Expr::Ternary { .. })))
                         // An init containing an assignment-expression has a SIDE
                         // EFFECT (the inner store); folding it to a constant would
                         // drop that store. Keep it a runtime assign. Fixture 1217.

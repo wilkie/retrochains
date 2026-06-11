@@ -2837,6 +2837,28 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             left: left.clone(),
             right: right.clone(),
         };
+        // `x == 0` / `x != 0` of a word local/param value: the branchless
+        // carry trick `cmp word [x],1; sbb ax,ax` then `neg ax` (==0) or
+        // `inc ax` (!=0) — same shape as the return path. Fixture 1824.
+        if matches!(op, BinOp::Eq | BinOp::Ne)
+            && right.fold(locals.inits) == Some(0)
+            && let Some(disp) = match left {
+                Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i)
+                    && !locals.is_float_param(*i) => Some(param_disp(*i)),
+                Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i)
+                    && !locals.is_float_local(*i) => Some(locals.disp(*i)),
+                _ => None,
+            }
+        {
+            out.push(0x83); out.push(bp_modrm(0x7E, disp)); push_bp_disp(out, disp); out.push(0x01); // cmp word [bp+d],1
+            out.extend_from_slice(&[0x1B, 0xC0]); // sbb ax,ax
+            if matches!(op, BinOp::Eq) {
+                out.extend_from_slice(&[0xF7, 0xD8]); // neg ax → 1 iff x==0
+            } else {
+                out.push(0x40); // inc ax → 1 iff x!=0
+            }
+            return;
+        }
         // MSC's two-label boolean shape:
         //   <cmp>; jcc-FALSE L1; mov ax,1; jmp short L2; L1: sub ax,ax; L2:
         // The inverted (false-sense) jcc skips the `mov ax,1; jmp short`

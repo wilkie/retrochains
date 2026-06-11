@@ -1409,6 +1409,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         }
         Expr::Ternary { cond, then_arm, else_arm } => {
             // Substitute into the condition so fold() can determine the branch.
+            cp.substituted = false;
             prop_expr(cond, cp);
             // A COMPARISON-cond ternary whose arms both propagate to literals
             // folds to a constant (assignment emits an immediate store, return
@@ -1416,21 +1417,84 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // 588 (globals). Truthy-cond ternaries keep their arms as runtime
             // loads (fixture 1038), and compound arms (e.g. `-a`) stay non-
             // literal so the load / two-epilogue paths still fire (fixture 430).
-            let mut replacement = None;
             if matches!(cond.as_ref(), Expr::BinOp { op, .. }
                 if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge))
                 && let Some(c) = cond.fold(&[])
             {
-                let mut t = (**then_arm).clone();
-                prop_expr(&mut t, cp);
-                let mut e2 = (**else_arm).clone();
-                prop_expr(&mut e2, cp);
-                if let (Expr::IntLit(tv), Expr::IntLit(ev)) = (&t, &e2) {
-                    replacement = Some(if c != 0 { *tv } else { *ev });
+                let surviving = if c != 0 { &*then_arm } else { &*else_arm };
+                if matches!(surviving.as_ref(), Expr::Ternary { .. }) {
+                    // Ternary CHAIN: the folded cond collapses to its
+                    // surviving ternary arm — and, mirroring the if-statement
+                    // rule, a FALSE fold CONSUMES the knowledge it used, so
+                    // the surviving arm's conds re-test at runtime (1824
+                    // `x<0 ? -1 : (x==0?0:1)` keeps the inner runtime; 1435
+                    // chained `a==K` arms after the dropped one emit cmp/jne;
+                    // 2272). A TRUE fold keeps values — the surviving chain
+                    // continues folding (2344 collapses fully to a literal).
+                    if c == 0 && cp.substituted {
+                        cp.l_known.clear();
+                        cp.g_known.clear();
+                        cp.la_known.clear();
+                        cp.ga_known.clear();
+                        // Init-seeded knowledge also lives in the EMIT-time
+                        // fold view (locals.inits / globals); mark the
+                        // surviving chain's reads as mutated so the emitter
+                        // re-tests them at runtime too (1824/1435/2272).
+                        fn mark_reads(e: &Expr, cp: &mut ConstProp) {
+                            match e {
+                                Expr::Local(i) => { cp.mutated_locals.insert(*i); }
+                                Expr::Global(g) => { cp.mutated_globals.insert(*g); }
+                                Expr::BinOp { left, right, .. } => {
+                                    mark_reads(left, cp);
+                                    mark_reads(right, cp);
+                                }
+                                Expr::Ternary { cond, then_arm, else_arm } => {
+                                    mark_reads(cond, cp);
+                                    mark_reads(then_arm, cp);
+                                    mark_reads(else_arm, cp);
+                                }
+                                Expr::CastChar { value, .. } => mark_reads(value, cp),
+                                _ => {}
+                            }
+                        }
+                        mark_reads(surviving, cp);
+                    }
+                    let mut arm = (**surviving).clone();
+                    prop_expr(&mut arm, cp);
+                    // `v==0 ? 0 : 1` (and `v!=0 ? 1 : 0`) is the boolean
+                    // value of `v != 0` — MSC emits the branchless carry
+                    // trick (`cmp v,1; sbb ax,ax; inc ax`), same as `!!v`.
+                    // Fixture 1824.
+                    if let Expr::Ternary { cond, then_arm, else_arm } = &arm
+                        && let Expr::BinOp { op, left, right } = cond.as_ref()
+                        && matches!(right.as_ref(), Expr::IntLit(0))
+                        && ((matches!(op, BinOp::Eq)
+                            && matches!(then_arm.as_ref(), Expr::IntLit(0))
+                            && matches!(else_arm.as_ref(), Expr::IntLit(1)))
+                            || (matches!(op, BinOp::Ne)
+                                && matches!(then_arm.as_ref(), Expr::IntLit(1))
+                                && matches!(else_arm.as_ref(), Expr::IntLit(0))))
+                    {
+                        arm = Expr::BinOp {
+                            op: BinOp::Ne,
+                            left: left.clone(),
+                            right: Box::new(Expr::IntLit(0)),
+                        };
+                    }
+                    *e = arm;
+                } else {
+                    // Simple arms: collapse only when BOTH propagate to
+                    // literals (2670 `x=a>b?a:b` → immediate store; 588).
+                    // Non-literal arms keep the runtime ternary so the
+                    // emit-time load / two-epilogue paths fire (430, 1350).
+                    let mut t = (**then_arm).clone();
+                    prop_expr(&mut t, cp);
+                    let mut e2 = (**else_arm).clone();
+                    prop_expr(&mut e2, cp);
+                    if let (Expr::IntLit(tv), Expr::IntLit(ev)) = (&t, &e2) {
+                        *e = Expr::IntLit(if c != 0 { *tv } else { *ev });
+                    }
                 }
-            }
-            if let Some(v) = replacement {
-                *e = Expr::IntLit(v);
             }
         }
         Expr::Seq { sides, value } => {
