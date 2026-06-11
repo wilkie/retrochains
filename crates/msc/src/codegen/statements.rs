@@ -2590,13 +2590,25 @@ pub(crate) fn emit_partial_switch_with_continuation(
         .or_else(|| cases.iter().find(|a| a.value.is_none()));
 
     // Pre-emit a case arm body (stopping at Break), returning (bytes, fixups, terminates).
-    let emit_arm = |arm: Option<&SwitchArm>| -> (Vec<u8>, Vec<Fixup>, bool) {
+    // `known_ax` is the value AX is known to hold at the arm's entry (the scrutinee
+    // constant, for the fall-through arm): a leading `return K` of that same value
+    // skips its `mov ax,K` — AX already holds it. Fixture 3971.
+    let emit_arm = |arm: Option<&SwitchArm>, known_ax: Option<i32>| -> (Vec<u8>, Vec<Fixup>, bool) {
         let mut b: Vec<u8> = Vec::new();
         let mut f: Vec<Fixup> = Vec::new();
         let mut term = false;
         if let Some(arm) = arm {
-            for s in &arm.body {
+            for (si, s) in arm.body.iter().enumerate() {
                 if matches!(s, Stmt::Break) { break; }
+                if si == 0
+                    && return_int && !return_long
+                    && let Stmt::Return(Expr::IntLit(v)) = s
+                    && known_ax == Some(*v)
+                {
+                    crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, &mut b);
+                    term = true;
+                    break;
+                }
                 emit_stmt(s, locals, frame, return_int, return_long, &mut b, &mut f);
                 if stmt_always_returns(s, locals) { term = true; break; }
             }
@@ -2604,9 +2616,9 @@ pub(crate) fn emit_partial_switch_with_continuation(
         (b, f, term)
     };
 
-    let (ft_bytes, ft_fxs, ft_term) = emit_arm(ft_arm);
+    let (ft_bytes, ft_fxs, ft_term) = emit_arm(ft_arm, Some(k));
     let nfc_bufs: Vec<(Vec<u8>, Vec<Fixup>, bool)> =
-        nfc_arms.iter().map(|arm| emit_arm(Some(arm))).collect();
+        nfc_arms.iter().map(|arm| emit_arm(Some(arm), None)).collect();
 
     // need_cont: true when any body doesn't terminate (→ continuation needed).
     let need_cont = !ft_term || nfc_bufs.iter().any(|(_, _, t)| !t);
