@@ -937,6 +937,18 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             let bo = out.len() + 1; out.extend_from_slice(&[0x8B, 0x16]); out.extend_from_slice(&(lo + 2).to_le_bytes()); // mov dx, [a+lo+2]
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *array } });
         }
+        // Runtime-index long LOCAL array element `arr[i]`: scale the index ×4
+        // through SI and read both words at [bp+si+disp] / [bp+si+disp+2].
+        // Fixture 2798 (`return arr[i]`).
+        Expr::LocalIndex { local, index } if locals.is_long_local(*local) => {
+            let (var, koff) = crate::codegen::expr::split_index_offset(index);
+            crate::codegen::expr::emit_load_si(var, locals, out, fixups); // mov si,[i]
+            out.extend_from_slice(&[0xD1, 0xE6, 0xD1, 0xE6]); // shl si,1; shl si,1
+            let lo = locals.disp(*local) + (koff.wrapping_mul(4)) as i16;
+            let hi = lo + 2;
+            out.push(0x8B); out.push(bp_modrm(0x42, lo)); push_bp_disp(out, lo); // mov ax,[bp+si+lo]
+            out.push(0x8B); out.push(bp_modrm(0x52, hi)); push_bp_disp(out, hi); // mov dx,[bp+si+hi]
+        }
         // Runtime-index long array element `a[i]`: scale the index ×4 (two
         // `shl bx,1`) and read both pointee words at [bx+a] / [bx+a+2]. Fixture
         // 3288 (`return arr[i]`).

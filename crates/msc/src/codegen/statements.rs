@@ -1188,7 +1188,9 @@ pub(crate) fn emit_return(
             out.extend_from_slice(&[0x8B, 0x56, hi_disp]); // mov dx, [bp+hi]
             crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
-        } else if let Expr::LocalIndex { local: l, index } = expr {
+        } else if let Expr::LocalIndex { local: l, index } = expr
+            && !locals.is_long_local(*l)
+        {
             let k = index.fold(locals.inits).unwrap_or(0);
             let word_disp = locals.disp(*l) + k as i16 * 2;
             let prev_store = {
@@ -1533,7 +1535,8 @@ pub(crate) fn emit_return(
                 || is_long_const_bitop(expr, locals)
                 || is_long_muldiv(expr, locals)
                 || is_long_field_elem_or_const_arith(expr, locals)
-                || matches!(expr, Expr::Index { array, .. } if locals.is_long_global(*array)))
+                || matches!(expr, Expr::Index { array, .. } if locals.is_long_global(*array))
+                || matches!(expr, Expr::LocalIndex { local, .. } if locals.is_long_local(*local)))
         {
             // `return <long> <op> ..` lowered across DX:AX (shift-by-1,
             // inline 2-word arithmetic, or a mul/div/mod helper call).
