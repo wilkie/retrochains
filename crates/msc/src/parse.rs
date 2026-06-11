@@ -1148,6 +1148,11 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 let v = parse_signed_int(p)?;
                 if is_char && !is_pointer {
                     values.push(GlobalInit::Byte((v as u32 & 0xFF) as u8));
+                } else if is_long && !is_pointer {
+                    // A `long` array element occupies two _DATA words (low, high),
+                    // matching the scalar-long [Int(low), Int(high)] modeling.
+                    values.push(GlobalInit::Int((v as u32 & 0xFFFF) as i32));
+                    values.push(GlobalInit::Int((((v as u32) >> 16) & 0xFFFF) as i32));
                 } else {
                     values.push(GlobalInit::Int(v));
                 }
@@ -1164,7 +1169,10 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             // Partial initializer (`int a[5] = {1,2}`): zero-fill to the declared
             // array length — MSC emits the trailing zeros explicitly in _DATA.
             // Fixtures 502, 2093, 2453.
-            while values.len() < array_len {
+            // A long array stores two _DATA words per element, so the slot
+            // target is 2*array_len; non-long types use one slot per element.
+            let slot_target = if is_long && !is_pointer { array_len * 2 } else { array_len };
+            while values.len() < slot_target {
                 values.push(if is_float && !is_pointer {
                     GlobalInit::FloatBits(0, float_width)
                 } else if is_char && !is_pointer {
