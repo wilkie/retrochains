@@ -1190,8 +1190,9 @@ pub(crate) fn emit_return(
             return;
         } else if let Expr::LocalIndex { local: l, index } = expr
             && !locals.is_long_local(*l)
+            && index.fold(locals.inits).is_some()
         {
-            let k = index.fold(locals.inits).unwrap_or(0);
+            let k = index.fold(locals.inits).unwrap();
             let word_disp = locals.disp(*l) + k as i16 * 2;
             let prev_store = {
                 let mr = bp_modrm(0x46, word_disp);
@@ -1208,8 +1209,10 @@ pub(crate) fn emit_return(
             }
             crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
-        } else if let Expr::LocalIndexByte { local: l, index } = expr {
-            let k = index.fold(locals.inits).unwrap_or(0);
+        } else if let Expr::LocalIndexByte { local: l, index } = expr
+            && index.fold(locals.inits).is_some()
+        {
+            let k = index.fold(locals.inits).unwrap();
             let byte_disp = locals.disp(*l) + k as i16;
             let prev_store = {
                 let mr = bp_modrm(0x46, byte_disp);
