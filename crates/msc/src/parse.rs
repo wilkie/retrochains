@@ -2384,7 +2384,14 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         // does not const-propagate through such a char cast. The
                         // shared rule (operand simple, sign/target gating) lives in
                         // codegen. Fixture 1524.
-                        || (size == 2 && crate::codegen::cast_rhs_needs_al_form(&init_expr, true));
+                        || (size == 2 && crate::codegen::cast_rhs_needs_al_form(&init_expr, true))
+                        // An `(int)`/`(unsigned int)`/`(char)` TYPE-cast of a value
+                        // that depends on a VARIABLE is not const-folded — MSC reads
+                        // the operand at runtime (no propagation through the cast).
+                        // `int r = (int)c` → `cbw; mov [r],ax` (reusing live AL), not
+                        // `mov [r],imm`. A cast of a PURE constant expression
+                        // (`(int)(5+3)`) still folds. Fixtures 2219 (var) vs 1614 (const).
+                        || (init_via_type_cast && init_expr.fold(&[]).is_none());
                     let fold_k = if skip_fold { None } else { init_expr.fold(&init_view) };
                     if let Some(k) = fold_k {
                         locals[local_idx].init = Some(k);
