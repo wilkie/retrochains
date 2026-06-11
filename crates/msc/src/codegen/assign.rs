@@ -2874,6 +2874,34 @@ pub(crate) fn global_index_rhs_uses_si(target: &AssignTarget, value: &Expr, init
     false
 }
 pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is_byte: bool, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Runtime-index long array element store `arr[i] = <long>`: scale the index
+    // ×4 (two `shl bx,1`) and write both words at [bx+arr] / [bx+arr+2]. A known
+    // constant uses two `c7` immediates; a runtime long evaluates into DX:AX.
+    // (Self-compound `arr[i] op= rhs` keeps the generic path below.) Fixture 3297.
+    let is_self_compound = matches!(value, Expr::BinOp { left, .. }
+        if matches!(left.as_ref(), Expr::Index { array, .. } | Expr::IndexByte { array, .. } if *array == global_idx));
+    if locals.is_long_global(global_idx) && !is_self_compound {
+        crate::codegen::expr::emit_load_bx(index, locals, out, fixups);
+        out.extend_from_slice(&[0xD1, 0xE3, 0xD1, 0xE3]); // shl bx,1; shl bx,1
+        let store_word = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, opcode_modrm: [u8; 2], off: u16, imm: Option<u16>| {
+            out.extend_from_slice(&opcode_modrm);
+            let dp = out.len();
+            out.extend_from_slice(&off.to_le_bytes());
+            fixups.push(Fixup { body_offset: dp - 1, kind: FixupKind::GlobalAddr { global_idx } });
+            if let Some(v) = imm { out.extend_from_slice(&v.to_le_bytes()); }
+        };
+        if let Some(k) = value.fold(locals.inits) {
+            let low = (k as u32 & 0xFFFF) as u16;
+            let high = (((k as i32) >> 16) as u32 & 0xFFFF) as u16;
+            store_word(out, fixups, [0xC7, 0x87], 0, Some(low));   // mov word [bx+arr],   lo
+            store_word(out, fixups, [0xC7, 0x87], 2, Some(high));  // mov word [bx+arr+2], hi
+        } else {
+            crate::codegen::calls::emit_long_to_dx_ax(value, locals, out, fixups);
+            store_word(out, fixups, [0x89, 0x87], 0, None);        // mov [bx+arr],   ax
+            store_word(out, fixups, [0x89, 0x97], 2, None);        // mov [bx+arr+2], dx
+        }
+        return;
+    }
     // Self-compound `arr[i] += rhs` / `arr[i]++` → in-place op at [bx + &arr].
     if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
         && matches!(left.as_ref(), Expr::IndexByte { array, .. } | Expr::Index { array, .. } if *array == global_idx)
