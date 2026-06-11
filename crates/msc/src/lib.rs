@@ -2124,6 +2124,20 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
         }
     }
+    // MSC lists EXTDEF externs in SOURCE-appearance order (prototype position),
+    // not codegen first-reference order. These differ for nested calls like
+    // `f(g(x))`, where g is emitted first but f is declared first. Stable-sort
+    // by `fn_appearance` index; an extern with no prototype (implicit, e.g.
+    // `printf`) has no appearance slot and stays after the declared ones in
+    // first-reference order. Fixtures 2804, 3361.
+    {
+        let appearance_pos = |sym: &str| -> usize {
+            unit.fn_appearance.iter()
+                .position(|n| symbol_name(n) == sym)
+                .unwrap_or(usize::MAX)
+        };
+        user_extern_order.sort_by_key(|s| appearance_pos(s));
+    }
 
     // Runtime-helper externs referenced via ExtCall (e.g. __aNNalshl for long
     // shift compound-assign). These sit right after __chkstk in the EXTDEF
