@@ -251,6 +251,10 @@ pub struct Function {
     /// left-to-right, params sit in reversed stack slots, and the callee cleans
     /// the arguments via `ret N`. Fixtures 1653/2062/2063/2065/2246.
     pub is_pascal: bool,
+    /// `static` storage class — the function is TU-private. Its OMF symbol is
+    /// the bare C name (no leading `_`) and it is published via LEXTDEF (0xB4) /
+    /// LPUBDEF (0xB6) records rather than EXTDEF/PUBDEF. Fixtures 1708/1916/2155.
+    pub is_static: bool,
 }
 
 /// A function-local variable's storage descriptor. `size` is bytes
@@ -481,6 +485,10 @@ pub struct Locals<'a> {
     /// Callers push their args left-to-right and skip the `add sp` cleanup
     /// (the callee pops them via `ret N`). Fixtures 1653/2063.
     pub pascal_fns: &'a std::collections::HashSet<String>,
+    /// Set of `static` function names. A call to one resolves to the bare OMF
+    /// symbol (no leading `_`), matching the LEXTDEF/LPUBDEF name. Fixtures
+    /// 1708/1916/2155.
+    pub static_fns: &'a std::collections::HashSet<String>,
     /// When the CURRENT function is `pascal`, the byte count its epilogue must
     /// pop via `ret N` (total argument bytes); 0 for a cdecl function.
     pub pascal_cleanup: u16,
@@ -1804,6 +1812,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .filter(|f| f.is_pascal)
         .map(|f| f.name.clone())
         .collect();
+    // Keyed by BARE C name so emit_call can detect a static callee and resolve
+    // it to its underscore-free OMF symbol (fixtures 1708/1916/2155).
+    let static_fns: std::collections::HashSet<String> = unit.functions.iter()
+        .filter(|f| f.is_static)
+        .map(|f| f.name.clone())
+        .collect();
     let mut long_param_funcs: std::collections::HashMap<String, Vec<bool>> = unit.functions.iter()
         .filter(|f| f.param_is_long.iter().any(|&b| b))
         .map(|f| (fn_symbol(f), f.param_is_long.clone()))
@@ -1849,7 +1863,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .functions
         .iter()
         .enumerate()
-        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &pascal_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &pascal_fns, &static_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -2212,22 +2226,30 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let mut extdef_idx_of: std::collections::HashMap<String, u8> =
         std::collections::HashMap::new();
     let mut next_idx: u8 = 1;
+    // Each entry is (name, type-byte, is_local). A `static` function is a LOCAL
+    // external — MSC emits a contiguous run of locals in an LEXTDEF (0xB4) record
+    // rather than EXTDEF (0x8C), splitting the symbol stream whenever the
+    // locality flips (fixtures 1708/1916/2155). Both record types share the same
+    // 1-based external index space, so the index map is filled across the split.
     let emit_group = |b: &mut ObjBuilder,
-                          entries: &[(String, u8)],
+                          entries: &[(String, u8, bool)],
                           idx_map: &mut std::collections::HashMap<String, u8>,
                           start: &mut u8| {
-        if entries.is_empty() {
-            return;
+        let mut i = 0;
+        while i < entries.len() {
+            let is_local = entries[i].2;
+            let mut payload = Vec::new();
+            while i < entries.len() && entries[i].2 == is_local {
+                let (name, ty, _) = &entries[i];
+                payload.push(u8::try_from(name.len()).expect("EXTDEF name fits"));
+                payload.extend_from_slice(name.as_bytes());
+                payload.push(*ty);
+                idx_map.insert(name.clone(), *start);
+                *start += 1;
+                i += 1;
+            }
+            b.write_record(if is_local { obj::LEXTDEF } else { obj::EXTDEF }, &payload);
         }
-        let mut payload = Vec::new();
-        for (name, ty) in entries {
-            payload.push(u8::try_from(name.len()).expect("EXTDEF name fits"));
-            payload.extend_from_slice(name.as_bytes());
-            payload.push(*ty);
-            idx_map.insert(name.clone(), *start);
-            *start += 1;
-        }
-        b.write_record(obj::EXTDEF, &payload);
     };
     // Helper: emit COMDEF record for tentative globals.
     let emit_comdef = |b: &mut ObjBuilder,
@@ -2260,31 +2282,31 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             // No splits — single combined EXTDEF.
             // Extern globals (from `extern int g;`) go between __chkstk
             // and defined-function names. Fixtures 163, 1959, 2157, 4041.
-            let mut entries: Vec<(String, u8)> = Vec::new();
+            let mut entries: Vec<(String, u8, bool)> = Vec::new();
             // FP-emulator marker block precedes __acrtused when the unit uses
             // floating point (matches MSC's EXTDEF layout). FIDRQQ/FIWRQQ are
             // referenced by per-instruction marker fixups.
             for (m, ty) in fp_extern_block(uses_float) {
-                entries.push(((*m).to_owned(), *ty));
+                entries.push(((*m).to_owned(), *ty, false));
             }
-            entries.push(("__acrtused".to_owned(), 0x01));
+            entries.push(("__acrtused".to_owned(), 0x01, false));
             // A function-less TU (only global data) has no code that calls
             // chkstk, so MSC omits its EXTDEF. Fixtures 3657/3660/3680.
             if !unit.functions.is_empty() {
-                entries.push(("__chkstk".to_owned(), 0x00));
+                entries.push(("__chkstk".to_owned(), 0x00, false));
             }
             for h in &helper_extern_order {
                 if float_helpers_trailing && is_float_helper(h) { continue; }
-                entries.push((h.clone(), 0x00));
+                entries.push((h.clone(), 0x00, false));
             }
             for &gi in &extern_globals {
-                entries.push((symbol_name(&unit.globals[gi].name), 0x00));
+                entries.push((symbol_name(&unit.globals[gi].name), 0x00, false));
             }
             for sym in &extern_funcs {
-                entries.push((sym.clone(), 0x00));
+                entries.push((sym.clone(), 0x00, false));
             }
             for &fi in &fn_order {
-                entries.push((fn_symbol(&unit.functions[fi]), 0x00));
+                entries.push((fn_symbol(&unit.functions[fi]), 0x00, unit.functions[fi].is_static));
             }
             // The float runtime externs (`__ftol`/`__fac`) trail the function
             // names when a function uses >=3 float CONST temps, in their
@@ -2292,7 +2314,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             if float_helpers_trailing {
                 for h in &helper_extern_order {
                     if is_float_helper(h) {
-                        entries.push((h.clone(), 0x00));
+                        entries.push((h.clone(), 0x00, false));
                     }
                 }
             }
@@ -2306,27 +2328,27 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             // an implicitly-declared extern (called with only a swallowed
             // `#include`, no prototype — fixture 4103) keeps `__chkstk` LAST.
             let chkstk_early = user_extern_order.iter().all(|n| unit.prototyped_fns.contains(n));
-            let mut entries: Vec<(String, u8)> = Vec::new();
+            let mut entries: Vec<(String, u8, bool)> = Vec::new();
             for (m, ty) in fp_extern_block(uses_float) {
-                entries.push(((*m).to_owned(), *ty));
+                entries.push(((*m).to_owned(), *ty, false));
             }
-            entries.push(("__acrtused".to_owned(), 0x01));
+            entries.push(("__acrtused".to_owned(), 0x01, false));
             if chkstk_early {
-                entries.push(("__chkstk".to_owned(), 0x00));
+                entries.push(("__chkstk".to_owned(), 0x00, false));
                 for h in &helper_extern_order {
-                    entries.push((h.clone(), 0x00));
+                    entries.push((h.clone(), 0x00, false));
                 }
             }
             for name in &user_extern_order {
-                entries.push((name.clone(), 0x00));
+                entries.push((name.clone(), 0x00, false));
             }
             for &fi in &fn_order {
-                entries.push((fn_symbol(&unit.functions[fi]), 0x00));
+                entries.push((fn_symbol(&unit.functions[fi]), 0x00, unit.functions[fi].is_static));
             }
             if !chkstk_early {
-                entries.push(("__chkstk".to_owned(), 0x00));
+                entries.push(("__chkstk".to_owned(), 0x00, false));
                 for h in &helper_extern_order {
-                    entries.push((h.clone(), 0x00));
+                    entries.push((h.clone(), 0x00, false));
                 }
             }
             emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
@@ -2361,31 +2383,31 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
         }
         // EXTDEF1: __acrtused, __chkstk, helpers, [functions before the COMDEF]
-        let mut pre: Vec<(String, u8)> = Vec::new();
+        let mut pre: Vec<(String, u8, bool)> = Vec::new();
         for (m, ty) in fp_extern_block(uses_float) {
-            pre.push(((*m).to_owned(), *ty));
+            pre.push(((*m).to_owned(), *ty, false));
         }
-        pre.push(("__acrtused".to_owned(), 0x01));
+        pre.push(("__acrtused".to_owned(), 0x01, false));
         // Function-less TU: no code calls chkstk, so MSC omits its EXTDEF.
         if !unit.functions.is_empty() {
-            pre.push(("__chkstk".to_owned(), 0x00));
+            pre.push(("__chkstk".to_owned(), 0x00, false));
         }
         for h in &helper_extern_order {
-            pre.push((h.clone(), 0x00));
+            pre.push((h.clone(), 0x00, false));
         }
         for &fi in &funcs_before {
-            pre.push((fn_symbol(&unit.functions[fi]), 0x00));
+            pre.push((fn_symbol(&unit.functions[fi]), 0x00, unit.functions[fi].is_static));
         }
         emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
         // COMDEF: tentative globals
         emit_comdef(&mut b, &mut extdef_idx_of, &mut next_idx);
         // EXTDEF2: user-fn-externs + [functions after the COMDEF]
-        let mut post: Vec<(String, u8)> = Vec::new();
+        let mut post: Vec<(String, u8, bool)> = Vec::new();
         for name in &user_extern_order {
-            post.push((name.clone(), 0x00));
+            post.push((name.clone(), 0x00, false));
         }
         for &fi in &funcs_after {
-            post.push((fn_symbol(&unit.functions[fi]), 0x00));
+            post.push((fn_symbol(&unit.functions[fi]), 0x00, unit.functions[fi].is_static));
         }
         emit_group(&mut b, &post, &mut extdef_idx_of, &mut next_idx);
     }
@@ -2399,14 +2421,16 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // Buckets:
     //   _TEXT: (group 0, seg 1) — functions
     //   _DATA: (group 1 = DGROUP, seg 2) — initialized globals
-    let mut current: Option<(u8, u8, Vec<u8>)> = None;
-    let flush = |b: &mut ObjBuilder, cur: &mut Option<(u8, u8, Vec<u8>)>| {
-        if let Some((grp, seg, payload)) = cur.take() {
+    // A `static` function publishes via LPUBDEF (0xB6) rather than PUBDEF; the
+    // walk starts a new record whenever (group, segment, locality) changes.
+    let mut current: Option<(u8, u8, bool, Vec<u8>)> = None;
+    let flush = |b: &mut ObjBuilder, cur: &mut Option<(u8, u8, bool, Vec<u8>)>| {
+        if let Some((grp, seg, is_local, payload)) = cur.take() {
             let mut rec = Vec::with_capacity(payload.len() + 2);
             rec.push(grp);
             rec.push(seg);
             rec.extend_from_slice(&payload);
-            b.write_record(obj::PUBDEF_16, &rec);
+            b.write_record(if is_local { obj::LPUBDEF_16 } else { obj::PUBDEF_16 }, &rec);
         }
     };
     // Walk decls in PUBDEF order: functions in first-appearance order, globals
@@ -2426,7 +2450,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             .collect()
     };
     for entry in &pub_walk {
-        let (grp, seg, sym, off) = match entry {
+        let (grp, seg, sym, off, is_local) = match entry {
             TopDecl::Global(i) => {
                 // `static` globals are TU-private — skip PUBDEF.
                 if unit.globals[*i].is_static { continue; }
@@ -2435,26 +2459,26 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     let Some(off) = const_global_offsets[*i] else { continue };
                     let sym = symbol_name(&unit.globals[*i].name);
                     let off = u16::try_from(off).expect("offset fits");
-                    (1u8, 3u8, sym, off)
+                    (1u8, 3u8, sym, off, false)
                 } else {
                     let Some(off) = data_offsets[*i] else { continue };
                     let sym = symbol_name(&unit.globals[*i].name);
                     let off = u16::try_from(off).expect("offset fits");
-                    (1u8, 2u8, sym, off)
+                    (1u8, 2u8, sym, off, false)
                 }
             }
             TopDecl::Function(i) => {
                 let sym = fn_symbol(&unit.functions[*i]);
                 let off = u16::try_from(function_offsets[*i]).expect("offset fits");
-                (0u8, 1u8, sym, off)
+                (0u8, 1u8, sym, off, unit.functions[*i].is_static)
             }
         };
-        let same_bucket = matches!(&current, Some((g, s, _)) if *g == grp && *s == seg);
+        let same_bucket = matches!(&current, Some((g, s, l, _)) if *g == grp && *s == seg && *l == is_local);
         if !same_bucket {
             flush(&mut b, &mut current);
-            current = Some((grp, seg, Vec::new()));
+            current = Some((grp, seg, is_local, Vec::new()));
         }
-        let payload = &mut current.as_mut().unwrap().2;
+        let payload = &mut current.as_mut().unwrap().3;
         payload.push(u8::try_from(sym.len()).expect("pubdef name fits"));
         payload.extend_from_slice(sym.as_bytes());
         payload.extend_from_slice(&off.to_le_bytes());

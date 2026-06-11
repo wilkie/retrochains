@@ -1446,6 +1446,20 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         }
         found
     };
+    // Detect the `static` storage class in the same declarator prefix. A static
+    // function is TU-private: bare OMF name (no `_`), LEXTDEF/LPUBDEF records.
+    let is_static_fn = {
+        let mut j = p.pos;
+        let mut found = false;
+        while let Some(t) = p.toks.get(j) {
+            match t {
+                Tok::LParen => break,
+                Tok::Kw("static") => { found = true; break; }
+                _ => j += 1,
+            }
+        }
+        found
+    };
     let had_mod = skip_decl_modifiers(p) > 0;
     let mut return_char = false;
     let mut return_long = false;
@@ -2449,7 +2463,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // while the body was parsed. For functions without nested-block
     // declarations the two are identical.
     let locals = p.local_specs.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body, struct_field_temp_count: p.struct_field_temp_count, is_pascal })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body, struct_field_temp_count: p.struct_field_temp_count, is_pascal, is_static: is_static_fn })
 }
 /// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
 /// and `)` at `close_idx`) and return each param's `is_long` flag. A param is

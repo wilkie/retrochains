@@ -204,6 +204,7 @@ pub(crate) fn emit_function(
     char_returners: &std::collections::HashSet<String>,
     long_returners: &std::collections::HashSet<String>,
     pascal_fns: &std::collections::HashSet<String>,
+    static_fns: &std::collections::HashSet<String>,
     float_returners_arg: &std::collections::HashMap<String, usize>,
     long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
     struct_param_funcs: &std::collections::HashMap<String, Vec<usize>>,
@@ -634,6 +635,7 @@ pub(crate) fn emit_function(
         char_returners,
         long_returners,
         pascal_fns,
+        static_fns,
         pascal_cleanup,
         si_local,
         di_local,
@@ -769,12 +771,23 @@ pub(crate) fn symbol_name(c_name: &str) -> String {
 /// leading underscore (MS Pascal convention); cdecl functions get the standard
 /// `_name`. Fixtures 1653/2063.
 pub(crate) fn fn_symbol(f: &Function) -> String {
-    if f.is_pascal { f.name.to_uppercase() } else { symbol_name(&f.name) }
+    if f.is_pascal { f.name.to_uppercase() }
+    // A `static` function is TU-private: its OMF symbol is the bare C name with
+    // no leading underscore (fixtures 1708/1916/2155).
+    else if f.is_static { f.name.clone() }
+    else { symbol_name(&f.name) }
 }
 /// OMF symbol for a callee referenced by bare C name, given whether it is a
 /// known `pascal` function in this unit.
 pub(crate) fn callee_symbol(c_name: &str, is_pascal: bool) -> String {
     if is_pascal { c_name.to_uppercase() } else { symbol_name(c_name) }
+}
+/// As `callee_symbol`, but a `static` callee resolves to its bare C name (no
+/// leading `_`), matching its LEXTDEF/LPUBDEF symbol. Fixtures 1708/1916/2155.
+pub(crate) fn callee_symbol_full(c_name: &str, is_pascal: bool, is_static: bool) -> String {
+    if is_pascal { c_name.to_uppercase() }
+    else if is_static { c_name.to_owned() }
+    else { symbol_name(c_name) }
 }
 pub(crate) fn param_disp(idx: usize) -> i16 {
     i16::try_from(4 + (idx * 2)).expect("param disp fits in i16")

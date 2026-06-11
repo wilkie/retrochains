@@ -27,7 +27,7 @@ pub(crate) fn emit_call_inner(
     // A `pascal` callee (detected by its bare C name) takes the UPPERCASE,
     // underscore-free OMF symbol; cdecl callees get `_name`.
     let is_pascal_call = locals.pascal_fns.contains(name);
-    let sym = callee_symbol(name, is_pascal_call);
+    let sym = callee_symbol_full(name, is_pascal_call, locals.static_fns.contains(name));
     let param_longs = locals.long_param_funcs.get(&sym);
     let param_structs = locals.struct_param_funcs.get(&sym);
     let struct_bytes_at = |i: usize| -> usize {

@@ -27,6 +27,12 @@ pub const GRPDEF: u8 = 0x9a;
 pub const FIXUPP_16: u8 = 0x9c;
 pub const LEDATA_16: u8 = 0xa0;
 pub const LIDATA_16: u8 = 0xa2;
+/// `LEXTDEF` — local (module-private) external names. Same payload shape as
+/// EXTDEF; used by MSC for `static` function references.
+pub const LEXTDEF: u8 = 0xb4;
+/// `LPUBDEF` (16-bit) — local (module-private) public definitions. Same
+/// payload shape as PUBDEF_16; used by MSC for `static` function definitions.
+pub const LPUBDEF_16: u8 = 0xb6;
 
 /// Library-archive header record (LIB file's first byte).
 pub const LIBHDR: u8 = 0xf0;

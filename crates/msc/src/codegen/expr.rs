@@ -2649,7 +2649,7 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             }
             out.extend_from_slice(&[0x8B, park_mov[k]]); // park the running result
             let char_ret = if let Some(nm) = name {
-                let sym = callee_symbol(nm, locals.pascal_fns.contains(nm));
+                let sym = callee_symbol_full(nm, locals.pascal_fns.contains(nm), locals.static_fns.contains(nm));
                 let bo = out.len();
                 out.extend_from_slice(&[0xE8, 0x00, 0x00]);
                 fixups.push(Fixup { body_offset: bo, kind: FixupKind::TuLocalCall { target: sym.clone() } });
