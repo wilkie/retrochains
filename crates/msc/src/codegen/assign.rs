@@ -541,6 +541,27 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         push_bp_disp(out, disp);
         return;
     }
+    // Compound `r *= b` (self-ref mul, non-const word RHS): MSC loads the RHS
+    // operand into AX first, then `imul` the destination slot — `mov ax,[b];
+    // imul word [r]; mov [r],ax` — exploiting mul commutativity (the low word is
+    // order-independent). We otherwise load `r` first. Fixtures 1355, 1411.
+    if locals.size(local_idx) == 2
+        && !locals.is_long_local(local_idx)
+        && let Expr::BinOp { op: BinOp::Mul, left, right } = value
+        && matches!(left.as_ref(), Expr::Local(li) if *li == local_idx)
+        && right.fold(locals.inits).is_none()
+        && match right.as_ref() {
+            Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i),
+            Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i),
+            _ => false,
+        }
+        && let Some(r_disp) = bp_disp(right, locals)
+    {
+        out.push(0x8B); out.push(bp_modrm(0x46, r_disp)); push_bp_disp(out, r_disp); // mov ax,[b]
+        out.push(0xF7); out.push(bp_modrm(0x6E, disp)); push_bp_disp(out, disp); // imul word [r]
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [r],ax
+        return;
+    }
     // Peephole: `x = x ± K` for int locals collapses to an in-place
     // memory op:
     //   K == 1: `inc/dec word ptr [bp-disp]`     (3 bytes)
