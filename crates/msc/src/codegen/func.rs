@@ -389,59 +389,34 @@ pub(crate) fn emit_function(
     } else {
         base_frame
     };
-    // Two-pass frame layout: far/huge pointer locals (4-byte seg:off slots)
-    // get the shallowest positions first (in source order), then all other
-    // locals in source order.  For functions with no far pointers this
-    // reduces to simple source-order allocation.
-    let mut local_disps: Vec<i16> = vec![0i16; func.locals.len()];
-    // Three-pass frame layout:
-    //   Pass 1: far/huge pointer locals (4-byte seg:off slots) — shallowest.
-    //   Pass 2: near pointer locals (pointee_size > 0) — intermediate.
-    //   Pass 3: non-pointer locals sorted by sum_of_name_chars % 16
-    //           (ascending). This mirrors MSC's internal hash-table
-    //           traversal order: hash bucket determines slot depth, lower
-    //           bucket → closer to BP (smaller absolute displacement).
+    // Frame layout: every function-scope local (pointers, far pointers,
+    // arrays, structs alike) is ordered by MSC's symbol-table hash-bucket
+    // traversal:
+    //   bucket = (sum_of_name_bytes % 511) % 16, iterated ascending —
+    //   lower bucket → closer to BP (smaller absolute displacement).
+    // The % 511 (2^9-1, an end-around-carry fold) matters only for names
+    // whose byte sum reaches 512 (e.g. `count`, `result`); shorter names
+    // reduce to sum % 16. Within a bucket the chain is LIFO (linked-list
+    // prepend), so the last-declared variable in a bucket gets the
+    // shallowest slot. Derived empirically from the full fixture corpus
+    // (gold `; var = -N` layout comments): the single-pass rule fits every
+    // function-scope layout, including pointer/array interleavings such as
+    // `cp,ca,ip,ia` (1778) and `p1,a,p2` (1773).
     // Block-level locals (declared inside a nested `{ ... }`) are laid out
     // separately, DEEPER than the function frame, by a dedicated pass below.
-    // The three hash-bucket passes skip them.
+    let mut local_disps: Vec<i16> = vec![0i16; func.locals.len()];
     let mut cumulative: i32 = 0;
-    for (i, spec) in func.locals.iter().enumerate() {
-        if spec.is_far_ptr && spec.block_offset.is_none() {
-            cumulative += spec.storage_bytes() as i32;
-            local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
-        }
-    }
     let name_hash = |i: usize| -> u32 {
         let h: u32 = func.local_names[i].bytes().map(|b| b as u32).sum();
-        h % 16
+        (h % 511) % 16
     };
-    // Near pointers share the same hash-bucket / LIFO ordering as other locals
-    // (so `int *p; int **pp;` puts the later `pp` shallower — fixtures 1232,
-    // 1964), but as a separate pass they still precede the non-pointer locals.
     {
-        let mut np_ptrs: Vec<usize> = func.locals.iter().enumerate()
-            .filter(|(_, s)| !s.is_far_ptr && s.pointee_size > 0 && s.block_offset.is_none())
+        let mut indices: Vec<usize> = func.locals.iter().enumerate()
+            .filter(|(_, s)| s.block_offset.is_none())
             .map(|(i, _)| i)
             .collect();
-        np_ptrs.sort_by(|&a, &b| name_hash(a).cmp(&name_hash(b)).then(b.cmp(&a)));
-        for i in np_ptrs {
-            cumulative += func.locals[i].storage_bytes() as i32;
-            local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
-        }
-    }
-    {
-        let mut np_indices: Vec<usize> = func.locals.iter().enumerate()
-            .filter(|(_, s)| !s.is_far_ptr && s.pointee_size == 0 && s.block_offset.is_none())
-            .map(|(i, _)| i)
-            .collect();
-        // Within a hash bucket, MSC's internal hash table uses LIFO
-        // (linked-list prepend), so the last-declared variable in a
-        // bucket gets the shallowest (smallest absolute) displacement.
-        // Secondary key: descending source index to match that ordering.
-        np_indices.sort_by(|&a, &b| {
-            name_hash(a).cmp(&name_hash(b)).then(b.cmp(&a))
-        });
-        for i in np_indices {
+        indices.sort_by(|&a, &b| name_hash(a).cmp(&name_hash(b)).then(b.cmp(&a)));
+        for i in indices {
             let spec = &func.locals[i];
             cumulative += spec.storage_bytes() as i32;
             local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
