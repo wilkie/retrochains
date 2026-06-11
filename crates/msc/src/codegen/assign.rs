@@ -2341,6 +2341,14 @@ pub(crate) fn emit_long_global_4byte(
         }
         return true;
     }
+    // General long RHS (`a[K] = <long global/expr>`): evaluate into DX:AX and
+    // store both words — `mov [lo],ax` / `mov [hi],dx`. Fixture 361 (`a[1]=g`).
+    if !self_matches && crate::codegen::calls::long_operand(value, locals) {
+        crate::codegen::calls::emit_long_to_dx_ax(value, locals, out, fixups);
+        out.push(0xA3); put_addr(out, fixups, lo);                 // mov [lo], ax
+        out.extend_from_slice(&[0x89, 0x16]); put_addr(out, fixups, hi); // mov [hi], dx
+        return true;
+    }
     false
 }
 /// `<struct-global> = <struct-global>;` — whole-struct copy. ≤2 words copies via
