@@ -1512,6 +1512,10 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
         // or `a3 o16` (global moffs). A store-from-DX (`89 56 d8` / `89 16 o16`,
         // the high word of a long store) also preserves AX, so strip it too —
         // lets `v=*p++; return (int)v` reuse the live low word. Fixture 2521.
+        // A read-modify-write op-to-memory FROM AX (`add/sub/and/or/xor
+        // [mem],ax` — a compound `s += i` etc.) also preserves AX, so a
+        // following `p *= i` reuses the live operand (fixture 3478).
+        let rmw_from_ax = |op: u8| matches!(op, 0x01 | 0x29 | 0x21 | 0x09 | 0x31);
         let store_len = if n >= 3 && out[n - 3] == 0x89 && (out[n - 2] == 0x46 || out[n - 2] == 0x56) {
             3
         } else if n >= 4 && out[n - 4] == 0x89 && (out[n - 3] == 0x86 || out[n - 3] == 0x96) {
@@ -1520,6 +1524,15 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
             3
         } else if n >= 4 && out[n - 4] == 0x89 && out[n - 3] == 0x16 {
             4 // mov [o16],dx (global high word)
+        } else if n >= 3 && rmw_from_ax(out[n - 3]) && out[n - 2] == 0x46
+            && out[n - 2..n] != store_self[1..]
+        {
+            3 // op [bp+d8],ax — transparent only when it targets ANOTHER slot
+              // (it rewrites its own target, so AX no longer mirrors that one)
+        } else if n >= 4 && rmw_from_ax(out[n - 4]) && (out[n - 3] == 0x86 || out[n - 3] == 0x06)
+            && out[n - 3..n] != store_self[1..]
+        {
+            4 // op [bp+d16],ax / op [o16],ax
         } else {
             return false;
         };

@@ -413,6 +413,12 @@ impl LocalSpec {
 pub struct Locals<'a> {
     /// Const-prop view: `Some(K)` for locals known to hold a literal.
     pub inits: &'a [Option<i32>],
+    /// Loop ENTRY-fold view: like `inits` but KEEPS locals that are only
+    /// mutated inside a loop. MSC folds a while-loop's entry test from the
+    /// var's declared init even though the body mutates it (the do-while
+    /// elision; fixtures 126/1044/1592), while every other fold reads the
+    /// slot (3478). Only the loop entry-fold paths consult this.
+    pub entry_inits: &'a [Option<i32>],
     /// `disps[i]` is the BP-relative displacement of local `i`'s
     /// first byte (element 0 for arrays). Always negative; -2 for
     /// the first declared scalar.
@@ -629,6 +635,7 @@ impl Locals<'_> {
     pub fn with_inits<'b>(&'b self, inits: &'b [Option<i32>]) -> Locals<'b> {
         Locals {
             inits,
+            entry_inits: self.entry_inits,
             disps: self.disps,
             sizes: self.sizes,
             long_globals: self.long_globals,
@@ -3215,6 +3222,14 @@ struct ConstProp {
     /// reads load from the slot rather than folding the declared init.
     mutated_locals: std::collections::HashSet<usize>,
     mutated_globals: std::collections::HashSet<usize>,
+    /// Locals mutated inside a LOOP body/step. Kept separate from
+    /// `mutated_locals`: the emit-time fold view (`locals.inits`) drops
+    /// these too — a post-loop read like `return s + p` must load the
+    /// slots (fixture 3478) — but the loop ENTRY-condition fold view
+    /// (`locals.entry_inits`) keeps them, because MSC folds a while-loop
+    /// entry test from the var's declared init even when the loop body
+    /// mutates it (the do-while elision; fixtures 126/1044/1592).
+    loop_mutated_locals: std::collections::HashSet<usize>,
     /// Pointer-alias tracking: `int *p = &x` records `p -> x`, so a later
     /// `*p` (read or store) is rewritten to the aliased lvalue and folds /
     /// stores directly. Cleared at branch boundaries.

@@ -698,7 +698,13 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         }
         && let Some(r_disp) = bp_disp(right, locals)
     {
-        out.push(0x8B); out.push(bp_modrm(0x46, r_disp)); push_bp_disp(out, r_disp); // mov ax,[b]
+        // Skip the RHS load when AX provably still holds it (a preceding
+        // `s += b` left `mov ax,[b]; add [s],ax`). Fixture 3478.
+        let load = { let mut v = vec![0x8B, bp_modrm(0x46, r_disp)]; push_bp_disp(&mut v, r_disp); v };
+        let store_self = { let mut v = vec![0x89, bp_modrm(0x46, r_disp)]; push_bp_disp(&mut v, r_disp); v };
+        if !crate::codegen::expr::ax_holds_word_operand(out, &load, &store_self, locals.last_branch_barrier.get()) {
+            out.extend_from_slice(&load); // mov ax,[b]
+        }
         out.push(0xF7); out.push(bp_modrm(0x6E, disp)); push_bp_disp(out, disp); // imul word [r]
         out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [r],ax
         return;

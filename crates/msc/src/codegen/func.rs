@@ -276,7 +276,7 @@ pub(crate) fn emit_function(
     struct_is_union: &[bool],
     union_globals: &std::collections::HashSet<usize>,
 ) -> FunctionEmit {
-    let (body, mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, struct_is_union, union_globals);
+    let (body, mutated_locals, loop_mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, struct_is_union, union_globals);
     // Splice top-level blocks that contain a switch into the top-level
     // statement stream, so a switch inside a const-folded outer switch's
     // body reaches the partial-switch continuation machinery below
@@ -311,8 +311,22 @@ pub(crate) fn emit_function(
     // MSC does NOT fold type-cast inits (`int i = (int)sc`, fixture 1732)
     // or derived arithmetic (`int sum = x + y`, fixture 2126).
     // These cases leave `init_is_literal = false` via the parser's logic.
-    let local_inits: Vec<Option<i32>> = func.locals.iter().enumerate()
+    // The loop ENTRY-fold view: keeps inits for locals only mutated inside a
+    // loop, so the while → do-while elision still folds the entry test from
+    // the declared init (fixtures 126/1044/1592). Everything else uses
+    // `local_inits`, which also drops loop-mutated locals so post-loop reads
+    // hit the slot (fixture 3478).
+    let entry_inits: Vec<Option<i32>> = func.locals.iter().enumerate()
         .map(|(i, l)| if mutated_locals.contains(&i) || !l.init_is_literal { None } else { l.init })
+        .collect();
+    let local_inits: Vec<Option<i32>> = func.locals.iter().enumerate()
+        .map(|(i, l)| {
+            if mutated_locals.contains(&i) || loop_mutated_locals.contains(&i) || !l.init_is_literal {
+                None
+            } else {
+                l.init
+            }
+        })
         .collect();
     let local_long: Vec<bool> = func.locals.iter().map(|l| l.is_long).collect();
     let local_literals: Vec<bool> = func.locals.iter().map(|l| l.init_is_literal).collect();
@@ -685,6 +699,7 @@ pub(crate) fn emit_function(
     let param_pointee_sizes: Vec<usize> = func.param_pointee_size.clone();
     let locals_view = Locals {
         inits: &local_inits,
+        entry_inits: &entry_inits,
         disps: &local_disps,
         sizes: &local_sizes,
         long_globals,

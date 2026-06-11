@@ -1973,6 +1973,7 @@ pub(crate) fn emit_threaded_for(
         .collect();
     let bl = Locals {
         inits: &body_inits,
+        entry_inits: locals.entry_inits,
         disps: locals.disps,
         sizes: locals.sizes,
         long_globals: locals.long_globals,
@@ -2226,8 +2227,10 @@ pub(crate) fn emit_for(
 /// Handles only the common case: `init = Local(idx) = const_expr`.
 pub(crate) fn for_entry_fold(init: &Stmt, cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
     if let Stmt::Assign { target: AssignTarget::Local(idx), value } = init {
-        if let Some(k) = value.fold(locals.inits) {
-            let mut tmp: Vec<Option<i32>> = locals.inits.to_vec();
+        // Entry view: a local mutated only inside a loop still folds its
+        // declared init for the entry test (do-while elision).
+        if let Some(k) = value.fold(locals.entry_inits) {
+            let mut tmp: Vec<Option<i32>> = locals.entry_inits.to_vec();
             if *idx < tmp.len() {
                 tmp[*idx] = Some(k);
             }
@@ -2391,6 +2394,7 @@ pub(crate) fn emit_loop(
         .collect();
     let body_locals = Locals {
         inits: &body_inits,
+        entry_inits: locals.entry_inits,
         disps: locals.disps,
         sizes: locals.sizes,
         long_globals: locals.long_globals,
@@ -2569,8 +2573,11 @@ pub(crate) fn emit_loop(
     // elision when at least one operand of the condition is a literal.
     // Both-sides-are-locals (`while (a < b)`) never elides; one-literal
     // (`while (i < 10)`) elides when the init value makes it true.
+    // The fold reads the ENTRY view (`entry_inits`): a local mutated only
+    // inside the loop still folds its declared init here (MSC's do-while
+    // elision), even though every other fold reads the slot (3478).
     let effective_fold = entry_fold.or_else(|| {
-        if cond_has_literal_side(cond) { fold_cond(cond, locals) } else { None }
+        if cond_has_literal_side(cond) { fold_cond_raw(cond, locals.entry_inits) } else { None }
     });
     if matches!(effective_fold, Some(0)) && !cond_references_local(cond) {
         return;
@@ -3476,6 +3483,7 @@ pub(crate) fn emit_do_while(
         .collect();
     let body_locals = Locals {
         inits: &body_inits,
+        entry_inits: locals.entry_inits,
         disps: locals.disps,
         sizes: locals.sizes,
         long_globals: locals.long_globals,

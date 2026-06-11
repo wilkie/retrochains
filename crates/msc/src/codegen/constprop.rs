@@ -55,7 +55,12 @@ pub(crate) fn const_prop_globals(
     global_elem_sizes: &[usize],
     struct_is_union: &[bool],
     union_globals: &std::collections::HashSet<usize>,
-) -> (Vec<Stmt>, std::collections::HashSet<usize>, std::collections::HashSet<usize>) {
+) -> (
+    Vec<Stmt>,
+    std::collections::HashSet<usize>,
+    std::collections::HashSet<usize>,
+    std::collections::HashSet<usize>,
+) {
     // Locals whose struct type is a union — their field writes stay out of the
     // const-prop tables so punned sibling reads aren't folded (fixtures 177/919).
     let union_locals: std::collections::HashSet<usize> = local_specs.iter().enumerate()
@@ -112,7 +117,7 @@ pub(crate) fn const_prop_globals(
     for m in extra_mut {
         cp.mutated_locals.insert(m);
     }
-    (new_stmts, cp.mutated_locals, cp.mutated_globals)
+    (new_stmts, cp.mutated_locals, cp.loop_mutated_locals, cp.mutated_globals)
 }
 /// Rewrite `*p` (DerefWord/DerefByte over an aliased pointer local) to the
 /// aliased lvalue `Local(x)`/`Global(g)` WITHOUT const-folding it. Used on a
@@ -899,6 +904,16 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
         _ => {
             // While / for / do-while: fold any cond / step we can
             // reach via a shallow walk, then drop everything.
+            // Locals mutated in the loop go to `loop_mutated_locals` — the
+            // emit fold view drops them (a post-loop `return s + p` reads
+            // the slots, fixture 3478) while the loop entry-fold view keeps
+            // them (the while → do-while elision still folds the entry test
+            // from the declared init).
+            if matches!(stmt, Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. }) {
+                for m in crate::codegen::statements::collect_loop_body_mutations(&[stmt]) {
+                    cp.loop_mutated_locals.insert(m);
+                }
+            }
             cp.g_known.clear();
             cp.l_known.clear();
             cp.la_known.clear();
@@ -919,6 +934,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         long_globals: cp.long_globals.clone(),
         mutated_locals: cp.mutated_locals.clone(),
         mutated_globals: cp.mutated_globals.clone(),
+        loop_mutated_locals: cp.loop_mutated_locals.clone(),
         ptr_alias: cp.ptr_alias.clone(),
         elem_ptr_alias: cp.elem_ptr_alias.clone(),
         ptr_alias_g: cp.ptr_alias_g.clone(),
