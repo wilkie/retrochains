@@ -199,6 +199,31 @@ pub(crate) fn emit_call_ptr(
 /// The struct arg is a struct local. The first (highest-word) push reuses AX
 /// when the preceding store left that word there (`mov [w],ax` → `push ax`).
 /// Fixtures 3197, 2866.
+/// True when `out` ends with `store` (a `mov [w],ax`) followed by zero or more
+/// AX-preserving `push WORD [mem]` instructions — so AX still holds the value
+/// last stored. Lets a struct-by-value arg push `push ax` even when later args
+/// were already pushed from memory in between (RTL order). Fixture 3272.
+fn ax_live_after_mem_pushes(out: &[u8], store: &[u8]) -> bool {
+    let sl = store.len();
+    let n = out.len();
+    let all_push_mem = |s: &[u8]| -> bool {
+        let mut i = 0;
+        while i < s.len() {
+            if i + 3 <= s.len() && s[i] == 0xFF && s[i + 1] == 0x76 { i += 3; }          // push [bp+d8]
+            else if i + 4 <= s.len() && s[i] == 0xFF && (s[i + 1] == 0x36 || s[i + 1] == 0xB6) { i += 4; } // push [addr16]/[bp+d16]
+            else { return false; }
+        }
+        true
+    };
+    let mut p = n.saturating_sub(sl);
+    loop {
+        if out[p..p + sl] == *store && all_push_mem(&out[p + sl..]) {
+            return true;
+        }
+        if p == 0 { return false; }
+        p -= 1;
+    }
+}
 pub(crate) fn emit_push_struct_arg(arg: &Expr, bytes: usize, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let nwords = bytes / 2;
     match arg {
@@ -207,9 +232,10 @@ pub(crate) fn emit_push_struct_arg(arg: &Expr, bytes: usize, locals: &Locals<'_>
             for w in (0..nwords).rev() {
                 let wdisp = disp + (w as i16) * 2;
                 if w == nwords - 1 {
-                    // Reuse AX if the highest word was just stored from it.
+                    // Reuse AX if the highest word was just stored from it (possibly
+                    // across already-pushed later args, which preserve AX).
                     let store = { let mut v = vec![0x89, bp_modrm(0x46, wdisp)]; push_bp_disp(&mut v, wdisp); v };
-                    if out.len() >= store.len() && out[out.len() - store.len()..] == *store {
+                    if out.len() >= store.len() && ax_live_after_mem_pushes(out, &store) {
                         out.push(0x50); // push ax
                         continue;
                     }
