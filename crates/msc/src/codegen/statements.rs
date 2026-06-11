@@ -426,7 +426,11 @@ pub(crate) fn emit_stmt(
     // straight-line assigns leaves AX reusable — matching MSC's flat view of an
     // elided `if(true){v=...}` (fixture 1986).
     if !matches!(stmt, Stmt::Assign { .. } | Stmt::Block(_)) {
-        locals.last_branch_barrier.set(out.len());
+        // A do-while-form loop with no break/continue always runs its body, so
+        // AX at the merge is the body's last write — emit_loop leaves a barrier
+        // inside the loop instead of at its end (fixture 1411).
+        let barrier = locals.loop_exit_barrier.take().unwrap_or(out.len());
+        locals.last_branch_barrier.set(barrier);
     }
 }
 /// True when `stmt` unconditionally returns — so a following
@@ -2020,6 +2024,7 @@ pub(crate) fn emit_threaded_for(
         elide_call_cleanup: std::cell::Cell::new(false),
         ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
+        loop_exit_barrier: std::cell::Cell::new(None),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
     };
@@ -2441,6 +2446,7 @@ pub(crate) fn emit_loop(
         elide_call_cleanup: std::cell::Cell::new(false),
         ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
+        loop_exit_barrier: std::cell::Cell::new(None),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
     };
@@ -2635,6 +2641,19 @@ pub(crate) fn emit_loop(
         let abs = body_base + off;
         let disp = cont_target as i32 - (abs as i32 + 1);
         out[abs] = i8::try_from(disp).expect("continue rel8 disp fits") as u8;
+    }
+    // Do-while form with no break/continue: the body always runs, so AX at
+    // loop exit is whatever the body's straight-line tail left there. Leave
+    // the AX-reuse barrier at the body's last internal merge (body start when
+    // it has none) instead of the loop end — a post-loop read can then reuse
+    // a value the body's last store left in AX, with the loop-tail strip in
+    // ax_holds_word_operand walking the inc/cmp/jcc bytes. Fixture 1411.
+    if skip_initial_jmp
+        && loop_ctx.breaks.is_empty()
+        && loop_ctx.continues.is_empty()
+        && !matches!(cond, Cond::And(..) | Cond::Or(..))
+    {
+        locals.loop_exit_barrier.set(Some(body_base + body_locals.last_branch_barrier.get()));
     }
 }
 /// `do <body> while (<cond>);` (fixture 4098). When the body's last
@@ -3530,6 +3549,7 @@ pub(crate) fn emit_do_while(
         elide_call_cleanup: std::cell::Cell::new(false),
         ternary_tail_epilogue: std::cell::RefCell::new(None),
         last_branch_barrier: std::cell::Cell::new(0),
+        loop_exit_barrier: std::cell::Cell::new(None),
         last_top_stmt: std::cell::Cell::new(false),
         final_top_stmt: std::cell::Cell::new(false),
     };

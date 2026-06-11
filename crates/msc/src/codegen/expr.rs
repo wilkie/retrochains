@@ -1499,6 +1499,42 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
     // operand (e.g. `r.a=v; r.b=v; r.c=v` keeps v live). Strip trailing
     // stores-from-AX until the operand's load is exposed.
     let mut n = out.len();
+    // Loop tail: a BACKWARD jcc (rel8 < 0) closing a do-while-form loop, plus
+    // the cmp / inc/dec [mem] bytes before it, all preserve AX — strip them so
+    // a post-loop read reuses the body's last store (fixture 1411). Only the
+    // very last instruction may be the jcc; the barrier (left inside the loop
+    // by emit_loop's do-while blessing) still gates whether the exposed store
+    // is trusted.
+    if n >= 2 && (0x70..=0x7F).contains(&out[n - 2]) && out[n - 1] >= 0x80 {
+        n -= 2;
+        loop {
+            // cmp word [bp+d8],imm8 (83 7E d ib) — no register writes.
+            if n >= 4 && out[n - 4] == 0x83 && out[n - 3] == 0x7E {
+                n -= 4;
+            // cmp word [bp+d8],imm16 (81 7E d iw).
+            } else if n >= 5 && out[n - 5] == 0x81 && out[n - 4] == 0x7E {
+                n -= 5;
+            // cmp [bp+d8],ax / cmp [bp+d8],reg (39 r/m) — flags only.
+            } else if n >= 3 && out[n - 3] == 0x39 && (out[n - 2] & 0xC0) == 0x40 {
+                n -= 3;
+            // inc/dec word [bp+d8] (FF 46/4E d) — writes ITS slot; opaque when
+            // that slot is the queried one (AX would no longer mirror it).
+            } else if n >= 3 && out[n - 3] == 0xFF && (out[n - 2] == 0x46 || out[n - 2] == 0x4E) {
+                if store_self.len() == 3 && out[n - 1] == store_self[2] {
+                    return false;
+                }
+                n -= 3;
+            // inc/dec word [o16] (FF 06/0E o16) — global step.
+            } else if n >= 4 && out[n - 4] == 0xFF && (out[n - 3] == 0x06 || out[n - 3] == 0x0E) {
+                if store_self.len() == 3 && store_self[0] == 0xA3 && out[n - 2..n] == store_self[1..] {
+                    return false;
+                }
+                n -= 4;
+            } else {
+                break;
+            }
+        }
+    }
     loop {
         if n >= load.len() && out[n - load.len()..n] == *load {
             return n - load.len() >= barrier;

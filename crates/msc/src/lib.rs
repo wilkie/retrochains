@@ -585,6 +585,13 @@ pub struct Locals<'a> {
     /// barrier — so the value isn't assumed live across a conditional branch.
     /// Fixture 1445.
     pub last_branch_barrier: std::cell::Cell<usize>,
+    /// Set by `emit_loop` when the loop it just emitted is do-while-form with
+    /// no break/continue: its body always runs, so AX at loop exit comes from
+    /// the body's last AX write and a post-loop read may reuse it (fixture
+    /// 1411 `return r` after `r *= i` in the loop). Holds the out-relative
+    /// barrier to use instead of the loop end; consumed (take) by emit_stmt's
+    /// barrier update.
+    pub loop_exit_barrier: std::cell::Cell<Option<usize>>,
     /// Set true (top-level function view only) while emitting the function's LAST
     /// reachable top-level statement. A no-else `if` here whose body falls through
     /// merges directly into the epilogue, and MSC omits the merge-alignment NOP
@@ -682,6 +689,7 @@ impl Locals<'_> {
             elide_call_cleanup: std::cell::Cell::new(false),
             ternary_tail_epilogue: std::cell::RefCell::new(None),
             last_branch_barrier: std::cell::Cell::new(0),
+            loop_exit_barrier: std::cell::Cell::new(None),
             last_top_stmt: std::cell::Cell::new(false),
             final_top_stmt: std::cell::Cell::new(false),
         }
