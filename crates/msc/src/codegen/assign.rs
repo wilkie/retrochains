@@ -1097,6 +1097,36 @@ pub(crate) fn deref_param_source(value: &Expr, dst: usize, locals: &Locals<'_>) 
     }
     Some((src, post))
 }
+/// True when BX provably still holds `[bp+pdisp]` (a pointer param) because the
+/// trailing bytes of `out` are exactly a `t = *p` statement that loaded p into
+/// BX and is BX-preserving afterward: `mov bx,[bp+pdisp]; mov ax/al,[bx];
+/// mov [bp+d],ax/al`. MSC reuses that live BX for an immediately-following store
+/// through the same pointer (`*p = ...`) instead of reloading. Conservative —
+/// matches only this exact footprint, so a false positive (wrong BX) can't
+/// arise. Fixtures 3464/3529/1274 (the swap idiom `t=*a; *a=*b; *b=t`).
+fn bx_holds_param_after_temp_copy(out: &[u8], pdisp: i16, barrier: usize) -> bool {
+    let pd = pdisp as u8;
+    // Candidate suffix shapes (load width × store disp width):
+    //   word/disp8 : 8B 5E pd | 8B 07 | 89 46 d        (8)
+    //   word/disp16: 8B 5E pd | 8B 07 | 89 86 d d      (9)
+    //   byte/disp8 : 8B 5E pd | 8A 07 | 88 46 d        (8)
+    //   byte/disp16: 8B 5E pd | 8A 07 | 88 86 d d      (9)
+    for (seqlen, load, store_op, store_modrm) in
+        [(8usize, 0x8Bu8, 0x89u8, 0x46u8), (9, 0x8B, 0x89, 0x86),
+         (8, 0x8A, 0x88, 0x46), (9, 0x8A, 0x88, 0x86)]
+    {
+        if out.len() < seqlen { continue; }
+        let s = out.len() - seqlen;
+        if s < barrier { continue; }
+        if out[s] == 0x8B && out[s + 1] == 0x5E && out[s + 2] == pd
+            && out[s + 3] == load && out[s + 4] == 0x07
+            && out[s + 5] == store_op && out[s + 6] == store_modrm
+        {
+            return true;
+        }
+    }
+    false
+}
 pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let pdisp = param_disp(param_idx);
     let is_byte = locals.param_pointee_size(param_idx) == 1;
@@ -1152,7 +1182,10 @@ pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &L
     // mov [bx],ax`. Requires a push-SI frame. Fixtures 2993, 3184.
     if let Some((src, post)) = deref_param_source(value, param_idx, locals) {
         let sdisp = param_disp(src);
-        out.extend_from_slice(&[0x8B, 0x5E, pdisp as u8]);  // mov bx,[bp+dst]
+        // Reuse BX if the preceding `t = *dst` statement already loaded dst there.
+        if !bx_holds_param_after_temp_copy(out, pdisp, locals.last_branch_barrier.get()) {
+            out.extend_from_slice(&[0x8B, 0x5E, pdisp as u8]);  // mov bx,[bp+dst]
+        }
         out.push(0x8B); out.push(bp_modrm(0x76, sdisp)); push_bp_disp(out, sdisp); // mov si,[bp+src]
         if is_byte {
             out.extend_from_slice(&[0x8A, 0x04]); // mov al,[si]
