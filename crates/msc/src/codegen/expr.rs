@@ -1865,6 +1865,27 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
             return;
         }
     }
+    // `arr + <runtime element index>` as a VALUE (decayed global array + a
+    // non-constant offset, e.g. `arr + (c?1:2)`): MSC evaluates the index into
+    // AX, scales it by the element size (`shl ax,1` for a word array), then adds
+    // the array base as an immediate (`add ax,OFFSET arr`). We otherwise park the
+    // index in BX unscaled. Fixture 3439. Word/byte element arrays only.
+    if matches!(op, BinOp::Add)
+        && let Expr::AddrOfGlobal(g) = left
+        && right.fold(locals.inits).is_none()
+        && !long_operand(right, locals)
+        && matches!(locals.global_elem_size(*g), 1 | 2)
+    {
+        emit_expr_to_ax(right, locals, out, fixups); // element index → AX
+        if locals.global_elem_size(*g) == 2 {
+            out.extend_from_slice(&[0xD1, 0xE0]); // shl ax,1
+        }
+        let body_offset = out.len();
+        out.push(0x05); // add ax, OFFSET g (imm16 + GlobalAddr fixup)
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *g } });
+        return;
+    }
     // Unary negation `-x` (parsed as `0 - x`): load x into AX and `neg ax`,
     // not `mov ax,0; sub ax,x` (fixture 3346 `return x<0?-x:x` → `mov ax,[bp+4];
     // neg ax`). Skip literal RHS (folds elsewhere) and long RHS (own path).
