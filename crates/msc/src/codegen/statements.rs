@@ -1596,6 +1596,16 @@ pub(crate) fn emit_while(
     }
     emit_loop(cond, &[body_stmt], None, None, None, false, locals, frame, return_int, return_long, out, fixups);
 }
+/// The RelOp for the same comparison with operands swapped (`a OP b` ⟺
+/// `b SWAP(OP) a`). Used when one operand is a `register` local that MSC places
+/// in the cmp's reg field, forcing the memory operand to the rm side.
+pub(crate) fn swap_relop(op: RelOp) -> RelOp {
+    match op {
+        RelOp::Lt => RelOp::Gt, RelOp::Gt => RelOp::Lt,
+        RelOp::Le => RelOp::Ge, RelOp::Ge => RelOp::Le,
+        RelOp::Eq => RelOp::Eq, RelOp::Ne => RelOp::Ne,
+    }
+}
 /// The RelOp whose truth is the negation of `op`.
 pub(crate) fn negate_relop(op: RelOp) -> RelOp {
     match op {
@@ -2020,6 +2030,23 @@ pub(crate) fn emit_for(
     if emit_threaded_for(init, cond, step, body_stmt, locals, frame, return_int, return_long, out, fixups) {
         return;
     }
+    // Normalize a `<register local> OP <memory operand>` loop cond by swapping
+    // the operands (and the relop): MSC compares `cmp [mem],si` with the
+    // register in the reg field, so `for(...; i < n; ...)` lowers to `cmp [n],si;
+    // jg`. Const RHS (`i <= 10`) keeps the register on the left (`cmp si,10`).
+    // Fixture 3305.
+    let normalized_cond;
+    let cond: &Cond = if let Cond::Cmp { op, left, right } = cond
+        && let Expr::Local(li) = left
+        && locals.reg_for_local(*li).is_some()
+        && !matches!(right, Expr::IntLit(_))
+        && !matches!(right, Expr::Local(rj) if locals.reg_for_local(*rj).is_some())
+    {
+        normalized_cond = Cond::Cmp { op: swap_relop(*op), left: right.clone(), right: left.clone() };
+        &normalized_cond
+    } else {
+        cond
+    };
     emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
     // Infinite for-loop with no step and a trailing `if (c) break;` →
     // `do { prefix } while (!c)` after the init (same fold as while(1)).

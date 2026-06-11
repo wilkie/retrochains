@@ -585,6 +585,19 @@ impl Locals<'_> {
     pub fn disp(&self, idx: usize) -> i16 {
         self.disps[idx]
     }
+    /// If local `idx` is enregistered (a `register int` routed to SI/DI),
+    /// returns the ModRM register code (6 = SI, 7 = DI). Such a local lives in
+    /// the register, not its stack slot — reads/writes go through the register
+    /// directly. Fixtures 1550/2582/477/2245/3305.
+    pub fn reg_for_local(&self, idx: usize) -> Option<u8> {
+        if self.si_local == Some(idx) {
+            Some(6)
+        } else if self.di_local == Some(idx) {
+            Some(7)
+        } else {
+            None
+        }
+    }
     /// BP-relative disp of `make().field` temp `idx` (4 bytes apart, deepening).
     pub fn struct_field_temp_disp(&self, idx: u16) -> i16 {
         self.struct_field_temp_base - 4 * idx as i16

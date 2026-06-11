@@ -1386,6 +1386,10 @@ pub(crate) fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
 }
 /// `mov ax/al, word/byte ptr [bp-disp]` — load a local into AX.
 pub(crate) fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    if let Some(reg) = locals.reg_for_local(idx) {
+        out.extend_from_slice(&[0x8B, 0xC0 | reg]); // mov ax, si/di
+        return;
+    }
     let disp = locals.disp(idx);
     if locals.size(idx) == 1 {
         out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
@@ -1456,6 +1460,11 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
 /// `i` (straight-line reuse — see [`ax_holds_word_operand`]). Plain int slots
 /// only; long / float / char fall back to a real load.
 pub(crate) fn emit_load_local_reuse(i: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    // A `register` local lives in SI/DI — read it directly (`mov ax,si`).
+    if let Some(reg) = locals.reg_for_local(i) {
+        out.extend_from_slice(&[0x8B, 0xC0 | reg]);
+        return;
+    }
     if locals.size(i) == 2 && !locals.is_long_local(i) && !locals.is_float_local(i) {
         let d = locals.disp(i);
         let load = { let mut v = vec![0x8B, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };

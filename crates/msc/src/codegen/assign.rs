@@ -42,6 +42,55 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         let unwrapped = Expr::BinOp { op: *op, left: left.clone(), right: inner.clone() };
         return emit_assign(target, &unwrapped, locals, out, fixups);
     }
+    // Store INTO a `register` local (SI/DI): the destination is the register,
+    // not a stack slot. `x = K` → `mov si,K` (or `sub si,si` for 0); `x = x ± K`
+    // → `add/sub si,K` (`inc/dec si` for ±1); any other RHS evaluates to AX then
+    // `mov si,ax`. Fixtures 2582/477/2245/3305.
+    if let AssignTarget::Local(i) = target
+        && let Some(reg) = locals.reg_for_local(i)
+    {
+        // Self-compound `x = x ± K` → in-register add/sub.
+        if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+            && matches!(left.as_ref(), Expr::Local(l) if *l == i)
+            && let Some(k) = right.fold(locals.inits)
+            && !contains_assign_expr(right)
+        {
+            if k == 1 {
+                // inc/dec reg: 0x40|reg (inc), 0x48|reg (dec)
+                out.push(if matches!(op, BinOp::Add) { 0x40 | reg } else { 0x48 | reg });
+            } else if k == -1 {
+                out.push(if matches!(op, BinOp::Add) { 0x48 | reg } else { 0x40 | reg });
+            } else {
+                let sub = matches!(op, BinOp::Sub);
+                let modrm_reg = if sub { 5u8 } else { 0u8 }; // /5 = sub, /0 = add
+                let modrm = 0xC0 | (modrm_reg << 3) | reg;
+                if let Ok(k8) = i8::try_from(k) {
+                    out.extend_from_slice(&[0x83, modrm, k8 as u8]);
+                } else {
+                    out.push(0x81);
+                    out.push(modrm);
+                    out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+                }
+            }
+            return;
+        }
+        // `x = K` → mov si,K (sub si,si for 0).
+        if let Some(k) = value.fold(locals.inits)
+            && !contains_assign_expr(value)
+        {
+            if k == 0 {
+                out.extend_from_slice(&[0x2B, 0xC0 | (reg << 3) | reg]); // sub reg,reg
+            } else {
+                out.push(0xB8 | reg);
+                out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+            }
+            return;
+        }
+        // General RHS → AX, then mov si,ax.
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.extend_from_slice(&[0x8B, 0xC0 | (reg << 3)]); // mov reg, ax
+        return;
+    }
     // Chained assignment `a = b = c = V`: the RHS is an AssignExpr with its own
     // store side effects. Emit it (storing into the inner targets, leaving V in
     // AX), then store AX into this target too — `mov ax,V; mov [c],ax; mov [b],ax;
@@ -544,6 +593,26 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
     // (e.g. `a |= b[0]` → `mov ax,[b]; or [a],ax`) instead of load-l/op/store-l.
     // Pointer locals are excluded — `p += n` scales by pointee size via the
     // const arm and would mis-encode here. Fixture 1404.
+    // `sum op= <register local>` (RHS is the SI/DI var) → in-place op with the
+    // register as source: `add [bp+disp],si` (01 76 disp). Fixture 2245/3305.
+    if locals.size(local_idx) == 2
+        && !locals.is_long_local(local_idx)
+        && locals.local_pointee_size(local_idx) == 0
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left.as_ref(), Expr::Local(li) if *li == local_idx)
+        && let Expr::Local(ri) = right.as_ref()
+        && let Some(reg) = locals.reg_for_local(*ri)
+    {
+        let opcode = match op {
+            BinOp::Add => 0x01u8, BinOp::Sub => 0x29, BinOp::BitAnd => 0x21,
+            BinOp::BitOr => 0x09, BinOp::BitXor => 0x31, _ => unreachable!(),
+        };
+        out.push(opcode);
+        out.push(bp_modrm(0x40 | (reg << 3) | 0x06, disp)); // mod=01 reg=si/di rm=[bp+disp]
+        push_bp_disp(out, disp);
+        return;
+    }
     if locals.size(local_idx) == 2
         && !locals.is_long_local(local_idx)
         && locals.local_pointee_size(local_idx) == 0
@@ -1424,6 +1493,19 @@ pub(crate) fn emit_long_global_muldiv(global_idx: usize, byte_off: u16, op: BinO
     fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
 }
 pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `g = <register local>` → store the register directly: `mov [g],si`
+    // (89 36 <addr>) — no AX round-trip. Fixture 477.
+    if !locals.is_long_global(global_idx)
+        && let Expr::Local(i) = value
+        && let Some(reg) = locals.reg_for_local(*i)
+    {
+        out.push(0x89);
+        out.push((reg << 3) | 0x06); // mod=00 reg=si/di rm=110(disp16)
+        let bo = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     // `<struct-global> = <struct-returning call>`: store AX (<=2 bytes) /
     // DX:AX (3-4) into the destination struct global. Fixture 424.
     if let Expr::Call { name, args } = value

@@ -158,6 +158,41 @@ fn deref_param_src_is_param(value: &Expr, dst: usize) -> bool {
     };
     matches!(s, Some(s) if s != dst)
 }
+/// True when `Local(idx)` is consumed as a BARE value somewhere in `stmts`:
+/// the whole `return` value, the whole RHS of an assignment, or a whole call
+/// argument. A `register` local with such a read must materialize its value
+/// into SI/DI (so its const init `mov si,K` is live); a register read that
+/// appears only inside a foldable arithmetic expression or condition folds to
+/// its known constant and leaves the init dead. Fixtures 1550 (bare `return x`
+/// materializes) vs 1560/2069 (folded uses → init elided).
+fn local_read_bare(stmts: &[Stmt], idx: usize) -> bool {
+    fn is_bare(e: &Expr, idx: usize) -> bool { matches!(e, Expr::Local(i) if *i == idx) }
+    fn args_have_bare(args: &[Expr], idx: usize) -> bool { args.iter().any(|a| is_bare(a, idx)) }
+    fn expr_has_bare_arg(e: &Expr, idx: usize) -> bool {
+        match e {
+            Expr::Call { args, .. } => args_have_bare(args, idx),
+            _ => false,
+        }
+    }
+    fn stmt_scan(s: &Stmt, idx: usize) -> bool {
+        match s {
+            Stmt::Return(e) => is_bare(e, idx) || expr_has_bare_arg(e, idx),
+            Stmt::Assign { target, value } => {
+                (!matches!(target, AssignTarget::Local(t) if *t == idx) && is_bare(value, idx))
+                    || expr_has_bare_arg(value, idx)
+            }
+            Stmt::ExprStmt(e) => expr_has_bare_arg(e, idx),
+            Stmt::If { then_branch, else_branch, .. } =>
+                stmt_scan(then_branch, idx) || else_branch.as_ref().is_some_and(|e| stmt_scan(e, idx)),
+            Stmt::Block(ss) => ss.iter().any(|s| stmt_scan(s, idx)),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => stmt_scan(body, idx),
+            Stmt::For { init, step, body, .. } =>
+                stmt_scan(init, idx) || stmt_scan(step, idx) || stmt_scan(body, idx),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| stmt_scan(s, idx))
+}
 /// Return the mod=01 or mod=10 modrm byte for `[bp + disp]`.
 /// When `disp` fits in i8 (-128..=127) use mod=01 (1-byte disp, modrm as-is).
 /// Otherwise use mod=10 (2-byte disp, modrm + 0x40 to flip the mod field).
@@ -540,11 +575,23 @@ pub(crate) fn emit_function(
             continue;
         }
         if let Some(value) = spec.init {
-            // A `register` local lives in SI/DI, not its stack slot — never emit a
-            // slot init store. The value is still exposed via local_inits, so reads
-            // that fold (e.g. `if(x)`, `return x+y`) need no runtime materialization;
-            // a non-folding read materializes `mov si,K` at the use site. 1560/2069.
+            // A `register` local lives in SI/DI, not its stack slot — its init
+            // materializes the value INTO the register: `mov si,K` (or `sub si,si`
+            // for 0), never a slot store. The init is ELIDED when the register is
+            // never materialized at runtime (all reads fold to its constant) —
+            // 1560 (`if(x)`) / 2069 (`return x+y`). A bare read or a runtime
+            // mutation keeps it live — 1550 (`return x`).
             if spec.is_register {
+                if !(mutated_locals.contains(&i) || local_read_bare(&body, i)) {
+                    continue;
+                }
+                let reg = if di_local == Some(i) { 7u8 } else { 6u8 };
+                if value == 0 {
+                    bytes.extend_from_slice(&[0x2B, 0xC0 | (reg << 3) | reg]); // sub reg,reg
+                } else {
+                    bytes.push(0xB8 | reg); // mov reg, imm16
+                    bytes.extend_from_slice(&((value as u32 & 0xFFFF) as u16).to_le_bytes());
+                }
                 continue;
             }
             let disp = local_disps[i];

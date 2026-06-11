@@ -81,6 +81,9 @@ pub(crate) fn const_prop_globals(
         // read (fixture 1037). The emit-time fold_cond path still sees
         // the init via `locals.inits` for cond elision (1632).
         if spec.is_long { continue; }
+        // `register` locals live in SI/DI — their reads go through the register,
+        // never a propagated immediate, so keep them out of the const tables.
+        if spec.is_register { continue; }
         // Only literal-init locals (pure compile-time constant) get
         // substituted. Locals whose init came from another local —
         // `int n = c;` (1043), `char c = a + b;` (1046) — stay as
@@ -649,6 +652,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     if let Expr::IntLit(k) = value
                         && !value_was_ternary
                         && !converting
+                        && !cp.local_specs.get(*l).is_some_and(|s| s.is_register)
                     {
                         cp.l_known.insert(*l, *k);
                     } else {
@@ -1014,7 +1018,10 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             match target {
                 AssignTarget::Local(l) => {
                     cp.mutated_locals.insert(*l);
-                    match lit { Some(k) => { cp.l_known.insert(*l, k); } None => { cp.l_known.remove(l); } }
+                    match lit {
+                        Some(k) if !cp.local_specs.get(*l).is_some_and(|s| s.is_register) => { cp.l_known.insert(*l, k); }
+                        _ => { cp.l_known.remove(l); }
+                    }
                 }
                 AssignTarget::Global(g) => {
                     cp.mutated_globals.insert(*g);
@@ -1034,7 +1041,9 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
         }
         Expr::Local(idx) => {
-            if let Some(&k) = cp.l_known.get(idx) {
+            if let Some(&k) = cp.l_known.get(idx)
+                && !cp.local_specs.get(*idx).is_some_and(|s| s.is_register)
+            {
                 *e = Expr::IntLit(k);
             }
         }

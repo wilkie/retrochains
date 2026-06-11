@@ -680,6 +680,43 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
                 emit_cmp_global_imm(*idx, 0, out, fixups);
             }
         }
+        // `<register local> OP const` → `cmp si,K` (83 /7 FE for imm8sx, else
+        // 81 /7 FE imm16). Fixture 2245 (`i <= 10`).
+        Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) }
+            if locals.reg_for_local(*idx).is_some() =>
+        {
+            let reg = locals.reg_for_local(*idx).unwrap();
+            let modrm = 0xC0 | (7 << 3) | reg; // /7 = cmp, rm = si/di
+            if let Ok(k8) = i8::try_from(*k) {
+                out.extend_from_slice(&[0x83, modrm, k8 as u8]);
+            } else {
+                out.push(0x81); out.push(modrm);
+                out.extend_from_slice(&((*k as u32 & 0xFFFF) as u16).to_le_bytes());
+            }
+        }
+        // `<memory> OP <register local>` → `cmp [mem],si` (39 form, register in
+        // the reg field). The emit_for normalization puts the register on the
+        // right; left is a param/local/global memory operand. Fixture 3305
+        // (`cmp [bp+4],si`).
+        Cond::Cmp { op: _, left, right: Expr::Local(rj) }
+            if locals.reg_for_local(*rj).is_some()
+                && matches!(left, Expr::Param(_) | Expr::Local(_) | Expr::Global(_)) =>
+        {
+            let reg = locals.reg_for_local(*rj).unwrap();
+            let modrm_reg = reg << 3;
+            out.push(0x39);
+            match left {
+                Expr::Param(pi) => { out.push(bp_modrm(0x40 | modrm_reg | 0x06, param_disp(*pi))); push_bp_disp(out, param_disp(*pi)); }
+                Expr::Local(li) => { let d = locals.disp(*li); out.push(bp_modrm(0x40 | modrm_reg | 0x06, d)); push_bp_disp(out, d); }
+                Expr::Global(g) => {
+                    out.push(modrm_reg | 0x06); // mod=00 rm=110 disp16
+                    let p = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+                    fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                }
+                _ => unreachable!(),
+            }
+        }
         Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
             emit_cmp_local_imm(*idx, locals, *k, out);
