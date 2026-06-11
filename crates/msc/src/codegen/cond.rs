@@ -1126,7 +1126,14 @@ fn bitand_word_vars<'a>(a: &'a Expr, b: &'a Expr, locals: &Locals<'_>) -> Option
         Expr::Global(i) => !locals.is_char_global(*i) && !locals.is_long_global(*i),
         _ => false,
     };
-    if word(a) && word(b) { Some((a, b)) } else { None }
+    // Both simple word lvalues: evaluate b into AX, `test [a],ax` (3539).
+    // One simple + one complex (non-literal — const masks take the
+    // `test [mem],imm` path above): evaluate the complex side into AX and
+    // test against the simple one in memory — `mask & (1 << i)` →
+    // `shl ax,cl; test ax,[mask]` (2399).
+    if word(a) && !matches!(b, Expr::IntLit(_)) { return Some((a, b)); }
+    if word(b) && !matches!(a, Expr::IntLit(_)) { return Some((b, a)); }
+    None
 }
 /// `test byte/word [mem], imm` — MSC's lowering for a bitwise-AND condition.
 /// The byte form (`f6 /0`) is used when the mask fits in 8 bits.

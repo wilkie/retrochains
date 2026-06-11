@@ -3498,6 +3498,31 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         emit_imm_op(op, *k, out);
         return;
     }
+    // RHS is a plain word `[bp+disp]` operand: evaluate the (complex) LHS
+    // into AX and fold the RHS directly as a memory operand — MSC doesn't
+    // stage a pure slot read through BX. `ca[1] + ia[1]` → `mov al,[bp-5];
+    // cbw; add ax,[bp-14]` (fixture 1778: char-elem LHS via AL/cbw, word
+    // RHS as the mem operand).
+    let rhs_plain_word = match right {
+        Expr::Local(i) => locals.size(*i) == 2
+            && !locals.is_long_local(*i)
+            && !locals.is_float_local(*i)
+            && !locals.is_array_local(*i)
+            && locals.reg_for_local(*i).is_none(),
+        Expr::Param(i) => !locals.is_char_param(*i)
+            && !locals.is_long_param(*i)
+            && !locals.is_float_param(*i),
+        Expr::ParamField { size: 2, .. } | Expr::LocalField { size: 2, .. } => true,
+        Expr::LocalIndex { .. } => true,
+        _ => false,
+    };
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && rhs_plain_word
+        && bp_disp(right, locals).is_some()
+    {
+        emit_expr_to_ax(left, locals, out, fixups);
+        return emit_binop_right(op, right, locals, out, fixups);
+    }
     // Generic fallback: evaluate RHS first into AX, save to BX, then
     // evaluate LHS into AX and apply the reg-reg op. Works for any
     // shape that survived the earlier specialized paths.
