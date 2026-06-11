@@ -1899,6 +1899,9 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         && let Some(k) = right.fold(locals.inits)
     {
         match (op, k) {
+            // `g += 0` / `g -= 0` is a no-op — MSC emits nothing (e.g. `g += !y`
+            // where `!y` folds to 0, fixture 856).
+            (BinOp::Add, 0) | (BinOp::Sub, 0) => return,
             (BinOp::Add, 1) | (BinOp::Sub, 1) => {
                 let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x0E };
                 out.push(0xFF);
