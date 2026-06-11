@@ -1859,6 +1859,20 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             None
         }
     }).collect();
+    // `static` uninitialized globals (and function-local `static`s, which the
+    // parser lifts to TU-private globals) live in `_BSS`, allocated after the
+    // struct-return temps. They are NOT tentative COMDEFs and carry no PUBDEF;
+    // references resolve via the DGROUP/_BSS thread fixup (`c4 off 9f`) with the
+    // in-segment offset baked into the placeholder. Fixtures 907/918/3120/560.
+    let static_bss_offsets: Vec<Option<usize>> = unit.globals.iter().map(|g| {
+        if g.is_static && g.init.is_none() && !g.is_extern {
+            let off = bss_len;
+            bss_len += g.storage_bytes();
+            Some(off)
+        } else {
+            None
+        }
+    }).collect();
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
@@ -2183,7 +2197,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .globals
         .iter()
         .enumerate()
-        .filter_map(|(i, g)| if g.init.is_none() && !g.is_extern { Some(i) } else { None })
+        .filter_map(|(i, g)| if g.init.is_none() && !g.is_extern && !g.is_static { Some(i) } else { None })
         .collect();
     let extern_globals: Vec<usize> = unit
         .globals
@@ -2606,8 +2620,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     // every PUBDEF-global access resolves to the
                     // first global.
                     // A const global is patched with its CONST offset; an
-                    // initialized _DATA global with its _DATA offset.
-                    if let Some(off) = data_offsets[*global_idx].or(const_global_offsets[*global_idx]) {
+                    // initialized _DATA global with its _DATA offset; a `static`
+                    // uninitialized global with its _BSS offset.
+                    if let Some(off) = data_offsets[*global_idx]
+                        .or(const_global_offsets[*global_idx])
+                        .or(static_bss_offsets[*global_idx])
+                    {
                         let off = u16::try_from(off).expect("global offset fits");
                         let existing = u16::from_le_bytes([
                             fe.bytes[fx.body_offset + 1],
@@ -2885,6 +2903,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 if unit.globals[*global_idx].is_const {
                     // CONST-segment target (DGROUP frame + CONST thread).
                     payload.extend_from_slice(&[0xC4, off, 0x9C]);
+                } else if static_bss_offsets[*global_idx].is_some() {
+                    // `static` uninitialized global in _BSS — DGROUP frame +
+                    // _BSS target thread, P=1 → 0x9F (same as StructTemp).
+                    payload.extend_from_slice(&[0xC4, off, 0x9F]);
                 } else if unit.globals[*global_idx].init.is_some() {
                     payload.extend_from_slice(&[0xC4, off, 0x9D]);
                 } else {
