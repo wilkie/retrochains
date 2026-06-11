@@ -743,11 +743,30 @@ pub(crate) fn emit_function(
         // remaining statements in one shot and returns whether the function
         // is still reachable after the continuation.
         if let Stmt::Switch { scrutinee: Expr::IntLit(k), cases } = stmt {
-            let has_nfc = cases.iter()
-                .any(|a| matches!(a.value, Some(v) if v != 0 && v < *k));
-            if has_nfc {
+            use crate::codegen::statements::{
+                arm_body_terminates, build_chain_ops, fold_chain_ops, TestOp,
+            };
+            let fold = fold_chain_ops(build_chain_ops(cases), *k);
+            // The fall-through position: the matched arm when a test resolved
+            // taken, else the default arm (the chain's final `jmp default`
+            // elides — its body falls in; fixtures 133/554/1599/1606), else
+            // empty (the chain's final jmp goes to the continuation; 1896).
+            let ft = fold.fallin_arm
+                .or_else(|| cases.iter().position(|a| a.value.is_none()));
+            // A live body that breaks (or falls off the switch) reaches the
+            // continuation, which the partial layout owns. All-returning
+            // bodies with no fall-through arm lay out as a plain chain
+            // (fixtures 3965/2620/3967) — handled by emit_runtime_switch.
+            let live_nonterm = fold.ops.iter().any(|op| match op {
+                TestOp::JeBody { arm, .. } | TestOp::JleBody { arm, .. } =>
+                    !arm_body_terminates(cases, *arm, &locals_view),
+                TestOp::JlDefault { .. } => false,
+            }) || matches!(ft, Some(a) if !arm_body_terminates(cases, a, &locals_view));
+            if !fold.ops.is_empty() && (ft.is_some() || live_nonterm) {
                 let cont_reachable = emit_partial_switch_with_continuation(
                     *k,
+                    &fold,
+                    ft,
                     cases,
                     &body[i + 1..],
                     &locals_view,

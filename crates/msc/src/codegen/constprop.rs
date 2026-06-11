@@ -792,13 +792,18 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             }
             if let Expr::IntLit(k) = scrutinee {
                 let k = *k;
-                // Check whether any NFC cases exist: V != 0 AND V < k (signed).
-                let has_nfc = cases.iter()
-                    .any(|a| matches!(a.value, Some(v) if v != 0 && v < k));
+                // Resolve the compare chain against K. Tests survive unless
+                // they compare against exactly K (or the case-0 `or ax,ax`):
+                // the switch only folds away entirely when NO tests survive
+                // — i.e. everything before the matched arm resolved.
+                let fold = crate::codegen::statements::fold_chain_ops(
+                    crate::codegen::statements::build_chain_ops(cases),
+                    k,
+                );
 
-                if has_nfc {
-                    // Partial switch: emit_function will call
-                    // emit_partial_switch_with_continuation.
+                if !fold.ops.is_empty() {
+                    // Surviving runtime tests: emit_function picks the partial
+                    // (truncated) or plain chain layout.
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();

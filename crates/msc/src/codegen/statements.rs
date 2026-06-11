@@ -125,7 +125,8 @@ pub(crate) fn emit_stmt(
         }
         Stmt::Assign { target, value } => emit_assign(target.clone(), value, locals, out, fixups),
         Stmt::Switch { scrutinee, cases } => {
-            emit_runtime_switch(scrutinee, cases, locals, frame, return_int, return_long, out, fixups);
+            let known_k = if let Expr::IntLit(k) = scrutinee { Some(*k) } else { None };
+            emit_runtime_switch(scrutinee, known_k, cases, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::Break => {
             // Emit a forward `jmp short` (eb) placeholder; the enclosing loop
@@ -2550,6 +2551,107 @@ pub(crate) fn emit_loop(
 /// [<cmp>]             cmp only when peephole doesn't apply
 /// <jcc> <-back>       jne/je back to body
 /// ```
+/// One low-level dispatch test in a switch compare chain.
+///
+/// Consecutive shared case labels with contiguous ascending values (`case 1:
+/// case 2: case 3: body`) lower as a range pair `cmp lo; jl DEFAULT` +
+/// `cmp hi; jle BODY` (fixtures 3965, 3084). Non-contiguous shared values get
+/// one `je` each, all targeting the shared body (3350). Singleton cases test
+/// `cmp v; je BODY` (`or ax,ax` when v == 0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TestOp {
+    JeBody { v: i32, arm: usize },
+    JlDefault { v: i32 },
+    JleBody { v: i32, arm: usize },
+}
+
+/// Lower switch arms into the runtime compare-chain test ops, ordered by
+/// ascending case value (out-of-order sources are sorted — fixture 1609); a
+/// range pair stays one unit keyed by its low bound.
+pub(crate) fn build_chain_ops(cases: &[SwitchArm]) -> Vec<TestOp> {
+    let mut groups: Vec<(i32, Vec<TestOp>)> = Vec::new();
+    let mut pending: Vec<i32> = Vec::new(); // empty-body shared-label values
+    for (i, arm) in cases.iter().enumerate() {
+        let Some(v) = arm.value else {
+            // `case 5: default: body` — labels stacked on the default arm
+            // dispatch straight to it.
+            for &pv in &pending {
+                groups.push((pv, vec![TestOp::JeBody { v: pv, arm: i }]));
+            }
+            pending.clear();
+            continue;
+        };
+        if arm.body.is_empty() && i + 1 < cases.len() {
+            pending.push(v);
+            continue;
+        }
+        let contiguous = !pending.is_empty()
+            && pending.windows(2).all(|w| w[1] == w[0] + 1)
+            && v == pending[pending.len() - 1] + 1;
+        if contiguous {
+            groups.push((
+                pending[0],
+                vec![
+                    TestOp::JlDefault { v: pending[0] },
+                    TestOp::JleBody { v, arm: i },
+                ],
+            ));
+        } else {
+            for &pv in &pending {
+                groups.push((pv, vec![TestOp::JeBody { v: pv, arm: i }]));
+            }
+            groups.push((v, vec![TestOp::JeBody { v, arm: i }]));
+        }
+        pending.clear();
+    }
+    groups.sort_by_key(|&(key, _)| key);
+    groups.into_iter().flat_map(|(_, ops)| ops).collect()
+}
+
+/// Whether control entering `cases[start]`'s body always returns before
+/// leaving the switch (walking C fall-through across arms; a `break` — or
+/// running off the end — reaches the post-switch continuation instead).
+pub(crate) fn arm_body_terminates(cases: &[SwitchArm], start: usize, locals: &Locals<'_>) -> bool {
+    for arm in &cases[start..] {
+        for s in &arm.body {
+            if matches!(s, Stmt::Break) { return false; }
+            if stmt_always_returns(s, locals) { return true; }
+        }
+    }
+    false
+}
+
+/// Result of resolving a chain against a compile-time scrutinee K.
+pub(crate) struct ChainFold {
+    /// Surviving tests (the prefix walked before any truncation, minus deletions).
+    pub ops: Vec<TestOp>,
+    /// `Some(arm)` when a test resolved TAKEN: control falls into that arm's
+    /// body right after the surviving tests; everything later is dead.
+    pub fallin_arm: Option<usize>,
+}
+
+/// MSC's late value-tracking fold over the chain, with AX known == K. Only a
+/// compare against the EXACT known constant resolves (the flags are then
+/// "equal"): a not-taken jcc (`jl` with v == K) is deleted outright, a taken
+/// jcc (`je`/`jle` with v == K) truncates the chain — the matched body falls
+/// in and the rest is dead. Compares against any OTHER constant are kept
+/// (`cmp ax,3; jle` with K == 2 stays a runtime test — fixture 3965). The
+/// case-0 `or ax,ax; je` resolves for any known K (1601/1603/1609).
+pub(crate) fn fold_chain_ops(ops: Vec<TestOp>, k: i32) -> ChainFold {
+    let mut out: Vec<TestOp> = Vec::new();
+    for op in ops {
+        match op {
+            TestOp::JlDefault { v } if v == k => {} // equal → jl never taken
+            TestOp::JeBody { v, arm } | TestOp::JleBody { v, arm } if v == k => {
+                return ChainFold { ops: out, fallin_arm: Some(arm) };
+            }
+            TestOp::JeBody { v, .. } if v == 0 && k != 0 => {} // or ax,ax; je
+            other => out.push(other),
+        }
+    }
+    ChainFold { ops: out, fallin_arm: None }
+}
+
 /// Partial switch for a const-scrutinee k with NFC cases (V != 0, V < k signed).
 ///
 /// MSC does NOT fold the whole switch to just the matched case body. Instead it
@@ -2571,6 +2673,8 @@ pub(crate) fn emit_loop(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_partial_switch_with_continuation(
     k: i32,
+    fold: &ChainFold,
+    ft_idx: Option<usize>,
     cases: &[SwitchArm],
     continuation: &[Stmt],
     locals: &Locals<'_>,
@@ -2580,48 +2684,70 @@ pub(crate) fn emit_partial_switch_with_continuation(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) -> bool {
-    // Collect NFC arms: V != 0 AND V < k (signed), in source order.
-    let nfc_arms: Vec<&SwitchArm> = cases.iter()
-        .filter(|a| matches!(a.value, Some(v) if v != 0 && v < k))
-        .collect();
 
-    // Fallthrough arm: matched case k, or default if no case k.
-    let ft_arm = cases.iter().find(|a| a.value == Some(k))
-        .or_else(|| cases.iter().find(|a| a.value.is_none()));
+    // Bodies referenced by the surviving tests, in op order, deduped. A
+    // surviving `jl` half targets the default body when one exists (appended
+    // here), or the continuation (RL) when there is none (fixture 520).
+    let mut nfc_idxs: Vec<usize> = Vec::new();
+    for op in &fold.ops {
+        if let TestOp::JeBody { arm, .. } | TestOp::JleBody { arm, .. } = op
+            && !nfc_idxs.contains(arm)
+        {
+            nfc_idxs.push(*arm);
+        }
+    }
+    let has_jl = fold.ops.iter().any(|op| matches!(op, TestOp::JlDefault { .. }));
+    let jl_default_arm: Option<usize> = if has_jl {
+        cases.iter().position(|a| a.value.is_none())
+    } else {
+        None
+    };
+    if let Some(d) = jl_default_arm
+        && !nfc_idxs.contains(&d)
+    {
+        nfc_idxs.push(d);
+    }
+    let jl_to_cont = has_jl && jl_default_arm.is_none();
 
-    // Pre-emit a case arm body (stopping at Break), returning (bytes, fixups, terminates).
-    // `known_ax` is the value AX is known to hold at the arm's entry (the scrutinee
-    // constant, for the fall-through arm): a leading `return K` of that same value
-    // skips its `mov ax,K` — AX already holds it. Fixture 3971.
-    let emit_arm = |arm: Option<&SwitchArm>, known_ax: Option<i32>| -> (Vec<u8>, Vec<Fixup>, bool) {
+    // Pre-emit a case body starting at arm `start` (walking C fall-through
+    // across arm boundaries, stopping at Break), returning (bytes, fixups,
+    // terminates). `known_ax` is the value AX is known to hold at the body's
+    // entry (the scrutinee constant, for the fall-through arm): a leading
+    // `return K` of that same value skips its `mov ax,K` — AX already holds
+    // it. Fixture 3971.
+    let emit_arm = |start: Option<usize>, known_ax: Option<i32>| -> (Vec<u8>, Vec<Fixup>, bool) {
         let mut b: Vec<u8> = Vec::new();
         let mut f: Vec<Fixup> = Vec::new();
         let mut term = false;
-        if let Some(arm) = arm {
-            for (si, s) in arm.body.iter().enumerate() {
-                if matches!(s, Stmt::Break) { break; }
-                if si == 0
+        let mut first = true;
+        let Some(start) = start else { return (b, f, term) };
+        'outer: for arm in &cases[start..] {
+            for s in &arm.body {
+                if matches!(s, Stmt::Break) { break 'outer; }
+                if first
                     && return_int && !return_long
                     && let Stmt::Return(Expr::IntLit(v)) = s
                     && known_ax == Some(*v)
                 {
                     crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, &mut b);
                     term = true;
-                    break;
+                    break 'outer;
                 }
+                first = false;
                 emit_stmt(s, locals, frame, return_int, return_long, &mut b, &mut f);
-                if stmt_always_returns(s, locals) { term = true; break; }
+                if stmt_always_returns(s, locals) { term = true; break 'outer; }
             }
         }
         (b, f, term)
     };
 
-    let (ft_bytes, ft_fxs, ft_term) = emit_arm(ft_arm, Some(k));
+    let (ft_bytes, ft_fxs, ft_term) = emit_arm(ft_idx, Some(k));
     let nfc_bufs: Vec<(Vec<u8>, Vec<Fixup>, bool)> =
-        nfc_arms.iter().map(|arm| emit_arm(Some(arm), None)).collect();
+        nfc_idxs.iter().map(|&ai| emit_arm(Some(ai), None)).collect();
 
-    // need_cont: true when any body doesn't terminate (→ continuation needed).
-    let need_cont = !ft_term || nfc_bufs.iter().any(|(_, _, t)| !t);
+    // need_cont: true when any body doesn't terminate, or a `jl` test reaches
+    // the continuation directly (→ continuation needed).
+    let need_cont = !ft_term || nfc_bufs.iter().any(|(_, _, t)| !t) || jl_to_cont;
 
     // Pre-emit continuation (only when needed).
     let mut cont_bytes: Vec<u8> = Vec::new();
@@ -2649,16 +2775,26 @@ pub(crate) fn emit_partial_switch_with_continuation(
         out.extend_from_slice(&[0xB8, lo, hi]); // mov ax, k
     }
 
-    // ── emit comparison chain (je placeholders) ───────────────────────────
+    // ── emit comparison chain (jcc placeholders) ──────────────────────────
 
-    let mut je_patches: Vec<usize> = Vec::new();
-    for arm in &nfc_arms {
-        let v = arm.value.unwrap();
-        let v16 = (v as u32 & 0xFFFF) as u16;
-        let [vlo, vhi] = v16.to_le_bytes();
-        out.extend_from_slice(&[0x3D, vlo, vhi]); // cmp ax, v
-        out.push(0x74); // je short
-        je_patches.push(out.len()); // index of rel8 placeholder
+    // Each pending patch: (rel8 placeholder position, target arm index or
+    // None = continuation / RL).
+    let mut jcc_patches: Vec<(usize, Option<usize>)> = Vec::new();
+    for op in &fold.ops {
+        let (v, jcc, target) = match *op {
+            TestOp::JeBody { v, arm } => (v, 0x74u8, Some(arm)),
+            TestOp::JleBody { v, arm } => (v, 0x7E, Some(arm)),
+            TestOp::JlDefault { v } => (v, 0x7C, jl_default_arm),
+        };
+        if v == 0 && matches!(op, TestOp::JeBody { .. }) {
+            out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
+        } else {
+            let v16 = (v as u32 & 0xFFFF) as u16;
+            let [vlo, vhi] = v16.to_le_bytes();
+            out.extend_from_slice(&[0x3D, vlo, vhi]); // cmp ax, v
+        }
+        out.push(jcc);
+        jcc_patches.push((out.len(), target)); // index of rel8 placeholder
         out.push(0x00);
     }
 
@@ -2691,43 +2827,44 @@ pub(crate) fn emit_partial_switch_with_continuation(
     let direct_path = need_cont && has_zero_case;
     let fwd_path = need_cont && !has_zero_case;
 
-    let mut nfc_starts: Vec<usize> = Vec::new();
+    // arm index → body start offset, filled as bodies are laid out.
+    let mut nfc_starts: Vec<(usize, usize)> = Vec::new();
+    let mut return_label: Option<usize> = None;
 
     if !need_cont {
         // CASE 1: all bodies terminate.
         if out.len() % 2 != 0 { out.push(0x90); }
-        for (nfc_bytes, nfc_fxs, _) in &nfc_bufs {
-            nfc_starts.push(out.len());
+        for (bi, (nfc_bytes, nfc_fxs, _)) in nfc_bufs.iter().enumerate() {
+            nfc_starts.push((nfc_idxs[bi], out.len()));
             let base = out.len();
             for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
             out.extend_from_slice(nfc_bytes);
             if out.len() % 2 != 0 { out.push(0x90); }
         }
-        // Patch je → NFC starts.
-        for (idx, &p) in je_patches.iter().enumerate() {
-            out[p] = (nfc_starts[idx] as i32 - (p + 1) as i32) as u8;
-        }
     } else if fwd_path {
-        // CASE 2 FWD: ft body jumps forward past NFC[0] to RL; NFC[0] falls through.
-        let ft_jmp_patch = {
+        // CASE 2 FWD: ft body jumps forward past NFC[0] to RL; NFC[0] falls
+        // through. A terminating ft body needs no jmp (fixture 520).
+        let ft_jmp_patch = if !ft_term {
             out.push(0xEB);
             let p = out.len();
             out.push(0x00);
-            p
+            Some(p)
+        } else {
+            None
         };
         if out.len() % 2 != 0 { out.push(0x90); }
 
         // NFC[0]: between ft body and return_label. Falls through — no explicit jmp.
-        nfc_starts.push(out.len());
-        {
-            let (b, f, _) = &nfc_bufs[0];
+        if let Some((b, f, _)) = nfc_bufs.first() {
+            nfc_starts.push((nfc_idxs[0], out.len()));
             let base = out.len();
             for mut fx in f.iter().cloned() { fx.body_offset += base; fixups.push(fx); }
             out.extend_from_slice(b);
         }
 
         // return_label: emit continuation.
-        let return_label = out.len();
+        let rl = out.len();
+        return_label = Some(rl);
         {
             let base = out.len();
             for mut f in cont_fxs { f.body_offset += base; fixups.push(f); }
@@ -2735,8 +2872,8 @@ pub(crate) fn emit_partial_switch_with_continuation(
         }
 
         // NFC[1..]: after continuation; each has backward jmp → return_label + nop.
-        for (nfc_bytes, nfc_fxs, nfc_term) in nfc_bufs.iter().skip(1) {
-            nfc_starts.push(out.len());
+        for (bi, (nfc_bytes, nfc_fxs, nfc_term)) in nfc_bufs.iter().enumerate().skip(1) {
+            nfc_starts.push((nfc_idxs[bi], out.len()));
             let base = out.len();
             for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
             out.extend_from_slice(nfc_bytes);
@@ -2744,25 +2881,23 @@ pub(crate) fn emit_partial_switch_with_continuation(
                 out.push(0xEB);
                 let p = out.len();
                 out.push(0x00);
-                let rel8 = return_label as i32 - (p + 1) as i32;
+                let rel8 = rl as i32 - (p + 1) as i32;
                 out[p] = rel8 as u8;
             }
             if out.len() % 2 != 0 { out.push(0x90); }
         }
 
         // Patch ft_jmp → return_label.
-        out[ft_jmp_patch] = (return_label as i32 - (ft_jmp_patch + 1) as i32) as u8;
-
-        // Patch je → NFC starts.
-        for (idx, &p) in je_patches.iter().enumerate() {
-            out[p] = (nfc_starts[idx] as i32 - (p + 1) as i32) as u8;
+        if let Some(p) = ft_jmp_patch {
+            out[p] = (rl as i32 - (p + 1) as i32) as u8;
         }
     } else {
         // CASE 2 DIRECT: ft body falls through to RL; all NFCs after continuation.
         debug_assert!(direct_path);
 
         // return_label immediately after ft body.
-        let return_label = out.len();
+        let rl = out.len();
+        return_label = Some(rl);
         {
             let base = out.len();
             for mut f in cont_fxs { f.body_offset += base; fixups.push(f); }
@@ -2773,8 +2908,8 @@ pub(crate) fn emit_partial_switch_with_continuation(
         if out.len() % 2 != 0 { out.push(0x90); }
 
         // All NFC bodies: each has backward jmp → return_label + nop.
-        for (nfc_bytes, nfc_fxs, nfc_term) in &nfc_bufs {
-            nfc_starts.push(out.len());
+        for (bi, (nfc_bytes, nfc_fxs, nfc_term)) in nfc_bufs.iter().enumerate() {
+            nfc_starts.push((nfc_idxs[bi], out.len()));
             let base = out.len();
             for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
             out.extend_from_slice(nfc_bytes);
@@ -2782,25 +2917,40 @@ pub(crate) fn emit_partial_switch_with_continuation(
                 out.push(0xEB);
                 let p = out.len();
                 out.push(0x00);
-                let rel8 = return_label as i32 - (p + 1) as i32;
+                let rel8 = rl as i32 - (p + 1) as i32;
                 out[p] = rel8 as u8;
             }
             if out.len() % 2 != 0 { out.push(0x90); }
         }
+    }
 
-        // Patch je → NFC starts.
-        for (idx, &p) in je_patches.iter().enumerate() {
-            out[p] = (nfc_starts[idx] as i32 - (p + 1) as i32) as u8;
-        }
+    // Resolve chain jcc targets: arm bodies by layout position; `jl` with no
+    // default arm targets the continuation (RL).
+    for &(p, target) in &jcc_patches {
+        let dest = match target {
+            Some(arm) => nfc_starts.iter().find(|&&(a, _)| a == arm)
+                .map(|&(_, s)| s)
+                .expect("chain test targets an unemitted body"),
+            None => return_label.expect("jl-to-continuation requires a continuation"),
+        };
+        out[p] = (dest as i32 - (p + 1) as i32) as u8;
     }
 
     false // caller must not add another epilogue (handled internally)
 }
 /// Runtime `switch (<scrutinee>) { case K0: body0 case K1: body1 default: ... }`.
-/// Matches MSC layout: short cmp+je chain; `jmp short; nop` fallthrough; non-default
+/// Matches MSC layout: short cmp+jcc chain (with `jl`/`jle` range pairs for
+/// contiguous shared-label runs); `jmp short; nop` fallthrough; non-default
 /// bodies each get a trailing NOP; default body goes last with no trailing NOP.
+///
+/// `known_k` is the compile-time scrutinee value when the chain survives the
+/// const fold WITHOUT truncating (no test compares against exactly K): the
+/// only effect is deletion of resolved-not-taken tests — a `jl` half whose
+/// `cmp` constant equals K (fixtures 1895/2620/3967) and a case-0 `or ax,ax;
+/// je` when K != 0.
 pub(crate) fn emit_runtime_switch(
     scrutinee: &Expr,
+    known_k: Option<i32>,
     cases: &[SwitchArm],
     locals: &Locals<'_>,
     frame: Frame,
@@ -2888,12 +3038,29 @@ pub(crate) fn emit_runtime_switch(
         return;
     }
 
-    // Chain length: per non-default case:
-    //   K == 0: `0b c0` (2) + `74 rel8` (2) = 4 bytes
-    //   K != 0: `3d K K` (3) + `74 rel8` (2) = 5 bytes
-    let chain_len: usize = cases.iter()
-        .filter_map(|c| c.value)
-        .map(|k| if k == 0 { 4 } else { 5 })
+    // Build the chain test ops (range pairs for contiguous shared-label runs,
+    // singleton `je` otherwise). A known scrutinee constant deletes resolved
+    // never-taken tests; truncation cannot happen here (the partial-switch
+    // path owns that), but guard for safety by ignoring the fold if it would.
+    let ops: Vec<TestOp> = {
+        let all = build_chain_ops(cases);
+        match known_k {
+            Some(kv) => {
+                let f = fold_chain_ops(all.clone(), kv);
+                if f.fallin_arm.is_none() { f.ops } else { all }
+            }
+            None => all,
+        }
+    };
+
+    // Chain length: per test:
+    //   v == 0 je: `0b c0` (2) + `74 rel8` (2) = 4 bytes
+    //   otherwise: `3d v v` (3) + jcc rel8 (2) = 5 bytes
+    let chain_len: usize = ops.iter()
+        .map(|op| match op {
+            TestOp::JeBody { v: 0, .. } => 4,
+            _ => 5,
+        })
         .sum();
 
     // Layout selection:
@@ -2940,21 +3107,29 @@ pub(crate) fn emit_runtime_switch(
     }
     let switch_end = running_abs - start;
 
-    // Emit cmp+je (short) for each non-default case in source order.
-    for (i, arm) in cases.iter().enumerate() {
-        if let Some(k) = arm.value {
-            if k == 0 {
-                out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
-            } else {
-                let k16 = (k as u32 & 0xFFFF) as u16;
-                out.push(0x3D);
-                out.extend_from_slice(&k16.to_le_bytes());
-            }
-            out.push(0x74); // JE short
-            let here_end = out.len() + 1;
-            let rel8 = (start + body_offsets[i]) as i32 - here_end as i32;
-            out.push(rel8 as u8);
+    // Emit the chain tests. `jl` halves target the default body when one
+    // exists, else the post-switch fall-out (fixtures 3084, 3965).
+    for op in &ops {
+        let (v, jcc, target_off) = match *op {
+            TestOp::JeBody { v, arm } => (v, 0x74u8, body_offsets[arm]),
+            TestOp::JleBody { v, arm } => (v, 0x7E, body_offsets[arm]),
+            TestOp::JlDefault { v } => (
+                v,
+                0x7C,
+                default_idx.map(|d| body_offsets[d]).unwrap_or(switch_end),
+            ),
+        };
+        if v == 0 && matches!(op, TestOp::JeBody { .. }) {
+            out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
+        } else {
+            let v16 = (v as u32 & 0xFFFF) as u16;
+            out.push(0x3D);
+            out.extend_from_slice(&v16.to_le_bytes());
         }
+        out.push(jcc);
+        let here_end = out.len() + 1;
+        let rel8 = (start + target_off) as i32 - here_end as i32;
+        out.push(rel8 as u8);
     }
 
     // Jmp after chain + alignment nop when not using default-fallthrough.
