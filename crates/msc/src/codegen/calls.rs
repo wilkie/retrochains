@@ -937,6 +937,21 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             let bo = out.len() + 1; out.extend_from_slice(&[0x8B, 0x16]); out.extend_from_slice(&(lo + 2).to_le_bytes()); // mov dx, [a+lo+2]
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *array } });
         }
+        // Runtime-index long array element `a[i]`: scale the index ×4 (two
+        // `shl bx,1`) and read both pointee words at [bx+a] / [bx+a+2]. Fixture
+        // 3288 (`return arr[i]`).
+        Expr::Index { array, index } if locals.is_long_global(*array) => {
+            let (var, koff) = crate::codegen::expr::split_index_offset(index);
+            crate::codegen::expr::emit_load_bx(var, locals, out, fixups); // mov bx,[i]
+            out.extend_from_slice(&[0xD1, 0xE3, 0xD1, 0xE3]); // shl bx,1; shl bx,1
+            let off = (koff.wrapping_mul(4)) as i16 as u16;
+            out.extend_from_slice(&[0x8B, 0x87]); // mov ax,[bx+a+off]
+            let bo = out.len(); out.extend_from_slice(&off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            out.extend_from_slice(&[0x8B, 0x97]); // mov dx,[bx+a+off+2]
+            let bo = out.len(); out.extend_from_slice(&off.wrapping_add(2).to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+        }
         // Long `<long> ± <const>`: load DX:AX, then add/sub the immediate across
         // the two words (`add ax,lo; adc dx,hi` / `sub ax,lo; sbb dx,hi`). Fixture 362.
         Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right }

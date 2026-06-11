@@ -1532,7 +1532,8 @@ pub(crate) fn emit_return(
                 || is_long_plus_int(expr, locals)
                 || is_long_const_bitop(expr, locals)
                 || is_long_muldiv(expr, locals)
-                || is_long_field_elem_or_const_arith(expr, locals))
+                || is_long_field_elem_or_const_arith(expr, locals)
+                || matches!(expr, Expr::Index { array, .. } if locals.is_long_global(*array)))
         {
             // `return <long> <op> ..` lowered across DX:AX (shift-by-1,
             // inline 2-word arithmetic, or a mul/div/mod helper call).

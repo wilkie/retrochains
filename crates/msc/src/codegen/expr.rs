@@ -2376,7 +2376,7 @@ pub(crate) fn bf_ax_live(base: BitBase, byte_off: u16, locals: &Locals<'_>, out:
 /// Split an array index `i ± K` into its variable part and the constant element
 /// offset `K` (folded into the addressing displacement). `i`, `i+K`, `K+i`, and
 /// `i-K` are recognized; anything else returns `(e, 0)`.
-fn split_index_offset(e: &Expr) -> (&Expr, i32) {
+pub(crate) fn split_index_offset(e: &Expr) -> (&Expr, i32) {
     match e {
         Expr::BinOp { op: BinOp::Add, left, right } => {
             if let Expr::IntLit(k) = right.as_ref() { (left, *k) }
