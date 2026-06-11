@@ -1157,6 +1157,34 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&else_buf);
                 return;
             }
+            // `c ? *a : *b` — both arms deref simple word pointers: each
+            // branch loads only its pointer into BX; the `mov ax,[bx]` tail
+            // is SHARED after the join. Fixture 3512.
+            if let (Expr::DerefWord { ptr: tp }, Expr::DerefWord { ptr: ep }) =
+                (then_arm.as_ref(), else_arm.as_ref())
+                && let Some(td) = simple_word_bp(tp, locals)
+                && let Some(ed) = simple_word_bp(ep, locals)
+                && cond.fold(locals.inits).is_none()
+            {
+                let cond_c = cond_from_expr((**cond).clone());
+                let cond_size = {
+                    let mut b = Vec::new();
+                    emit_cond_skip(&cond_c, 0, locals, &mut b, &mut Vec::new());
+                    b.len()
+                };
+                // then = mov bx,[bp+td] (3) + jmp short (2); nop pads the
+                // else branch to an even start.
+                let needs_nop = (out.len() + cond_size + 5) % 2 != 0;
+                let skip = 5 + usize::from(needs_nop);
+                emit_cond_skip(&cond_c, i8::try_from(skip).expect("skip fits"), locals, out, fixups);
+                out.push(0x8B); out.push(bp_modrm(0x5E, td)); push_bp_disp(out, td);
+                out.push(0xEB);
+                out.push(3 + u8::from(needs_nop)); // over [nop +] else ptr load
+                if needs_nop { out.push(0x90); }
+                out.push(0x8B); out.push(bp_modrm(0x5E, ed)); push_bp_disp(out, ed);
+                out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
+                return;
+            }
             // Runtime ternary: `cond ? b : c`. MSC emits the condition as a
             // DIRECT comparison + inverted jcc that skips to the else arm —
             // not a materialized 0/1 boolean. Shape (fixture 429
