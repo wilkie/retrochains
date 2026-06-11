@@ -770,6 +770,13 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
         }
         Stmt::Switch { scrutinee, cases } => {
             prop_expr(scrutinee, cp);
+            // A scrutinee like `x + 1` (x known) folds to a constant after
+            // substitution but `prop_expr` leaves the BinOp shape intact;
+            // collapse an all-literal scrutinee so the partial/foldable-switch
+            // detection (which keys on `Expr::IntLit`) fires. Fixture 544.
+            if let Some(k) = eval_const_int(scrutinee) {
+                *scrutinee = Expr::IntLit(k);
+            }
             if let Expr::IntLit(k) = scrutinee {
                 let k = *k;
                 // Check whether any NFC cases exist: V != 0 AND V < k (signed).
@@ -969,6 +976,44 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
         }
     }
 }
+/// Evaluate an expression made entirely of integer literals (after const-prop
+/// has substituted known locals/globals) to a single 16-bit constant. Returns
+/// `None` for anything not statically computable. Used to fold a switch
+/// scrutinee like `x + 1` (x known) so the partial/foldable-switch path fires
+/// — MSC loads the folded value (`mov ax,2`) and truncates the case chain.
+pub(crate) fn eval_const_int(e: &Expr) -> Option<i32> {
+    match e {
+        Expr::IntLit(k) => Some(*k),
+        Expr::CastChar { value, .. } => eval_const_int(value),
+        Expr::BinOp { op, left, right } => {
+            let a = eval_const_int(left)? as i16;
+            let b = eval_const_int(right)? as i16;
+            let r: i16 = match op {
+                BinOp::Add => a.wrapping_add(b),
+                BinOp::Sub => a.wrapping_sub(b),
+                BinOp::Mul => a.wrapping_mul(b),
+                BinOp::Div => if b == 0 { return None } else { a.wrapping_div(b) },
+                BinOp::Mod => if b == 0 { return None } else { a.wrapping_rem(b) },
+                BinOp::Shl => a.wrapping_shl(b as u32 & 0xF),
+                BinOp::Shr => a.wrapping_shr(b as u32 & 0xF),
+                BinOp::BitAnd => a & b,
+                BinOp::BitOr => a | b,
+                BinOp::BitXor => a ^ b,
+                BinOp::Eq => (a == b) as i16,
+                BinOp::Ne => (a != b) as i16,
+                BinOp::Lt => (a < b) as i16,
+                BinOp::Gt => (a > b) as i16,
+                BinOp::Le => (a <= b) as i16,
+                BinOp::Ge => (a >= b) as i16,
+                BinOp::LogAnd => ((a != 0) && (b != 0)) as i16,
+                BinOp::LogOr => ((a != 0) || (b != 0)) as i16,
+            };
+            Some(r as i32)
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     match e {
         Expr::FloatLit(..) => {} // no int const-prop into float literals
