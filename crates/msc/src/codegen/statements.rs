@@ -1739,6 +1739,35 @@ fn try_rewrite_break_loop(s: &Stmt, ret: &Stmt, id: usize) -> Option<Vec<Stmt>> 
     });
     Some(new)
 }
+/// `while (1) { ...; break; }` — and the do-while(1) / bare `for (;;)`
+/// equivalents — executes its body exactly once: MSC drops the loop
+/// structure entirely and emits the body once, minus the trailing break.
+/// Requires the trailing break to be the ONLY loop-level break/continue.
+/// Fixtures 2972, 3023, 3024.
+fn match_once_loop(s: &Stmt) -> Option<Vec<Stmt>> {
+    let const_true = |c: &Cond| matches!(c, Cond::Truthy(Expr::IntLit(k)) if *k != 0);
+    let body = match s {
+        Stmt::While { cond, body } if const_true(cond) => body,
+        Stmt::DoWhile { body, cond } if const_true(cond) => body,
+        Stmt::For { init, cond, step, body }
+            if const_true(cond)
+                && matches!(init.as_ref(), Stmt::Empty)
+                && matches!(step.as_ref(), Stmt::Empty) => body,
+        _ => return None,
+    };
+    let stmts: &[Stmt] = match body.as_ref() {
+        Stmt::Block(v) => v,
+        other => std::slice::from_ref(other),
+    };
+    let (last, prefix) = stmts.split_last()?;
+    if !matches!(last, Stmt::Break) {
+        return None;
+    }
+    if prefix.iter().any(stmt_has_loop_break) {
+        return None;
+    }
+    Some(prefix.to_vec())
+}
 /// Top-level pass: rewrite each `[no-step leading-break loop, return]` pair into
 /// the if/else+goto form. Run after const-prop so the body reads are already
 /// resolved to runtime loads.
@@ -1748,6 +1777,11 @@ pub(crate) fn fold_break_loops(stmts: Vec<Stmt>) -> (Vec<Stmt>, std::collections
     let mut i = 0;
     let mut id = 0usize;
     while i < stmts.len() {
+        if let Some(body) = match_once_loop(&stmts[i]) {
+            out.extend(body);
+            i += 1;
+            continue;
+        }
         if i + 1 < stmts.len()
             && matches!(stmts[i + 1], Stmt::Return(_))
             && let Some(rw) = try_rewrite_break_loop(&stmts[i], &stmts[i + 1], id)
