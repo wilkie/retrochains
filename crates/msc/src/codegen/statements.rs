@@ -2608,6 +2608,12 @@ pub(crate) fn build_chain_ops(cases: &[SwitchArm]) -> Vec<TestOp> {
     groups.into_iter().flat_map(|(_, ops)| ops).collect()
 }
 
+/// Whether any arm body contains a top-level `break` (the only kind the
+/// switch emitters treat as a switch exit).
+pub(crate) fn switch_has_break(cases: &[SwitchArm]) -> bool {
+    cases.iter().any(|a| a.body.iter().any(|s| matches!(s, Stmt::Break)))
+}
+
 /// Whether control entering `cases[start]`'s body always returns before
 /// leaving the switch (walking C fall-through across arms; a `break` — or
 /// running off the end — reaches the post-switch continuation instead).
@@ -2672,7 +2678,8 @@ pub(crate) fn fold_chain_ops(ops: Vec<TestOp>, k: i32) -> ChainFold {
 /// Returns true if the code following the continuation is still reachable.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_partial_switch_with_continuation(
-    k: i32,
+    scrutinee: &Expr,
+    known_k: Option<i32>,
     fold: &ChainFold,
     ft_idx: Option<usize>,
     cases: &[SwitchArm],
@@ -2741,7 +2748,7 @@ pub(crate) fn emit_partial_switch_with_continuation(
         (b, f, term)
     };
 
-    let (ft_bytes, ft_fxs, ft_term) = emit_arm(ft_idx, Some(k));
+    let (ft_bytes, ft_fxs, ft_term) = emit_arm(ft_idx, known_k);
     let nfc_bufs: Vec<(Vec<u8>, Vec<Fixup>, bool)> =
         nfc_idxs.iter().map(|&ai| emit_arm(Some(ai), None)).collect();
 
@@ -2767,12 +2774,14 @@ pub(crate) fn emit_partial_switch_with_continuation(
 
     // ── emit scrutinee load ───────────────────────────────────────────────
 
-    if k == 0 {
-        out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
-    } else {
-        let k16 = (k as u32 & 0xFFFF) as u16;
-        let [lo, hi] = k16.to_le_bytes();
-        out.extend_from_slice(&[0xB8, lo, hi]); // mov ax, k
+    match known_k {
+        Some(0) => out.extend_from_slice(&[0x2B, 0xC0]), // sub ax, ax
+        Some(k) => {
+            let k16 = (k as u32 & 0xFFFF) as u16;
+            let [lo, hi] = k16.to_le_bytes();
+            out.extend_from_slice(&[0xB8, lo, hi]); // mov ax, k
+        }
+        None => emit_expr_to_ax(scrutinee, locals, out, fixups),
     }
 
     // ── emit comparison chain (jcc placeholders) ──────────────────────────
@@ -2823,7 +2832,8 @@ pub(crate) fn emit_partial_switch_with_continuation(
     //   [nop_if_odd]
     //   [NFC[0]+jmp→RL+nop_if_odd] ... [NFC[n]+jmp→RL+nop_if_odd]
 
-    let has_zero_case = k != 0 && cases.iter().any(|a| a.value == Some(0));
+    let has_zero_case = known_k.is_some_and(|k| k != 0)
+        && cases.iter().any(|a| a.value == Some(0));
     let direct_path = need_cont && has_zero_case;
     let fwd_path = need_cont && !has_zero_case;
 
@@ -2871,8 +2881,11 @@ pub(crate) fn emit_partial_switch_with_continuation(
             out.extend_from_slice(&cont_bytes);
         }
 
-        // NFC[1..]: after continuation; each has backward jmp → return_label + nop.
+        // NFC[1..]: after continuation; each starts even (a continuation
+        // ending odd gets a leading nop — fixture 454) and has a backward
+        // jmp → return_label + trailing alignment nop.
         for (bi, (nfc_bytes, nfc_fxs, nfc_term)) in nfc_bufs.iter().enumerate().skip(1) {
+            if out.len() % 2 != 0 { out.push(0x90); }
             nfc_starts.push((nfc_idxs[bi], out.len()));
             let base = out.len();
             for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
