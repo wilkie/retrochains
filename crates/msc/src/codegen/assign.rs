@@ -13,6 +13,18 @@ use crate::*;
 ///   - char target (size 1): only the SIGNED `(char)` cast (`(unsigned char)` to a
 ///     byte slot folds straight to `mov byte [c],imm`). 2455 (AL) vs 2460 (fold).
 /// A cast of an EXPRESSION operand (`(char)(a+100)`) always folds. 1384.
+/// When initializing a far/huge pointer from an address expression, the
+/// segment word stored alongside the offset is the data segment (DS) for any
+/// address that lives in DGROUP — `&global`, a string literal, a decayed
+/// global array, `&global[i]`. Stack addresses (`&local`, decayed local array)
+/// use SS and are handled by their own arms. Fixture 2058.
+fn far_value_in_data_segment(value: &Expr, locals: &Locals<'_>) -> bool {
+    match value {
+        Expr::AddrOfGlobal(_) | Expr::AddrOfIndexedGlobal { .. } | Expr::StrLit(_) => true,
+        Expr::CastChar { value, .. } => far_value_in_data_segment(value, locals),
+        _ => false,
+    }
+}
 pub(crate) fn cast_rhs_needs_al_form(value: &Expr, target_is_int: bool) -> bool {
     matches!(value, Expr::CastChar { from_var: true, unsigned, .. }
         if target_is_int || !*unsigned)
@@ -594,7 +606,12 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             _ => {
                 emit_expr_to_ax(value, locals, out, fixups);
                 out.push(0x89); out.push(bp_modrm(0x46, offset_disp)); push_bp_disp(out, offset_disp);
-                out.push(0x8C); out.push(bp_modrm(0x56, segment_disp)); push_bp_disp(out, segment_disp);
+                // Segment word: a `&global` / string-literal / global-array
+                // address lives in DGROUP → store DS (0x5E); a stack address
+                // (`&local`, decayed local array, handled above) stores SS.
+                // Fixture 2058 (`int far *p = &g`).
+                let seg_reg = if far_value_in_data_segment(value, locals) { 0x5Eu8 } else { 0x56u8 };
+                out.push(0x8C); out.push(bp_modrm(seg_reg, segment_disp)); push_bp_disp(out, segment_disp);
             }
         }
         return;
