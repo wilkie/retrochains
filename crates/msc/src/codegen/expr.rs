@@ -1041,8 +1041,11 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             if let Some(k) = index.fold(locals.inits) {
                 // Constant index → `a1 <byte_off>` with FIXUP. The
                 // placeholder is `byte_off` (not zero); the linker
-                // adds the array's base address. Fixture 4109.
-                let byte_off = (k as u32).wrapping_mul(2) as u16;
+                // adds the array's base address. Fixture 4109. The stride is the
+                // array's element size — 4 for a `long` array (fixture 2588),
+                // 2 otherwise.
+                let elem = locals.global_elem_size(*array).max(2) as u32;
+                let byte_off = (k as u32).wrapping_mul(elem) as u16;
                 let body_offset = out.len();
                 out.push(0xA1);
                 out.extend_from_slice(&byte_off.to_le_bytes());
