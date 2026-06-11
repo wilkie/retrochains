@@ -162,6 +162,31 @@ fn deref_param_src_is_param(value: &Expr, dst: usize) -> bool {
     };
     matches!(s, Some(s) if s != dst)
 }
+/// Resolve a statement to the one actually emitted, following constant-folding
+/// `if`s to their taken branch (and unwrapping single-statement blocks). A
+/// `if (const) <single-call>;` therefore looks like that single call to the
+/// cleanup-elision arming. Uses the SAME `fold_cond` the emitter uses, so the
+/// resolution can't disagree with what is actually emitted. Fixture 1687.
+fn effective_stmt<'a>(stmt: &'a Stmt, locals: &Locals<'_>) -> &'a Stmt {
+    const EMPTY: Stmt = Stmt::Empty;
+    let mut s = stmt;
+    loop {
+        match s {
+            Stmt::If { cond, then_branch, else_branch } => {
+                match crate::codegen::statements::fold_cond(cond, locals) {
+                    Some(k) if k != 0 => s = then_branch,
+                    Some(_) => match else_branch {
+                        Some(eb) => s = eb,
+                        None => return &EMPTY,
+                    },
+                    None => return s,
+                }
+            }
+            Stmt::Block(v) if v.len() == 1 => s = &v[0],
+            _ => return s,
+        }
+    }
+}
 /// True when `Local(idx)` is consumed as a BARE value somewhere in `stmts`:
 /// the whole `return` value, the whole RHS of an assignment, or a whole call
 /// argument. A `register` local with such a read must materialize its value
@@ -716,7 +741,7 @@ pub(crate) fn emit_function(
     let last_call_idx: Option<usize> = body
         .iter()
         .enumerate()
-        .filter(|(_, s)| crate::codegen::statements::stmt_call_count(s) > 0)
+        .filter(|(_, s)| crate::codegen::statements::stmt_call_count(effective_stmt(s, &locals_view)) > 0)
         .last()
         .map(|(i, _)| i);
 
@@ -733,7 +758,7 @@ pub(crate) fn emit_function(
         locals_view.elide_call_cleanup.set(
             frame.is_with_slide()
                 && last_call_idx == Some(i)
-                && crate::codegen::statements::stmt_single_call(stmt),
+                && crate::codegen::statements::stmt_single_call(effective_stmt(stmt, &locals_view)),
         );
 
         // Detect a partial switch (const literal scrutinee with NFC cases).
