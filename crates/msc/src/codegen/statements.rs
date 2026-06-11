@@ -2842,8 +2842,11 @@ pub(crate) fn emit_partial_switch_with_continuation(
 
     let has_zero_case = known_k.is_some_and(|k| k != 0)
         && cases.iter().any(|a| a.value == Some(0));
-    let direct_path = need_cont && has_zero_case;
-    let fwd_path = need_cont && !has_zero_case;
+    // Runtime break-free switches lay the continuation directly at the chain
+    // fall-through (DIRECT), bodies after it — fixture 2641.
+    let direct_path = need_cont
+        && (has_zero_case || (known_k.is_none() && !switch_has_break(cases)));
+    let fwd_path = need_cont && !direct_path;
 
     // arm index → body start offset, filled as bodies are laid out.
     let mut nfc_starts: Vec<(usize, usize)> = Vec::new();
@@ -3261,6 +3264,19 @@ pub(crate) fn emit_runtime_switch(
         v
     };
 
+    // The final emitted body's trailing break jumps to the very next
+    // instruction (the post-switch fall-out) — MSC drops the jmp entirely
+    // (and the alignment nop with it). Fixture 2369 (nested switch).
+    let mut elided_last_break: Option<usize> = None;
+    if let Some(&last) = emission_order.last()
+        && let Some(&boff) = case_bufs[last].breaks.last()
+        && boff + 2 == case_bufs[last].buf.len()
+    {
+        case_bufs[last].buf.truncate(boff);
+        case_bufs[last].breaks.pop();
+        elided_last_break = Some(last);
+    }
+
     // Compute body offsets (relative to switch start) and per-body nop flags,
     // using absolute position for alignment so the parity is correct even if
     // the switch does not start on an even function offset.
@@ -3270,7 +3286,9 @@ pub(crate) fn emit_runtime_switch(
     for &i in &emission_order {
         body_offsets[i] = running_abs - start;
         running_abs += case_bufs[i].buf.len();
-        if running_abs % 2 != 0 {
+        // A body whose trailing break was elided loses its alignment pad too
+        // (MSC drops the whole `jmp; nop` tail — fixture 2369).
+        if running_abs % 2 != 0 && elided_last_break != Some(i) {
             body_has_nop[i] = true;
             running_abs += 1;
         }

@@ -277,6 +277,28 @@ pub(crate) fn emit_function(
     union_globals: &std::collections::HashSet<usize>,
 ) -> FunctionEmit {
     let (body, mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, struct_is_union, union_globals);
+    // Splice top-level blocks that contain a switch into the top-level
+    // statement stream, so a switch inside a const-folded outer switch's
+    // body reaches the partial-switch continuation machinery below
+    // (fixture 2641: nested switch in a folded arm). Gated narrowly to
+    // switch-bearing blocks to leave every other layout untouched.
+    let (body, from_block): (Vec<Stmt>, Vec<bool>) = {
+        fn splice(stmts: Vec<Stmt>, depth: usize, out: &mut Vec<(Stmt, bool)>) {
+            for s in stmts {
+                match s {
+                    Stmt::Block(inner)
+                        if inner.iter().any(|t| matches!(t, Stmt::Switch { .. })) =>
+                    {
+                        splice(inner, depth + 1, out);
+                    }
+                    other => out.push((other, depth > 0)),
+                }
+            }
+        }
+        let mut flat: Vec<(Stmt, bool)> = Vec::with_capacity(body.len());
+        splice(body, 0, &mut flat);
+        flat.into_iter().unzip()
+    };
     // Extract a `Vec<Option<i32>>` view for the existing fold path —
     // saves rewriting every codegen helper to know about LocalSpec.
     // Strip the init for any local that was mutated during the
@@ -776,8 +798,22 @@ pub(crate) fn emit_function(
                 && !fold.ops.is_empty()
                 && match known_k {
                     Some(_) => ft.is_some() || live_nonterm,
-                    None => live_nonterm
-                        && crate::codegen::statements::switch_has_break(cases),
+    // Runtime: break-out bodies use the FWD continuation
+                    // layout (454) — but only for lexically top-level
+                    // switches; one spliced out of a folded outer switch
+                    // keeps the plain sequential layout (2369). A lone
+                    // terminating case body from a folded block lays the
+                    // continuation at the chain fall-through with the body
+                    // after it (DIRECT — 2641); at top level it keeps the
+                    // jne form (3082). All-terminating multi-case switches
+                    // keep the plain chain (3084).
+                    None => (live_nonterm
+                        && !from_block[i]
+                        && crate::codegen::statements::switch_has_break(cases))
+                        || (from_block[i]
+                            && cases.len() == 1
+                            && ft.is_none()
+                            && arm_body_terminates(cases, 0, &locals_view)),
                 };
             if use_partial {
                 let cont_reachable = emit_partial_switch_with_continuation(
