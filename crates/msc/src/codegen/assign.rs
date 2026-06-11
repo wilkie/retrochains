@@ -3434,6 +3434,22 @@ pub(crate) fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8,
         fixups.push(Fixup { body_offset, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
         return;
     }
+    // `s.name = "lit"` / `s.p = &g` — store the link-time CONST/global OFFSET into
+    // the (word) pointer field with the `c7 46 disp <off16>` immediate form +
+    // fixup, like the scalar `p = &g` / `s = "lit"` stores. Fixture 2420.
+    if size == 2 {
+        if let Some(fixup) = match value {
+            Expr::StrLit(idx) => Some(FixupKind::StrLoad { string_idx: *idx }),
+            Expr::AddrOfGlobal(g) => Some(FixupKind::GlobalAddr { global_idx: *g }),
+            _ => None,
+        } {
+            out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            let body_offset = out.len() - 1;
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset, kind: fixup });
+            return;
+        }
+    }
     if size == 1 {
         if let Some(k) = value.fold(locals.inits) {
             let imm = (k as u32 & 0xFF) as u8;
