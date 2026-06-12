@@ -650,7 +650,7 @@ pub(crate) fn is_long_muldiv(e: &Expr, locals: &Locals<'_>) -> bool {
     matches!(e, Expr::BinOp { op, left, right }
         if long_muldiv_helper(*op, false).is_some()
             && long_operand(left, locals)
-            && long_operand(right, locals)
+            && (long_operand(right, locals) || right.fold(locals.inits).is_some())
             && long_shl_amount(*op, right, locals).is_none())
 }
 
@@ -745,6 +745,19 @@ pub(crate) fn push_long_operand(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>
         Expr::Global(j) => { push_global_word(2, *j, out); push_global_word(0, *j, out); }
         Expr::Param(i) => { let d = long_param_disp(*i, locals); push_bp_word(d + 2, out); push_bp_word(d, out); }
         Expr::Local(i) => { let d = locals.disp(*i); push_bp_word(d + 2, out); push_bp_word(d, out); }
+        // A constant long operand (`2L`, `10L`) — sign-extend the low word into
+        // DX:AX and push both: `mov ax,K; cwd; push dx; push ax`. Fixtures
+        // 3176 (`v / 2L`), 3303 (`a * 10L`).
+        _ if e.fold(locals.inits).is_some() => {
+            let k = e.fold(locals.inits).unwrap();
+            out.push(0xB8); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov ax,K
+            if ((k as i32) >> 16) == if k < 0 { -1 } else { 0 } {
+                out.push(0x99); // cwd (high word is the sign extension)
+            } else {
+                out.push(0xBA); out.extend_from_slice(&(((k as i32) >> 16) as u16).to_le_bytes()); // mov dx, hi
+            }
+            out.push(0x52); out.push(0x50); // push dx; push ax
+        }
         _ => unreachable!("long_operand gates these forms"),
     }
 }
@@ -839,7 +852,7 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
         Expr::BinOp { op, left, right }
             if long_muldiv_helper(*op, false).is_some()
                 && long_operand(left, locals)
-                && long_operand(right, locals)
+                && (long_operand(right, locals) || right.fold(locals.inits).is_some())
                 && long_shl_amount(*op, right, locals).is_none() =>
         {
             let unsigned = long_operand_unsigned(left, locals)
