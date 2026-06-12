@@ -2374,12 +2374,21 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     let init_view: Vec<Option<i32>> = locals
                         .iter()
                         .take(local_idx)
+                        // Only LITERAL-valued prior locals propagate into a later
+                        // init. A COMPUTED prior local (`b = a + 1`) stores its
+                        // folded value but does NOT substitute into `c = b * 2` —
+                        // MSC reloads b and keeps `* 2` a runtime shl. Fixture 1811
+                        // (vs the chained-literal `b = a` which propagates).
                         // A signed `char` local folds as its sign-extended byte:
                         // `char c = 200; int n = c;` makes n = -56, not 200.
                         // Fixture 2284.
-                        .map(|l| l.init.map(|v| {
-                            if l.size == 1 && !l.is_unsigned && !l.is_long { (v as i8) as i32 } else { v }
-                        }))
+                        .map(|l| if l.init_is_literal {
+                            l.init.map(|v| {
+                                if l.size == 1 && !l.is_unsigned && !l.is_long { (v as i8) as i32 } else { v }
+                            })
+                        } else {
+                            None
+                        })
                         .collect();
                     // MSC never const-folds || / && into a compile-time
                     // literal (fixture 1466). For ternary: only skip fold
