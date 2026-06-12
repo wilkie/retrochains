@@ -2493,6 +2493,25 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         emit_bx(out, 0x03, offs[0]);                       // add ax,[bx+f0]  (source-first added last)
         return;
     }
+    // `m[a] + m[b] + m[c]` — 3+ flat subscripts of the SAME param (e.g. a 2-D
+    // param `m[i][j]` with const indices): load the pointer into BX once, then
+    // the same left-rotated read order as the p->field chain above. Fixtures
+    // 2236, 1922.
+    if matches!(op, BinOp::Add)
+        && let Some((p, offs)) = same_param_index_word_chain(left, right, locals.inits)
+        && offs.iter().all(|o| i8::try_from(*o).is_ok())
+    {
+        let pdisp = param_disp(p);
+        out.push(0x8B); out.push(bp_modrm(0x5E, pdisp)); push_bp_disp(out, pdisp); // mov bx,[bp+p]
+        let emit_bx = |out: &mut Vec<u8>, opc: u8, off: i32| {
+            if off == 0 { out.push(opc); out.push(0x07); }
+            else { out.push(opc); out.push(0x47); out.push(off as i8 as u8); }
+        };
+        emit_bx(out, 0x8B, offs[1]);                       // mov ax,[bx+f1]
+        for &o in &offs[2..] { emit_bx(out, 0x03, o); }    // add ax,[bx+fk]
+        emit_bx(out, 0x03, offs[0]);                       // add ax,[bx+f0]
+        return;
+    }
     // `*p + *(p+K)` — both operands are word derefs of the SAME pointer param at
     // constant offsets. Load `p` into BX once, then `mov ax,[bx+roff]; add ax,
     // [bx+loff]` (RHS into AX, LHS as a memory operand — `+` is commutative).
@@ -2831,6 +2850,32 @@ fn param_char_deref_offset(e: &Expr) -> Option<(usize, i32)> {
             }
         }
         _ => None,
+    }
+}
+/// `m[a] + m[b] + m[c] [+ ...]` — 3+ word subscripts of the SAME pointer/array
+/// param (each a flat `ParamIndex` with a constant index, e.g. a 2-D param
+/// `m[i][j]`). Returns `(param, [byte_offset; ...])` in source order so the
+/// caller can load the pointer into BX once. Fixtures 2236, 1922.
+fn same_param_index_word_chain(left: &Expr, right: &Expr, inits: &[Option<i32>]) -> Option<(usize, Vec<i32>)> {
+    fn collect(e: &Expr, p: &mut Option<usize>, offs: &mut Vec<i32>, inits: &[Option<i32>]) -> bool {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            return collect(left, p, offs, inits) && collect(right, p, offs, inits);
+        }
+        if let Expr::ParamIndex { param, index } = e
+            && let Some(k) = index.fold(inits)
+        {
+            match p { None => *p = Some(*param), Some(x) if *x == *param => {} _ => return false }
+            offs.push(k * 2); // int element → byte offset
+            true
+        } else {
+            false
+        }
+    }
+    let (mut p, mut offs) = (None, Vec::new());
+    if collect(left, &mut p, &mut offs, inits) && collect(right, &mut p, &mut offs, inits) && offs.len() >= 3 {
+        Some((p?, offs))
+    } else {
+        None
     }
 }
 fn same_param_field_word_chain(left: &Expr, right: &Expr) -> Option<(usize, Vec<i32>)> {
