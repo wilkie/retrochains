@@ -2053,6 +2053,10 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 *e = Expr::LocalField { local: *local, byte_off, size: *size };
             }
         }
+        Expr::ParamPtrArrayDeref { index, inner, .. } => {
+            prop_expr(index, cp);
+            prop_expr(inner, cp);
+        }
         Expr::ParamStructArrayField { param, index, stride, field_off, size } => {
             prop_expr(index, cp);
             // Index known → fold to a plain DerefParamField (addressing only;

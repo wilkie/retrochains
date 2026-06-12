@@ -1106,6 +1106,24 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             emit_param_struct_row_si(index, *stride, *param, locals, out, fixups);
             emit_si_field_read(*field_off as i16, *size, out);
         }
+        Expr::ParamPtrArrayDeref { param, index, inner, elem_size } => {
+            // `argv[i][j]`: load argv into BX, the element pointer at [bx+2i] into
+            // BX, then read elem_size bytes at [bx + j*elem]. `mov bx,[bp+p]; mov
+            // bx,[bx+2i]; mov al/ax,[bx+j*e]`. Fixture 2962.
+            let pd = param_disp(*param);
+            out.push(0x8B); out.push(bp_modrm(0x5E, pd)); push_bp_disp(out, pd); // mov bx,[bp+p]
+            let k = index.fold(locals.inits)
+                .expect("non-constant double-pointer-param index not supported");
+            let off = (k as i32 * 2) as i16;
+            if off == 0 {
+                out.extend_from_slice(&[0x8B, 0x1F]);                 // mov bx,[bx]
+            } else if let Ok(d8) = i8::try_from(off) {
+                out.extend_from_slice(&[0x8B, 0x5F, d8 as u8]);       // mov bx,[bx+disp8]
+            } else {
+                out.push(0x8B); out.push(0x9F); out.extend_from_slice(&off.to_le_bytes());
+            }
+            emit_ptr_array_read_elem(inner, *elem_size, locals, out);
+        }
         Expr::PtrArrayElem { array, index } => {
             // Pointer VALUE at element `index` of an array-of-pointers global.
             if let Some(k) = index.fold(locals.inits) {

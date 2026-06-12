@@ -1280,6 +1280,11 @@ pub enum Expr {
     /// [si+field_off]`. Const-prop folds to a plain `DerefParamField` when `i`
     /// is known. Fixture 2208.
     ParamStructArrayField { param: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
+    /// `argv[i][j]` on a double-pointer PARAM (`char **argv`, `int **pp`): load
+    /// the param into BX, the element pointer at `[bx+2*index]` into BX, then read
+    /// `elem_size` bytes at `[bx + inner*elem_size]`. `mov bx,[bp+p]; mov bx,
+    /// [bx+2i]; mov al/ax,[bx+j*e]`. Fixture 2962.
+    ParamPtrArrayDeref { param: usize, index: Box<Expr>, inner: Box<Expr>, elem_size: u8 },
     /// Pointer member-chain read `o->p->v` / `(*p).x` / `w->data[K]`: load the
     /// `base` pointer into BX, dereference through each `hop` offset
     /// (`mov bx,[bx+hop]`), then read `final_size` bytes at `final_off`. Fixtures
@@ -1366,7 +1371,7 @@ impl Expr {
             Expr::StrLitByte { .. } => None,
             Expr::PtrChainField { .. } => None,
             Expr::StructArrayField { .. } | Expr::LocalStructArrayField { .. }
-            | Expr::ParamStructArrayField { .. } => None,
+            | Expr::ParamStructArrayField { .. } | Expr::ParamPtrArrayDeref { .. } => None,
             Expr::Index2D { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
@@ -1595,6 +1600,10 @@ struct Parser<'a> {
     /// `int *f()` → 2), keyed by symbol name. Lets `f()[K]` pick byte vs word
     /// deref at parse time. Fixture 1227.
     fn_return_pointee: std::collections::HashMap<String, usize>,
+    /// Final-element byte size of a double-pointer PARAM (`char **argv` → 1,
+    /// `int **pp` → 2), keyed by param name. Lets `argv[i][j]` pick byte vs word
+    /// at the inner deref. Cleared per function. Fixture 2962.
+    param_dptr_elem: std::collections::HashMap<String, usize>,
     /// Per-function counter of `make().field` temps assigned so far (reset at the
     /// start of each function body). Each such expression gets the next index,
     /// laid out at the deepest frame slots in source order.

@@ -44,6 +44,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         block_local_scopes: Vec::new(),
         fn_return_struct_idx: std::collections::HashMap::new(),
         fn_return_pointee: std::collections::HashMap::new(),
+        param_dptr_elem: std::collections::HashMap::new(),
         struct_field_temp_count: 0,
     };
     let mut proto_long_params: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
@@ -1585,6 +1586,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     p.fn_ptr_params.clear();
     p.fn_ptr_locals.clear();
     p.param_dims.clear();
+    p.param_dptr_elem.clear();
     p.block_scope_stack.clear();
     p.free_block_slots.clear();
     p.block_frame_max = 0;
@@ -1720,6 +1722,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     p.structs.get(si).map(|s| s.total_bytes).unwrap_or(2)
                 } else { 2 }
             } else { 0 };
+            let mut dptr_final_elem: Option<usize> = None;
             if has_ptr {
                 p.bump();
                 is_char = false; // pointer: always word-sized
@@ -1728,6 +1731,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 // (2 bytes); the deref count is driven by `*`/`**` at the use
                 // site. Fixtures 2680/2721/2906/3190/3479.
                 if matches!(p.peek(), Some(Tok::Star)) {
+                    // The pre-`**` `pointee_size` is the FINAL element size
+                    // (char→1, int→2): record it so `argv[i][j]` picks byte/word
+                    // at the inner deref. Fixture 2962.
+                    dptr_final_elem = Some(pointee_size);
                     while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
                     pointee_size = 2;
                 }
@@ -1740,6 +1747,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     )));
                 }
             };
+            if let Some(elem) = dptr_final_elem {
+                p.param_dptr_elem.insert(pname.clone(), elem);
+            }
             // `int a[]` / `int a[N]` decay to `int *a`; `int a[N][M]` decays to
             // `int (*)[M]`. Eat every bracket pair, capturing the dimensions so a
             // 2-D subscript `a[i][j]` can fold to a flat `ParamIndex`.
@@ -5717,6 +5727,20 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
+                    // `argv[i][j]` — double-pointer param: index the pointer array
+                    // then deref the element pointer. The recorded final-element
+                    // size picks byte/word. Fixture 2962.
+                    if matches!(p.peek(), Some(Tok::LBrack))
+                        && let Some(&elem) = p.param_dptr_elem.get(&name)
+                    {
+                        p.bump();
+                        let inner = parse_expr(p)?;
+                        p.eat(&Tok::RBrack)?;
+                        return Ok(Expr::ParamPtrArrayDeref {
+                            param: idx, index: Box::new(index),
+                            inner: Box::new(inner), elem_size: elem as u8,
+                        });
+                    }
                     // `pts[i].field` — index a struct-POINTER param then a field.
                     // Constant index folds to a DerefParamField; a runtime index
                     // defers to ParamStructArrayField (si = pts + i*stride). 2208.
