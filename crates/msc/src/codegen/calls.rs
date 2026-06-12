@@ -685,7 +685,8 @@ pub(crate) fn is_long_field_elem_or_const_arith(e: &Expr, locals: &Locals<'_>) -
 /// `e` is a long right shift by one (`v >> 1`).
 pub(crate) fn is_long_shr1(e: &Expr, locals: &Locals<'_>) -> bool {
     matches!(e, Expr::BinOp { op: BinOp::Shr, left, right }
-        if right.fold(locals.inits) == Some(1) && long_operand(left, locals))
+        if matches!(right.fold(locals.inits), Some(k) if (1..16).contains(&k))
+            && long_operand(left, locals))
 }
 
 /// `e` is a long negate `-x` (parsed as `0 - x`).
