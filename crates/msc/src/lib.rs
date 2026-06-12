@@ -2501,11 +2501,48 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             for &gi in &extern_globals {
                 entries.push((symbol_name(&unit.globals[gi].name), 0x00, false));
             }
-            for name in &user_extern_order {
-                entries.push((name.clone(), 0x00, false));
-            }
-            for &fi in &fn_order {
-                entries.push((fn_symbol(&unit.functions[fi]), 0x00, unit.functions[fi].is_static));
+            // User function symbols (defined functions + user externs) interleave
+            // by SOURCE APPEARANCE rather than as two separate extern-then-defined
+            // blocks. Two phases:
+            //   1. Implicit externs (no prototype → no appearance slot, e.g.
+            //      `printf`) lead, in first-reference order. Fixtures 4103/4128/…
+            //   2. Defined functions and PROTOTYPED externs, interleaved by their
+            //      appearance position (`int f(){} long g(); main()` → _f, _g,
+            //      _main). Fixture 387.
+            {
+                let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let has_appearance =
+                    |name: &str| unit.fn_appearance.iter().any(|c| symbol_name(c) == name);
+                for name in &user_extern_order {
+                    if !has_appearance(name) && emitted.insert(name.clone()) {
+                        entries.push((name.clone(), 0x00, false));
+                    }
+                }
+                for cname in &unit.fn_appearance {
+                    if let Some(fi) = fn_order.iter().copied().find(|&fi| unit.functions[fi].name == *cname) {
+                        let sym = fn_symbol(&unit.functions[fi]);
+                        if emitted.insert(sym.clone()) {
+                            entries.push((sym, 0x00, unit.functions[fi].is_static));
+                        }
+                    } else {
+                        let sym = symbol_name(cname);
+                        if user_extern_order.contains(&sym) && emitted.insert(sym.clone()) {
+                            entries.push((sym, 0x00, false));
+                        }
+                    }
+                }
+                // Safety nets: any extern/defined fn not yet placed.
+                for name in &user_extern_order {
+                    if emitted.insert(name.clone()) {
+                        entries.push((name.clone(), 0x00, false));
+                    }
+                }
+                for &fi in &fn_order {
+                    let sym = fn_symbol(&unit.functions[fi]);
+                    if emitted.insert(sym.clone()) {
+                        entries.push((sym, 0x00, unit.functions[fi].is_static));
+                    }
+                }
             }
             if !chkstk_early {
                 entries.push(("__chkstk".to_owned(), 0x00, false));
