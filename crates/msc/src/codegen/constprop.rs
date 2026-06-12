@@ -223,6 +223,25 @@ fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
     let total = base_off + deref_off;
     if total < 0 || total % elem != 0 { return; }
     if deref_off == 0 && total == 0 {
+        // A char-pointer deref of an aliased WIDER object reads the LOW byte at
+        // runtime (`mov al,[x]; cbw`) — MSC does NOT fold the partial read to the
+        // full word value (fixture 1562, `*(char*)&int_x`). When the aliased
+        // object is itself a 1-byte char, the byte read IS the whole value, so it
+        // folds like the word case (fixture 610, `*(&char_c)`).
+        let base_is_byte_wide = match base {
+            AliasTarget::Local(a) => cp.local_specs.get(a).map(|s| s.size == 1).unwrap_or(false),
+            AliasTarget::Global(g) => cp.global_elem_sizes.get(g) == Some(&1),
+            AliasTarget::String(_) => true, // string bytes are 1-wide
+        };
+        if is_byte && !base_is_byte_wide {
+            let idx = Box::new(Expr::IntLit(0));
+            *e = match base {
+                AliasTarget::Local(a) => Expr::LocalIndexByte { local: a, index: idx },
+                AliasTarget::Global(g) => Expr::IndexByte { array: g, index: idx },
+                AliasTarget::String(_) => return,
+            };
+            return;
+        }
         *e = match base {
             AliasTarget::Local(x) => Expr::Local(x),
             AliasTarget::Global(g) => Expr::Global(g),
