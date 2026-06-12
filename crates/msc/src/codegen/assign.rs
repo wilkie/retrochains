@@ -3100,6 +3100,16 @@ pub(crate) fn emit_assign_indexed_local(local_idx: usize, byte_off: u16, value: 
         fixups.push(Fixup { body_offset, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
         return;
     }
+    // `strs[K] = "lit"` — store the link-time CONST offset directly with
+    // `c7 46 disp <off16>` + StrLoad fixup (like the scalar `char *s = "lit"`
+    // store), not via AX. Fixtures 1710, 1921.
+    if let Expr::StrLit(string_idx) = value {
+        out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        let body_offset = out.len() - 1;
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset, kind: FixupKind::StrLoad { string_idx: *string_idx } });
+        return;
+    }
     // Long array element store `a[K] = <long>`: write both words — low at the
     // element disp, high at disp+2 — mirroring the scalar-long-local store.
     // Fixtures 304/306. A known constant uses two `c7` immediates (or the

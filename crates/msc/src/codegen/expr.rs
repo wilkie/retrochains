@@ -1049,6 +1049,15 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             emit_ptr_array_load_bx(*array, index, locals, out, fixups);
             emit_ptr_array_read_elem(inner, *elem_size, locals, out);
         }
+        Expr::LocalPtrArrayDeref { local, index, inner, elem_size } => {
+            // Load the pointer element from the frame (`mov bx,[bp-disp+2k]`),
+            // then read `elem_size` bytes at `[bx + inner*elem_size]`.
+            let k = index.fold(locals.inits)
+                .expect("non-constant local pointer-array index not supported");
+            let disp = locals.disp(*local) + (k as i32 * 2) as i16;
+            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+            emit_ptr_array_read_elem(inner, *elem_size, locals, out);
+        }
         Expr::IndexByte { array, index } => {
             // Constant index → `a0 <byte_off> 98` (the placeholder is the index;
             // the linker adds the array base). Runtime index → BX-based:
@@ -2279,6 +2288,20 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         byte_read(lk, out);                  // mov al,[bx+lk]; cbw  (LHS)
         out.extend_from_slice(&[0x8B, 0xC8]); // mov cx, ax
         byte_read(rk, out);                  // mov al,[bx+rk]; cbw  (RHS)
+        out.extend_from_slice(&[0x03, 0xC1]); // add ax, cx
+        return;
+    }
+    // `str_a[i] + str_b[j]` — two CONST string-literal byte reads (folded from
+    // `arr[i][j]` element-aliased reads). Load the LEFT byte into AX, park in
+    // CX, load the RIGHT byte, then `add ax,cx` — the same left-first schedule
+    // as the `s[i]+s[j]` rule above. Fixture 1921.
+    if matches!(op, BinOp::Add)
+        && matches!(left, Expr::StrLitByte { .. })
+        && matches!(right, Expr::StrLitByte { .. })
+    {
+        emit_expr_to_ax(left, locals, out, fixups);
+        out.extend_from_slice(&[0x8B, 0xC8]); // mov cx, ax
+        emit_expr_to_ax(right, locals, out, fixups);
         out.extend_from_slice(&[0x03, 0xC1]); // add ax, cx
         return;
     }

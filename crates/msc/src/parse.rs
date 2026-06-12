@@ -5580,6 +5580,19 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         let args = parse_call_args(p)?;
                         return Ok(Expr::CallPtr { target: Box::new(target), args });
                     }
+                    // Array-of-pointers local (`char *strs[N]`): `strs[i]` is the
+                    // pointer element; a following `[j]` derefs it (`strs[i][j]`).
+                    // Mirrors the global PtrArrayDeref path; const-prop folds when
+                    // the element aliases a known string. Fixtures 1710, 1921.
+                    if ptsz > 0 && matches!(p.peek(), Some(Tok::LBrack)) {
+                        p.bump();
+                        let inner = parse_expr(p)?;
+                        p.eat(&Tok::RBrack)?;
+                        return Ok(Expr::LocalPtrArrayDeref {
+                            local: idx, index: Box::new(index),
+                            inner: Box::new(inner), elem_size: ptsz as u8,
+                        });
+                    }
                     return if p.local_specs[idx].size == 1 {
                         Ok(Expr::LocalIndexByte { local: idx, index: Box::new(index) })
                     } else {

@@ -1154,6 +1154,13 @@ pub enum Expr {
     /// `char *names[]`, 2 for `int *table[]`). Fixtures 1394, 2231, 2345,
     /// 2397, 2551, 2608.
     PtrArrayDeref { array: usize, index: Box<Expr>, inner: Box<Expr>, elem_size: u8 },
+    /// `arr[i][j]` / `*arr[i]` on an array-of-pointers LOCAL (`char *strs[N]`,
+    /// `int *table[N]`) — load the pointer element from `[bp-disp + 2*index]`
+    /// into BX, then read `elem_size` bytes at `inner*elem_size`. Mirrors
+    /// PtrArrayDeref but with frame-relative element addressing. Usually folds
+    /// in const-prop when the element aliases a known string/global (the corpus
+    /// cases 1710, 1921 store string literals into the elements).
+    LocalPtrArrayDeref { local: usize, index: Box<Expr>, inner: Box<Expr>, elem_size: u8 },
     /// `&<global>` — address-of a file-scope global, as an
     /// expression. Lowers to `b8 imm16` with a FIXUP on the imm16
     /// targeting the global. Fixture 4125 (passed as an argument).
@@ -1339,7 +1346,7 @@ impl Expr {
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
-            Expr::PtrArrayElem { .. } | Expr::PtrArrayDeref { .. } => None,
+            Expr::PtrArrayElem { .. } | Expr::PtrArrayDeref { .. } | Expr::LocalPtrArrayDeref { .. } => None,
             Expr::BitField { .. } => None,
             Expr::StrLitByte { .. } => None,
             Expr::PtrChainField { .. } => None,

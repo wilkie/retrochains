@@ -445,6 +445,15 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 }
                 return;
             }
+            // `arr[K] = "lit"` (arr a local array of char pointers) records the
+            // element as a string alias so a later `arr[K][j]` folds to a CONST
+            // byte. The `OFFSET str` store still emits. Fixtures 1710, 1921.
+            if let AssignTarget::IndexedLocal { local, byte_off } = target
+                && let Expr::StrLit(idx) = value
+            {
+                cp.elem_ptr_alias.insert((*local, *byte_off), AliasTarget::String(*idx));
+                return;
+            }
             // Struct-field pointer aliasing: `o.p = &i` (o.p a pointer field)
             // records `(o, byte_off) -> i`, so a later chain read `o.p->v` folds
             // to the direct field `i.v`. Same key shape (local, byte_off) as the
@@ -1669,6 +1678,46 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::PtrArrayDeref { index, inner, .. } => {
             prop_expr(index, cp);
             prop_expr(inner, cp);
+        }
+        Expr::LocalPtrArrayDeref { local, index, inner, elem_size } => {
+            prop_expr(index, cp);
+            prop_expr(inner, cp);
+            // `strs[i][j]` where the element `strs[i]` aliases a known string /
+            // global / local array → fold to a direct CONST byte / indexed read.
+            // Element stride is 2 (pointer slots), so key by `2*i`.
+            if let Expr::IntLit(k) = index.as_ref()
+                && let Ok(byte_off) = u16::try_from(*k as i64 * 2)
+                && let Some(&a) = cp.elem_ptr_alias.get(&(*local, byte_off))
+            {
+                match a {
+                    AliasTarget::String(sidx) => {
+                        if *elem_size == 1
+                            && let Expr::IntLit(j) = inner.as_ref()
+                            && let Ok(off) = u16::try_from(*j as i64 * *elem_size as i64)
+                        {
+                            *e = Expr::StrLitByte { string_idx: sidx, byte_off: off };
+                        }
+                    }
+                    AliasTarget::Global(g) => {
+                        let inner = inner.clone();
+                        *e = if *elem_size == 1 {
+                            Expr::IndexByte { array: g, index: inner }
+                        } else {
+                            Expr::Index { array: g, index: inner }
+                        };
+                        prop_expr(e, cp);
+                    }
+                    AliasTarget::Local(x) => {
+                        let inner = inner.clone();
+                        *e = if *elem_size == 1 {
+                            Expr::LocalIndexByte { local: x, index: inner }
+                        } else {
+                            Expr::LocalIndex { local: x, index: inner }
+                        };
+                        prop_expr(e, cp);
+                    }
+                }
+            }
         }
         Expr::Index2D { is_global, base, row, col, cols, elem } => {
             prop_expr(row, cp);
