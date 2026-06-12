@@ -1108,10 +1108,19 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             out.extend_from_slice(&imm.to_le_bytes());
         }
-    } else if locals.is_long_local(local_idx) && long_operand(value, locals) {
-        // Long-local = long RHS (`b = a`): load both words into DX:AX and store
-        // both halves — `mov ax,[lo]; mov dx,[hi]; mov [b],ax; mov [b+2],dx`.
-        // Fixture 2912.
+    } else if locals.is_long_local(local_idx)
+        && (long_operand(value, locals)
+            || is_long_arith_mem(value, locals)
+            || crate::codegen::calls::is_long_plus_int(value, locals)
+            // `<long> ± <const>` (`g + 5`): a long-valued add/sub that
+            // emit_long_to_dx_ax lowers to a two-word add/adc. Fixtures 350/357.
+            || matches!(value, Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right }
+                if long_operand(left, locals) && !long_operand(right, locals)
+                    && right.fold(locals.inits).is_some()))
+    {
+        // Long-local = long RHS (`b = a`, `g + 5`, `g + h`): load both words
+        // into DX:AX and store both halves — `mov ax,[lo]; mov dx,[hi]; mov
+        // [b],ax; mov [b+2],dx`. Fixtures 2912/350/357.
         emit_long_to_dx_ax(value, locals, out, fixups);
         out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);   // mov [lo],ax
         let hi = disp + 2;
