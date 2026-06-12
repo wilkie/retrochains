@@ -2987,6 +2987,14 @@ fn emit_arg_to_cx(e: &Expr, _locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
     }
 }
 fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // CastLong in an INT binop context: the long-ness is unused here (a genuine
+    // long binop is routed through emit_long_to_dx_ax before reaching this int
+    // path), so operate on the inner int operand. Avoids the generic fallback
+    // panicking on a long-cast operand of a shift, etc.
+    if matches!(left, Expr::CastLong { .. }) || matches!(right, Expr::CastLong { .. }) {
+        let unwrap = |e: &Expr| match e { Expr::CastLong { value, .. } => (**value).clone(), other => other.clone() };
+        return emit_binop_inner(op, &unwrap(left), &unwrap(right), locals, out, fixups);
+    }
     // Logical-and/or as a VALUE: short-circuit branches producing 0 or 1 in AX.
     // Pattern: emit_cond_skip(cond, 5); [mov ax,1; jmp +2]; [sub ax,ax]
     // The true block is 5 bytes (B8 01 00 EB 02); jmp +2 skips sub ax,ax.
