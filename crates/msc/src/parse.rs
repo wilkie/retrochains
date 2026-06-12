@@ -3721,6 +3721,24 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 return Err(EmitError::Unsupported(format!(
                     "prefix `++/--` on parenthesized non-deref: {inner:?}")));
             }
+            // `++*p;` / `--*p;` — pre-inc/dec the pointee through a BARE deref
+            // (no parens). Same lowering as the parenthesized `++(*p)` form:
+            // `*p = *p ± 1`. Fixture 2331.
+            if matches!(p.peek(), Some(Tok::Star)) {
+                let inner = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                if let Some(target) = expr_to_deref_target(&inner) {
+                    return Ok(Stmt::Assign {
+                        target,
+                        value: Expr::BinOp {
+                            op: if inc { BinOp::Add } else { BinOp::Sub },
+                            left: Box::new(inner), right: Box::new(Expr::IntLit(1)),
+                        },
+                    });
+                }
+                return Err(EmitError::Unsupported(format!(
+                    "prefix `++/--` on non-deref star expr: {inner:?}")));
+            }
             let name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {

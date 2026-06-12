@@ -4234,7 +4234,10 @@ pub(crate) fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &L
             if matches!(ptr.as_ref(), Expr::Local(l) if *l == local_idx))
         && let Expr::IntLit(k) = right.as_ref()
     {
-        out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[p]
+        // `mov bx,[p]` — but reuse `mov bx,ax` when AX provably still holds p
+        // (e.g. `int *p=&x; (*p)++; ++*p;` keeps &x in AX across the first inc).
+        // Fixture 2331; falls back to the slot reload otherwise (1302).
+        crate::codegen::expr::emit_ptr_local_to_bx(disp, locals, out);
         emit_inplace_bx_word_op(*op, *k, out);
         return;
     }

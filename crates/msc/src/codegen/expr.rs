@@ -1588,6 +1588,16 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
             && out[n - 3..n] != store_self[1..]
         {
             4 // op [bp+d16],ax / op [o16],ax
+        } else if n >= 3 && out[n - 3] == 0xFF && (out[n - 2] == 0x46 || out[n - 2] == 0x4E) {
+            // inc/dec word [bp+d8] — preserves AX, transparent unless it steps
+            // the queried slot itself (then AX no longer mirrors it). Mirrors
+            // the loop-tail strip; lets `++*p` after `(*p)++` reuse AX (2331).
+            if store_self.len() == 3 && out[n - 1] == store_self[2] { return false; }
+            3
+        } else if n >= 4 && out[n - 4] == 0xFF && (out[n - 3] == 0x06 || out[n - 3] == 0x0E) {
+            // inc/dec word [o16] (global step) — same rule for a global slot.
+            if store_self.len() == 3 && store_self[0] == 0xA3 && out[n - 2..n] == store_self[1..] { return false; }
+            4
         } else {
             return false;
         };
