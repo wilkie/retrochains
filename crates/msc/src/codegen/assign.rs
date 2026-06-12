@@ -3669,6 +3669,31 @@ pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u
             emit_long_global_muldiv(global_idx, byte_off, *op, right, locals.is_unsigned_global(global_idx), locals, out, fixups);
             return;
         }
+        // Long field compound shift by K>=2 `s.f <<= k` / `>>= k` → runtime helper
+        // taking the count (AL) and the field address (OFFSET base+byte_off).
+        // Shift-by-1 was handled in-place by emit_long_global_4byte above. 397.
+        if let Expr::BinOp { op, left, right } = value
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && matches!(left.as_ref(), Expr::GlobalField { global: g, byte_off: bo, .. } if *g == global_idx && *bo == byte_off)
+            && let Some(k) = right.fold(locals.inits).filter(|k| (0..32).contains(k))
+        {
+            let helper = match (op, locals.is_unsigned_global(global_idx)) {
+                (BinOp::Shl, _) => "__aNNalshl",
+                (BinOp::Shr, false) => "__aNNalshr",
+                (BinOp::Shr, true) => "__aNNaulshr",
+                _ => unreachable!(),
+            };
+            out.extend_from_slice(&[0xB0, k as u8]); // mov al, k
+            out.push(0x50); // push ax
+            let b8 = out.len();
+            out.push(0xB8); out.extend_from_slice(&byte_off.to_le_bytes()); // mov ax, OFFSET base+byte_off
+            fixups.push(Fixup { body_offset: b8, kind: FixupKind::GlobalAddr { global_idx } });
+            out.push(0x50); // push ax
+            let call = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
+            fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+            return;
+        }
     }
     // Int (word) field compound `s.f op= <simple int operand>` (add/sub/and/or/
     // xor): MSC evaluates the RHS into AX then applies an in-place memory-with-
