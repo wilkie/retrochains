@@ -1804,13 +1804,20 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
     // Long-global compound shift `g <<= k` / `g >>= k`: MSC calls a runtime
     // helper, passing the shift count (in AL) and the global's address.
     //   mov al, k; push ax; mov ax, OFFSET g; push ax; call __aNN*shl/shr
-    // Fixtures 263, 264, 1139.
+    // Fixtures 263, 264, 1139. A self-multiply by a power of two (`g = g * 2^k`)
+    // strength-reduces to the SAME left-shift path. Fixture 283 (`g = g*2`).
     if locals.is_long_global(global_idx)
         && let Expr::BinOp { op, left, right } = value
-        && matches!(op, BinOp::Shl | BinOp::Shr)
         && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
-        && let Some(k) = right.fold(locals.inits)
-        && (0..32).contains(&k)
+        && let Some((op, k)) = match op {
+            BinOp::Shl | BinOp::Shr => right
+                .fold(locals.inits)
+                .filter(|k| (0..32).contains(k))
+                .map(|k| (*op, k)),
+            BinOp::Mul => crate::codegen::calls::long_shl_amount(BinOp::Mul, right, locals)
+                .map(|k| (BinOp::Shl, k as i32)),
+            _ => None,
+        }
     {
         // Shift by 1 is done in place (shl/rcl, sar/shr+rcr); larger counts call
         // the runtime helper. Fixtures 265/266 (in-place) vs 263/264 (helper).
@@ -2678,7 +2685,12 @@ pub(crate) fn emit_long_global_4byte(
                 }
                 if high != 0 { word_imm(out, fixups, digit, hi, high); }
             }
+            // `g <<= 1` or its strength-reduced equivalent `g = g * 2`.
             BinOp::Shl if m == 1 => {
+                out.extend_from_slice(&[0xD1, 0x26]); put_addr(out, fixups, lo); // shl word [lo],1
+                out.extend_from_slice(&[0xD1, 0x16]); put_addr(out, fixups, hi); // rcl word [hi],1
+            }
+            BinOp::Mul if m == 2 => {
                 out.extend_from_slice(&[0xD1, 0x26]); put_addr(out, fixups, lo); // shl word [lo],1
                 out.extend_from_slice(&[0xD1, 0x16]); put_addr(out, fixups, hi); // rcl word [hi],1
             }

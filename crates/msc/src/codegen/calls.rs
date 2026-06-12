@@ -656,7 +656,7 @@ pub(crate) fn is_long_muldiv(e: &Expr, locals: &Locals<'_>) -> bool {
 
 /// Shift-left amount for a long `<<` / `* 2^n`: `v << k` (1..=31) or
 /// `v * 2^n` both lower to a left shift by that many bits.
-fn long_shl_amount(op: BinOp, right: &Expr, locals: &Locals<'_>) -> Option<u8> {
+pub(crate) fn long_shl_amount(op: BinOp, right: &Expr, locals: &Locals<'_>) -> Option<u8> {
     let k = right.fold(locals.inits)?;
     match op {
         BinOp::Shl if (1..=31).contains(&k) => Some(k as u8),
