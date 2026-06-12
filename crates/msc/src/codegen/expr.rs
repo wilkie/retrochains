@@ -3007,6 +3007,38 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
         return;
     }
+    // `int + (int)long`: the `(int)`-truncated long operand flattens to a bare
+    // long Param/Local, read here as its low word. MSC loads THAT low word into
+    // AX FIRST (`mov ax,[long]`) then adds the int operand (`add ax,[int]`),
+    // regardless of source side. Placed before the operand-ordering cases so it
+    // wins for `a + (int)b`. Fixtures 1947, 2038.
+    if matches!(op, BinOp::Add) {
+        let long_disp = |e: &Expr| -> Option<i16> {
+            match e {
+                Expr::Param(i) if locals.is_long_param(*i) => Some(param_disp(*i)),
+                Expr::Local(i) if locals.is_long_local(*i) => Some(locals.disp(*i)),
+                _ => None,
+            }
+        };
+        let int_simple = |e: &Expr| -> bool {
+            match e {
+                Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i) && !locals.is_float_param(*i),
+                Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i)
+                    && !locals.is_float_local(*i) && !locals.is_array_local(*i)
+                    && locals.reg_for_local(*i).is_none(),
+                _ => false,
+            }
+        };
+        let pair = if let Some(d) = long_disp(left) {
+            if int_simple(right) { Some((d, right)) } else { None }
+        } else if let Some(d) = long_disp(right) {
+            if int_simple(left) { Some((d, left)) } else { None }
+        } else { None };
+        if let Some((ld, other)) = pair {
+            out.push(0x8B); out.push(bp_modrm(0x46, ld)); push_bp_disp(out, ld); // mov ax,[long low]
+            return emit_binop_right(op, other, locals, out, fixups);            // add ax,[int]
+        }
+    }
     // Call-chain binop `f(..) OP g(..) [OP h(..)]` (2 or 3 calls, op add/sub):
     // MSC evaluates the calls RIGHT-to-LEFT, parking each result in SI then DI so
     // the running AX survives. Each non-rightmost call's (single, simple) arg is
