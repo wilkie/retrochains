@@ -903,6 +903,17 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             {
                 return;
             }
+            // `fn()[K]` and other call-rooted pointers: evaluate the pointer into
+            // BX (emit_load_bx runs the call into AX then `mov bx,ax`), then
+            // byte-deref + widen. Fixture 1227.
+            if matches!(ptr.as_ref(), Expr::Call { .. } | Expr::CallPtr { .. })
+                || matches!(ptr.as_ref(), Expr::BinOp { left, .. }
+                    if matches!(left.as_ref(), Expr::Call { .. } | Expr::CallPtr { .. }))
+            {
+                emit_load_bx(ptr, locals, out, fixups);
+                out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al,[bx]; cbw
+                return;
+            }
             let (ptr_idx, disp) = match ptr.as_ref() {
                 Expr::Global(idx) => (*idx, 0i8),
                 Expr::BinOp { op: BinOp::Add, left, right }

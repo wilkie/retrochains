@@ -1591,6 +1591,10 @@ struct Parser<'a> {
     /// (prototypes + definitions). Lets `make().field` resolve the member offset
     /// at parse time. Fixtures 2629/2634.
     fn_return_struct_idx: std::collections::HashMap<String, usize>,
+    /// Pointee byte size of a function's POINTER return type (`char *f()` → 1,
+    /// `int *f()` → 2), keyed by symbol name. Lets `f()[K]` pick byte vs word
+    /// deref at parse time. Fixture 1227.
+    fn_return_pointee: std::collections::HashMap<String, usize>,
     /// Per-function counter of `make().field` temps assigned so far (reset at the
     /// start of each function body). Each such expression gets the next index,
     /// laid out at the deepest frame slots in source order.

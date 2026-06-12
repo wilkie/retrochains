@@ -43,6 +43,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         block_frame_max: 0,
         block_local_scopes: Vec::new(),
         fn_return_struct_idx: std::collections::HashMap::new(),
+        fn_return_pointee: std::collections::HashMap::new(),
         struct_field_temp_count: 0,
     };
     let mut proto_long_params: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
@@ -1547,8 +1548,16 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     skip_decl_modifiers(p);
     // Pointer return types (`char *fn(...)`, `int *fn(...)`): consume
     // the `*` markers. We model the return as int (a pointer fits in
-    // AX) — sufficient for `fn()[K]` shapes (fixture 1227).
-    while matches!(p.peek(), Some(Tok::Star)) { p.bump(); return_struct_bytes = 0; return_struct_idx = None; }
+    // AX) — sufficient for `fn()[K]` shapes (fixture 1227). Record the pointee
+    // size so a caller's `fn()[K]` picks byte/word deref; a pointer return is
+    // NOT a char return (clear return_char so callers don't widen the result).
+    let mut return_pointee: Option<usize> = None;
+    while matches!(p.peek(), Some(Tok::Star)) {
+        p.bump();
+        return_struct_bytes = 0; return_struct_idx = None;
+        return_pointee = Some(if return_char { 1 } else if return_long { 4 } else { 2 });
+        return_char = false;
+    }
     // Reset the per-function `make().field` temp counter.
     p.struct_field_temp_count = 0;
     p.int_cast_ptrs.clear();
@@ -1565,6 +1574,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // `name().field` resolves the member offset (mirrors the prototype path).
     if let Some(sidx) = return_struct_idx {
         p.fn_return_struct_idx.insert(symbol_name(&name), sidx);
+    }
+    if let Some(pointee) = return_pointee {
+        p.fn_return_pointee.insert(symbol_name(&name), pointee);
     }
     p.eat(&Tok::LParen)?;
     // Parameter list: either `void` (no params) or one or more
@@ -5491,6 +5503,29 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     let temp_idx = p.struct_field_temp_count;
                     p.struct_field_temp_count += 1;
                     return Ok(Expr::CallStructField { name, args, byte_off, size, temp_idx });
+                }
+                // `fn()[K]` — index the pointer a call returns. The fn's return
+                // pointee size picks byte vs word deref; K scales by it. The deref
+                // ptr is the Call itself (emit_load_bx evaluates it into BX). 1227.
+                if matches!(p.peek(), Some(Tok::LBrack))
+                    && let Some(&pointee) = p.fn_return_pointee.get(&symbol_name(&name))
+                {
+                    p.bump();
+                    let index = parse_expr(p)?;
+                    p.eat(&Tok::RBrack)?;
+                    let call = Expr::Call { name, args };
+                    let ptr = if matches!(index, Expr::IntLit(0)) {
+                        call
+                    } else {
+                        let scaled = if pointee == 1 { index }
+                            else { Expr::BinOp { op: BinOp::Mul, left: Box::new(index), right: Box::new(Expr::IntLit(pointee as i32)) } };
+                        Expr::BinOp { op: BinOp::Add, left: Box::new(call), right: Box::new(scaled) }
+                    };
+                    return Ok(if pointee == 1 {
+                        Expr::DerefByte { ptr: Box::new(ptr) }
+                    } else {
+                        Expr::DerefWord { ptr: Box::new(ptr) }
+                    });
                 }
                 return Ok(Expr::Call { name, args });
             }
