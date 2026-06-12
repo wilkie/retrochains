@@ -4223,6 +4223,25 @@ pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> R
         }
         _ => parse_expr(p)?,
     };
+    // Pointer arithmetic through a double-pointer deref: `*pp += K` where pp is
+    // `T **` advances the pointee pointer by K * sizeof(T). Scale the step by the
+    // recorded final element size. Fixture 3647 (`struct Pt **pp; *pp += 1` → +=4).
+    let rhs = if matches!(op, BinOp::Add | BinOp::Sub)
+        && let AssignTarget::DerefParam(pp) = target
+        && let Some(&elem) = p.param_dptr_elem.get(&p.param_names[*pp])
+        && elem > 1
+    {
+        match rhs {
+            Expr::IntLit(k) => Expr::IntLit(k * elem as i32),
+            other => Expr::BinOp {
+                op: BinOp::Mul,
+                left: Box::new(other),
+                right: Box::new(Expr::IntLit(elem as i32)),
+            },
+        }
+    } else {
+        rhs
+    };
     Ok(Some(Expr::BinOp {
         op,
         left: Box::new(lvalue_expr),
