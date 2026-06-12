@@ -1972,8 +1972,17 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
     if locals.is_long_global(global_idx)
         && let Expr::BinOp { op, left, right } = value
         && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
-        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
-        && matches!(right.as_ref(), Expr::Global(r) if !locals.is_long_global(*r))
+        && let int_rhs = {
+            let self_g = |e: &Expr| matches!(e, Expr::Global(g) if *g == global_idx);
+            let int_g = |e: &Expr| matches!(e, Expr::Global(r) if !locals.is_long_global(*r));
+            // `g OP i` (self on the left), or — for commutative ops — `i OP g`
+            // (self on the right, `g = i + g`, fixture 281).
+            if self_g(left.as_ref()) && int_g(right.as_ref()) { Some(right.as_ref()) }
+            else if matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+                && self_g(right.as_ref()) && int_g(left.as_ref()) { Some(left.as_ref()) }
+            else { None }
+        }
+        && let Some(int_rhs) = int_rhs
     {
         let (lo_op, hi_op): (u8, u8) = match op {
             BinOp::Add => (0x01, 0x11), // add / adc
@@ -1983,7 +1992,7 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             BinOp::BitXor => (0x31, 0x31),
             _ => unreachable!(),
         };
-        emit_expr_to_ax(right, locals, out, fixups); // mov ax,_i (int global)
+        emit_expr_to_ax(int_rhs, locals, out, fixups); // mov ax,_i (int global)
         out.push(0x99); // cwd → DX:AX
         out.push(lo_op); out.push(0x06);
         let off = out.len(); out.extend_from_slice(&[0x00, 0x00]);
