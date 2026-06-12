@@ -653,9 +653,17 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 // self-read LHS is preserved separately — only the RHS operand is
                 // prop'd — so a KNOWN long-global RHS may fold to a literal, letting
                 // a long compound `g op= h` lower to immediates / `mov ax,K; cwd`.
-                // Fixtures 734/735/741/742.
+                // Fixtures 734/735/741/742. A long-ARRAY element RHS (`g += la[K]`)
+                // folds the same way — its value lives in ga_known at byte_off
+                // K*4 (long element size). Fixture 830.
                 let known_long_global = match right.as_ref() {
                     Expr::Global(gi) if cp.long_globals.contains(gi) => cp.g_known.get(gi).copied(),
+                    Expr::Index { array, index }
+                        if cp.long_globals.contains(array)
+                            && let Expr::IntLit(k) = index.as_ref() =>
+                    {
+                        u16::try_from(*k * 4).ok().and_then(|bo| cp.ga_known.get(&(*array, bo)).copied())
+                    }
                     _ => None,
                 };
                 // A long-global compound with an int-GLOBAL RHS keeps that RHS a
