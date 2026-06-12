@@ -1361,6 +1361,16 @@ fn kill_if_called(cp: &mut ConstProp) {
     cp.ga_known.clear();
 }
 
+/// Flatten a left-/right-nested `+` chain into its leaf operands (in order).
+/// Non-Add subexpressions are leaves (their own internal structure is kept).
+fn flatten_add(e: &Expr, out: &mut Vec<Expr>) {
+    if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+        flatten_add(left, out);
+        flatten_add(right, out);
+    } else {
+        out.push(e.clone());
+    }
+}
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     match e {
         Expr::FloatLit(..) => {} // no int const-prop into float literals
@@ -1538,22 +1548,43 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                     return;
                 }
             }
-            // `(X + c1) + c2` (trailing constant addends in an add chain) combine
-            // into one immediate `X + (c1+c2)` — MSC folds adjacent constants
-            // rather than emitting two `add ax,K`. Fixture 1850 (`a+c+e+b+d`, b/d
-            // const → a single trailing `add ax,6`).
-            if matches!(op, BinOp::Add)
-                && let Expr::IntLit(c2) = right.as_ref()
-                && let Expr::BinOp { op: BinOp::Add, left: inner_l, right: inner_r } = left.as_ref()
-                && let Expr::IntLit(c1) = inner_r.as_ref()
-            {
-                let combined = *c1 + *c2;
-                *e = Expr::BinOp {
-                    op: BinOp::Add,
-                    left: inner_l.clone(),
-                    right: Box::new(Expr::IntLit(combined)),
-                };
-                return;
+            // Normalize an ADD chain: keep non-constant operands in SOURCE order,
+            // move every constant addend to the END (summed into one immediate).
+            // MSC emits the memory operands first then a single trailing `add
+            // ax,K`. Constants carry no side effects so moving them past the
+            // non-constants preserves evaluation order. Fixtures 1850 (combine
+            // trailing 2+4→6), 1811/1979 (a leading/interleaved const moves last).
+            if matches!(op, BinOp::Add) {
+                let mut terms = Vec::new();
+                flatten_add(e, &mut terms);
+                let mut const_sum = 0i32;
+                let mut non_consts: Vec<Expr> = Vec::new();
+                let mut const_count = 0u32;
+                let mut needs_reorder = false;
+                for t in &terms {
+                    if let Expr::IntLit(k) = t {
+                        const_sum += *k;
+                        const_count += 1;
+                    } else {
+                        if const_count > 0 { needs_reorder = true; } // a non-const after a const
+                        non_consts.push(t.clone());
+                    }
+                }
+                // Rebuild only when something actually changes (a const precedes a
+                // non-const, or two constants merge) and there is at least one
+                // non-constant to anchor the chain.
+                if (needs_reorder || const_count >= 2) && !non_consts.is_empty() {
+                    let mut iter = non_consts.into_iter();
+                    let mut acc = iter.next().expect("non_consts non-empty");
+                    for t in iter {
+                        acc = Expr::BinOp { op: BinOp::Add, left: Box::new(acc), right: Box::new(t) };
+                    }
+                    if const_sum != 0 {
+                        acc = Expr::BinOp { op: BinOp::Add, left: Box::new(acc), right: Box::new(Expr::IntLit(const_sum)) };
+                    }
+                    *e = acc;
+                    return;
+                }
             }
         }
         Expr::Call { args, .. } | Expr::CallStructField { args, .. } => {
