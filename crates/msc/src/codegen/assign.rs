@@ -2184,6 +2184,20 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             }
             _ => {
                 let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x2E };
+                // Byte-narrowing: a word add/sub whose LOW byte is 0 (`g += 256`)
+                // touches only the high byte → `add/sub byte [g+1],(K>>8)`. Fixture 3492.
+                if (k as u32 & 0xFF) == 0 && i8::try_from(k).is_err() {
+                    out.push(0x80);
+                    out.push(modrm);
+                    let body_offset = out.len();
+                    out.extend_from_slice(&1u16.to_le_bytes()); // addend = +1 (high byte)
+                    out.push(((k >> 8) as u32 & 0xFF) as u8);
+                    fixups.push(Fixup {
+                        body_offset: body_offset - 1,
+                        kind: FixupKind::GlobalAddr { global_idx },
+                    });
+                    return;
+                }
                 if let Ok(k8) = i8::try_from(k) {
                     out.push(0x83);
                     out.push(modrm);
@@ -2785,11 +2799,14 @@ pub(crate) fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value
         && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
         && let Some(k) = right.fold(locals.inits)
     {
-        let emit_addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| {
+        // Address placeholder at `byte_off + extra` (the GlobalAddr fixup
+        // addend encodes the in-segment offset). `extra=1` targets the high byte.
+        let emit_addr_off = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, extra: u16| {
             let bo = out.len();
-            out.extend_from_slice(&byte_off.to_le_bytes());
+            out.extend_from_slice(&byte_off.wrapping_add(extra).to_le_bytes());
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
         };
+        let emit_addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| emit_addr_off(out, fixups, 0);
         // inc/dec word for ±1.
         if matches!(op, BinOp::Add | BinOp::Sub) && k == 1 {
             out.push(0xFF);
@@ -2801,17 +2818,44 @@ pub(crate) fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value
             BinOp::Add => 0x06, BinOp::Sub => 0x2E, BinOp::BitAnd => 0x26,
             BinOp::BitOr => 0x0E, BinOp::BitXor => 0x36, _ => unreachable!(),
         };
+        let imm16 = (k as u32 & 0xFFFF) as u16;
+        let imm8 = (imm16 & 0xFF) as u8;
+        let high = (imm16 >> 8) as u8;
+        // Byte-narrowing: when a word op only touches ONE byte, MSC emits a byte
+        // op on that byte (mirrors the scalar-global path). `&= 0x00FF` clears the
+        // high byte (`mov byte [+1],0`); `+= 256` adds to it (`add byte [+1],1`).
+        // Fixtures 444 (field &= 0xFF), 3492 (g += 256, via the scalar path).
+        if matches!(op, BinOp::BitAnd) {
+            if high == 0xFF {
+                if imm8 == 0x00 { out.extend_from_slice(&[0xC6, 0x06]); emit_addr(out, fixups); out.push(0x00); }
+                else { out.push(0x80); out.push(modrm); emit_addr(out, fixups); out.push(imm8); }
+            } else if imm8 == 0xFF {
+                if high == 0x00 { out.extend_from_slice(&[0xC6, 0x06]); emit_addr_off(out, fixups, 1); out.push(0x00); }
+                else { out.push(0x80); out.push(modrm); emit_addr_off(out, fixups, 1); out.push(high); }
+            } else {
+                out.push(0x81); out.push(modrm); emit_addr(out, fixups); out.extend_from_slice(&imm16.to_le_bytes());
+            }
+            return;
+        }
         // or/xor with a byte-sized immediate use the BYTE form (`80`): the high
-        // byte is unaffected, so MSC writes only the low byte. and must stay word
-        // (`81`) to clear the high byte; add/sub use imm8-sign-extended (`83`)
-        // when it fits, else imm16 (`81`). Fixtures 864/867/868/872.
-        if matches!(op, BinOp::BitOr | BinOp::BitXor) && (0..=255).contains(&k) {
-            out.push(0x80); out.push(modrm); emit_addr(out, fixups); out.push(k as u8);
-        } else if matches!(op, BinOp::Add | BinOp::Sub) && let Ok(k8) = i8::try_from(k) {
+        // byte is unaffected, so MSC writes only the low byte. add/sub use imm8-
+        // sign-extended (`83`) when it fits, else imm16 (`81`). Fixtures 864/867/868/872.
+        if matches!(op, BinOp::BitOr | BinOp::BitXor) {
+            if imm16 <= 0xFF {
+                out.push(0x80); out.push(modrm); emit_addr(out, fixups); out.push(imm8);
+            } else if imm8 == 0x00 {
+                out.push(0x80); out.push(modrm); emit_addr_off(out, fixups, 1); out.push(high);
+            } else {
+                out.push(0x81); out.push(modrm); emit_addr(out, fixups); out.extend_from_slice(&imm16.to_le_bytes());
+            }
+        } else if let Ok(k8) = i8::try_from(k) {
             out.push(0x83); out.push(modrm); emit_addr(out, fixups); out.push(k8 as u8);
+        } else if (imm16 & 0xFF) == 0 && matches!(op, BinOp::Add | BinOp::Sub) {
+            // Add/sub whose low byte is 0 (`+= 256`) → byte op on the high byte.
+            out.push(0x80); out.push(modrm); emit_addr_off(out, fixups, 1); out.push(high);
         } else {
             out.push(0x81); out.push(modrm); emit_addr(out, fixups);
-            out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+            out.extend_from_slice(&imm16.to_le_bytes());
         }
         return;
     }
