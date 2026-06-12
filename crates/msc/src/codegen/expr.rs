@@ -2394,6 +2394,29 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         out.extend_from_slice(&[0x03, 0xC1]); // add ax, cx
         return;
     }
+    // `a[i] + a[j]` — two char-byte subscripts of the SAME char-pointer PARAM
+    // (each `a[K]` is a DerefByte of `a` / `a + K`): load the pointer into BX
+    // ONCE, read `[bx+i]` (LHS) into AX, park in CX, read `[bx+j]` (RHS), then
+    // `add ax,cx` — instead of reloading the pointer per access. Fixture 1239.
+    if matches!(op, BinOp::Add)
+        && let Some((lp, lk)) = param_char_deref_offset(left)
+        && let Some((rp, rk)) = param_char_deref_offset(right)
+        && lp == rp
+        && i8::try_from(lk).is_ok() && i8::try_from(rk).is_ok()
+    {
+        let pdisp = param_disp(lp);
+        out.push(0x8B); out.push(bp_modrm(0x5E, pdisp)); push_bp_disp(out, pdisp); // mov bx,[bp+p]
+        let byte_read = |off: i32, out: &mut Vec<u8>| {
+            if off == 0 { out.extend_from_slice(&[0x8A, 0x07]); }
+            else { out.push(0x8A); out.push(0x47); out.push(off as u8); }
+            out.push(0x98); // cbw
+        };
+        byte_read(lk, out);                  // a[lk] → AX (LHS)
+        out.extend_from_slice(&[0x8B, 0xC8]); // mov cx, ax
+        byte_read(rk, out);                  // a[rk] → AX (RHS)
+        out.extend_from_slice(&[0x03, 0xC1]); // add ax, cx
+        return;
+    }
     // `str_a[i] + str_b[j]` — two CONST string-literal byte reads (folded from
     // `arr[i][j]` element-aliased reads). Load the LEFT byte into AX, park in
     // CX, load the RIGHT byte, then `add ax,cx` — the same left-first schedule
@@ -2776,6 +2799,23 @@ fn param_struct_field_word_chain<'a>(left: &'a Expr, right: &'a Expr)
         Some((param?, index?, stride, offs))
     } else {
         None
+    }
+}
+/// `a[K]` on a char-pointer param is a byte deref of `a` (K==0) or `a + K`.
+/// Returns `(param_idx, byte_offset)` for such a read so a `a[i]+a[j]` pair can
+/// share one pointer load. Fixture 1239.
+fn param_char_deref_offset(e: &Expr) -> Option<(usize, i32)> {
+    let Expr::DerefByte { ptr } = e else { return None };
+    match ptr.as_ref() {
+        Expr::Param(p) => Some((*p, 0)),
+        Expr::BinOp { op: BinOp::Add, left, right } => {
+            if let (Expr::Param(p), Expr::IntLit(k)) = (left.as_ref(), right.as_ref()) {
+                Some((*p, *k))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 fn same_param_field_word_chain(left: &Expr, right: &Expr) -> Option<(usize, Vec<i32>)> {
