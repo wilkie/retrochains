@@ -24,7 +24,11 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                 matches!(target,
                     AssignTarget::IndexedLocalVar { .. }
                     | AssignTarget::IndexedLocalByteVar { .. }
-                    | AssignTarget::Index2D { .. })
+                    | AssignTarget::Index2D { .. }
+                    // runtime local struct-array store `a[i].f = v` (a folded
+                    // constant index became a plain LocalField in const-prop, so
+                    // any surviving target here has a runtime index → SI).
+                    | AssignTarget::LocalStructArrayField { .. })
                     || matches!(target, AssignTarget::ParamIndexStore { index, .. } if index.fold(inits).is_none())
                     // `arr[i] = arr[j]` / `arr[i] ± arr[j]` (runtime indices): the
                     // RHS array read uses SI so the LHS index in BX survives.
@@ -70,6 +74,8 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             // pointer into SI (`mov si,[bp+p]; mov ax,[bx+si]`).
             Expr::ParamIndex { index, .. } => index.fold(inits).is_none(),
             Expr::Index2D { .. } => true,
+            // runtime local struct-array read `a[i].f` scales the index into SI.
+            Expr::LocalStructArrayField { .. } => true,
             // `*(ptr + i)` (and the nested `*(p + i + j)`) with a runtime index on
             // a pointer param/local uses SI (`mov si,[p]; mov ax,[bx+si]`); a
             // decayed global array uses BX only. add_deref_uses_si peels the

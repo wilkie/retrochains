@@ -182,6 +182,41 @@ pub(crate) fn emit_ptr_array_read_elem(inner: &Expr, elem_size: u8, locals: &Loc
     }
     if elem_size == 1 { out.push(0x98); } // cbw
 }
+/// Compute `si = bp + index*stride` — the row base of a LOCAL struct array
+/// element. MSC scales a power-of-two stride directly in SI (`mov cl,n; shl
+/// si,cl`); a stride of 6 uses the `×3 (shl+add) then ×2` decomposition in AX;
+/// other strides fall back to `imul ax,ax,stride`. Finishes with `add si,bp`.
+pub(crate) fn emit_local_struct_row_si(index: &Expr, stride: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let s = stride as usize;
+    if s.is_power_of_two() {
+        emit_load_si(index, locals, out, fixups);          // mov si,[i]
+        let sh = s.trailing_zeros() as u8;
+        if sh > 0 { out.extend_from_slice(&[0xB1, sh, 0xD3, 0xE6]); } // mov cl,sh; shl si,cl
+    } else if s == 6 {
+        emit_expr_to_ax(index, locals, out, fixups);       // mov ax,i
+        out.extend_from_slice(&[0x8B, 0xC8]);               // mov cx,ax
+        out.extend_from_slice(&[0xD1, 0xE0]);               // shl ax,1     (2i)
+        out.extend_from_slice(&[0x03, 0xC1]);               // add ax,cx    (3i)
+        out.extend_from_slice(&[0xD1, 0xE0]);               // shl ax,1     (6i)
+        out.extend_from_slice(&[0x8B, 0xF0]);               // mov si,ax
+    } else {
+        emit_expr_to_ax(index, locals, out, fixups);
+        out.push(0x69); out.push(0xC0); out.extend_from_slice(&stride.to_le_bytes()); // imul ax,ax,stride
+        out.extend_from_slice(&[0x8B, 0xF0]);               // mov si,ax
+    }
+    out.extend_from_slice(&[0x03, 0xF5]);                    // add si,bp
+}
+/// `mov ax/al,[si+disp]` (+cbw for a byte field) — read a struct field at the
+/// frame disp off the SI row base set up by `emit_local_struct_row_si`.
+pub(crate) fn emit_si_field_read(disp: i16, size: u8, out: &mut Vec<u8>) {
+    let op = if size == 1 { 0x8Au8 } else { 0x8B };
+    if let Ok(d8) = i8::try_from(disp) {
+        out.push(op); out.push(0x44); out.push(d8 as u8);   // [si+disp8]
+    } else {
+        out.push(op); out.push(0x84); out.extend_from_slice(&disp.to_le_bytes()); // [si+disp16]
+    }
+    if size == 1 { out.push(0x98); } // cbw
+}
 /// Scale SI by `factor`: power-of-two → `shl si,1` steps; 3 → `mov ax,si; shl
 /// si,1; add si,ax`; otherwise `imul si,si,imm16`.
 fn scale_si(out: &mut Vec<u8>, factor: usize) {
@@ -1025,6 +1060,11 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             out.extend_from_slice(&field_off.to_le_bytes());
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
             if *size == 1 { out.push(0x98); } // cbw
+        }
+        Expr::LocalStructArrayField { local, index, stride, field_off, size } => {
+            emit_local_struct_row_si(index, *stride, locals, out, fixups);
+            let disp = locals.disp(*local) + *field_off as i16;
+            emit_si_field_read(disp, *size, out);
         }
         Expr::PtrArrayElem { array, index } => {
             // Pointer VALUE at element `index` of an array-of-pointers global.
@@ -2305,6 +2345,25 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         out.extend_from_slice(&[0x03, 0xC1]); // add ax, cx
         return;
     }
+    // `a[i].f0 + a[i].f1 [+ ...]` — word fields of the SAME runtime-indexed local
+    // struct-array element. Set up `si = bp + i*stride` ONCE, then `mov ax,
+    // [si+base+f0]; add ax,[si+base+f1]; ...`. Fixtures 1821, 1914 (read loop).
+    if matches!(op, BinOp::Add)
+        && let Some((local, index, stride, offs)) = local_struct_field_word_chain(left, right)
+    {
+        emit_local_struct_row_si(index, stride, locals, out, fixups);
+        let base = locals.disp(local);
+        emit_si_field_read(base + offs[0] as i16, 2, out); // mov ax,[si+f0]
+        for &fo in &offs[1..] {
+            let disp = base + fo as i16;
+            if let Ok(d8) = i8::try_from(disp) {
+                out.extend_from_slice(&[0x03, 0x44, d8 as u8]);            // add ax,[si+disp8]
+            } else {
+                out.push(0x03); out.push(0x84); out.extend_from_slice(&disp.to_le_bytes());
+            }
+        }
+        return;
+    }
     // Chain of 3+ word `p->field` reads of the SAME struct-pointer param joined
     // by `+`: load `p` into BX once, then read the fields in a left-rotated order
     // — operand[1] into AX, operands[2..] added in source order, operand[0] added
@@ -2573,6 +2632,44 @@ pub(crate) fn split_index_offset(e: &Expr) -> (&Expr, i32) {
 /// Flatten a left-associative `+` chain whose every leaf is a WORD `p->field`
 /// of the SAME struct-pointer param. Returns (param, field byte offsets in
 /// source order) when ≥3 leaves match; None otherwise. Used to load `p` once.
+/// `a[i].f0 + a[i].f1 [+ ...]` — an add-chain of WORD fields of the SAME local
+/// struct-array element (same `local` and structurally-equal runtime `index`).
+/// Returns `(local, &index, stride, [field_off; ...])` in source order so the
+/// caller can set up `si = bp + i*stride` once and fold `mov ax,[si+f0]; add
+/// ax,[si+f1]; ...`. Fixtures 1821 (2 fields), 1914-read (3 fields).
+fn local_struct_field_word_chain<'a>(left: &'a Expr, right: &'a Expr)
+    -> Option<(usize, &'a Expr, u16, Vec<u16>)> {
+    fn idx_eq(a: &Expr, b: &Expr) -> bool {
+        matches!((a, b),
+            (Expr::Local(x), Expr::Local(y)) if x == y)
+            || matches!((a, b), (Expr::Param(x), Expr::Param(y)) if x == y)
+            || matches!((a, b), (Expr::IntLit(x), Expr::IntLit(y)) if x == y)
+    }
+    fn collect<'a>(e: &'a Expr, local: &mut Option<usize>, index: &mut Option<&'a Expr>,
+                   stride: &mut u16, offs: &mut Vec<u16>) -> bool {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            return collect(left, local, index, stride, offs)
+                && collect(right, local, index, stride, offs);
+        }
+        if let Expr::LocalStructArrayField { local: l, index: ix, stride: s, field_off, size: 2 } = e {
+            match local { None => { *local = Some(*l); *stride = *s; } Some(x) if *x == *l => {} _ => return false }
+            match index { None => *index = Some(ix), Some(pi) if idx_eq(pi, ix) => {} _ => return false }
+            offs.push(*field_off);
+            true
+        } else {
+            false
+        }
+    }
+    let (mut local, mut index, mut stride, mut offs) = (None, None, 0u16, Vec::new());
+    if collect(left, &mut local, &mut index, &mut stride, &mut offs)
+        && collect(right, &mut local, &mut index, &mut stride, &mut offs)
+        && offs.len() >= 2
+    {
+        Some((local?, index?, stride, offs))
+    } else {
+        None
+    }
+}
 fn same_param_field_word_chain(left: &Expr, right: &Expr) -> Option<(usize, Vec<i32>)> {
     fn collect(e: &Expr, p: &mut Option<usize>, offs: &mut Vec<i32>) -> bool {
         if let Expr::BinOp { op: BinOp::Add, left, right } = e {

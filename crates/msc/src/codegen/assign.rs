@@ -468,6 +468,26 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: array } });
             return;
         }
+        AssignTarget::LocalStructArrayField { local, index, stride, field_off, size } => {
+            // `a[i].f = v` (runtime i): `si = bp + i*stride`, then store v at
+            // `[si + base_disp + field_off]`. Value computed into AX after SI is
+            // set up (SI survives the value eval for simple RHS).
+            crate::codegen::expr::emit_local_struct_row_si(&index, stride, locals, out, fixups);
+            let disp = locals.disp(local) + field_off as i16;
+            emit_expr_to_ax(&value, locals, out, fixups);
+            if size == 1 {
+                if out.last() == Some(&0x98) { out.pop(); } // storing AL — strip cbw
+                out.push(0x88);
+            } else {
+                out.push(0x89);
+            }
+            if let Ok(d8) = i8::try_from(disp) {
+                out.push(0x44); out.push(d8 as u8);
+            } else {
+                out.push(0x84); out.extend_from_slice(&disp.to_le_bytes());
+            }
+            return;
+        }
         AssignTarget::DerefParamField { ptr_param, byte_off, size } => {
             return emit_assign_deref_param_field(ptr_param, byte_off, size, value, locals, out, fixups);
         }

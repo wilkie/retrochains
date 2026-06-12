@@ -955,6 +955,11 @@ pub enum AssignTarget {
     /// scale `i` by `stride`, store `size` bytes to `[_arr + bx + field_off]`.
     /// Fixtures 3240, 1914.
     StructArrayField { array: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
+    /// `a[i].field = <expr>;` on a LOCAL struct array with a RUNTIME index:
+    /// `si = bp + i*stride`, store `size` bytes to `[si + base_disp + field_off]`
+    /// (base_disp is the array's frame disp, resolved at codegen). Const-prop
+    /// folds to a plain `LocalField` when `i` is known. Fixtures 1821, 1914.
+    LocalStructArrayField { local: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
     /// `<struct-ptr-param>-><field> = <expr>;` — store via a struct
     /// pointer parameter. Codegen: `mov bx, [bp+pdisp];
     /// c7 47 off imm16` (word) / `c6 47 off imm8` (byte).
@@ -1265,6 +1270,11 @@ pub enum Expr {
     /// `i` by the struct `stride`, then read `size` bytes at `[_arr + bx +
     /// field_off]`. Fixtures 3237, 3348, 2841.
     StructArrayField { array: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
+    /// `a[i].field` read on a LOCAL struct array with a RUNTIME index — the read
+    /// counterpart of the same-named AssignTarget. `si = bp + i*stride`, then
+    /// `mov ax/al,[si + base_disp + field_off]`. Const-prop folds to a plain
+    /// `LocalField` when `i` is known. Fixtures 1821, 1914, 2438.
+    LocalStructArrayField { local: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
     /// Pointer member-chain read `o->p->v` / `(*p).x` / `w->data[K]`: load the
     /// `base` pointer into BX, dereference through each `hop` offset
     /// (`mov bx,[bx+hop]`), then read `final_size` bytes at `final_off`. Fixtures
@@ -1350,7 +1360,7 @@ impl Expr {
             Expr::BitField { .. } => None,
             Expr::StrLitByte { .. } => None,
             Expr::PtrChainField { .. } => None,
-            Expr::StructArrayField { .. } => None,
+            Expr::StructArrayField { .. } | Expr::LocalStructArrayField { .. } => None,
             Expr::Index2D { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,

@@ -3301,14 +3301,23 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 let index = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
                 let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
-                let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
-                    "non-constant struct-array index not yet supported".to_owned()))?;
                 let stotal = p.structs[sidx].total_bytes;
                 p.eat(&Tok::Dot)?;
                 let (field_off, size) = parse_field_lookup(p, sidx)?;
-                let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
-                    .expect("struct-array field offset fits");
-                let target = AssignTarget::LocalField { local: local_idx, byte_off, size };
+                // Constant index → plain LocalField store. Non-constant index
+                // defers to LocalStructArrayField (const-prop may fold it once
+                // the index value is known; otherwise runtime si-scaling codegen).
+                // Fixtures 1821/1914 (runtime), 2438 (`i=2` folded by const-prop).
+                let target = if let Some(k) = index.fold(&init_view) {
+                    let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                        .expect("struct-array field offset fits");
+                    AssignTarget::LocalField { local: local_idx, byte_off, size }
+                } else {
+                    AssignTarget::LocalStructArrayField {
+                        local: local_idx, index: Box::new(index),
+                        stride: stotal as u16, field_off, size,
+                    }
+                };
                 let value = if let Some(v) = parse_compound_rhs(p, &target)? {
                     v
                 } else {
@@ -5503,14 +5512,23 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
                     let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
-                    let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
-                        "non-constant struct-array index not yet supported".to_owned()))?;
                     let stotal = p.structs[sidx].total_bytes;
                     p.eat(&Tok::Dot)?;
                     let (field_off, size) = parse_field_lookup(p, sidx)?;
-                    let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
-                        .expect("struct-array field offset fits");
-                    return Ok(Expr::LocalField { local: idx, byte_off, size });
+                    // Constant index → fold to a plain LocalField. A non-constant
+                    // index defers to LocalStructArrayField (const-prop may still
+                    // fold it once the index value is known; otherwise runtime
+                    // codegen scales si by the struct stride). Fixtures 1821/1914,
+                    // and 2438 (`i=2` folded by const-prop, not the decl view).
+                    if let Some(k) = index.fold(&init_view) {
+                        let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                            .expect("struct-array field offset fits");
+                        return Ok(Expr::LocalField { local: idx, byte_off, size });
+                    }
+                    return Ok(Expr::LocalStructArrayField {
+                        local: idx, index: Box::new(index),
+                        stride: stotal as u16, field_off, size,
+                    });
                 }
                 if matches!(p.peek(), Some(Tok::LBrack)) {
                     p.bump();

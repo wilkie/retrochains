@@ -379,6 +379,18 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     };
                 }
             }
+            // Runtime local struct-array store `a[i].f = v`: fold the index; when
+            // known, rewrite to a flat LocalField store (matching MSC's const
+            // folding — fixture 2438 with `i=2`). Otherwise it stays
+            // LocalStructArrayField for si-scaling codegen (1821/1914).
+            if let AssignTarget::LocalStructArrayField { local, index, stride, field_off, size } = target {
+                prop_expr(index, cp);
+                if let Expr::IntLit(k) = index.as_ref()
+                    && let Ok(byte_off) = u16::try_from(*k as i64 * *stride as i64 + *field_off as i64)
+                {
+                    *target = AssignTarget::LocalField { local: *local, byte_off, size: *size };
+                }
+            }
             // Pointer-arith init from a known-address pointer: `q = (char*)p + K`
             // folds to `&base + (off+K)` (a link-time address constant) so the
             // init stores directly instead of loading p and adding. MSC
@@ -2028,6 +2040,19 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
         }
         Expr::StructArrayField { index, .. } => prop_expr(index, cp),
+        Expr::LocalStructArrayField { local, index, stride, field_off, size } => {
+            prop_expr(index, cp);
+            // Index known → fold to a plain LocalField for ADDRESSING only. MSC
+            // reads a variable-indexed element from its slot even when the value
+            // is statically known (it does NOT substitute the element value), so
+            // do NOT re-prop — that would fold via la_known. Fixture 2438 (`i=2`
+            // → `mov ax,[bp-4]; add ax,[bp-2]`, not `mov ax,61`).
+            if let Expr::IntLit(k) = index.as_ref()
+                && let Ok(byte_off) = u16::try_from(*k as i64 * *stride as i64 + *field_off as i64)
+            {
+                *e = Expr::LocalField { local: *local, byte_off, size: *size };
+            }
+        }
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }
