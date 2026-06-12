@@ -948,6 +948,20 @@ pub(crate) fn emit_return(
         crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }
+    // `return <long-param> << 16` (long fn): the low word becomes the high word
+    // and the new low word is 0 — `mov dx,[v]; sub ax,ax`. Fixture 2875.
+    if return_long
+        && let Expr::BinOp { op: BinOp::Shl, left, right } = expr
+        && matches!(right.as_ref(), Expr::IntLit(16))
+        && let Expr::Param(i) = left.as_ref()
+        && locals.is_long_param(*i)
+    {
+        let lo = param_disp(*i) as u8;
+        out.extend_from_slice(&[0x8B, 0x56, lo]);   // mov dx,[bp+v]
+        out.extend_from_slice(&[0x2B, 0xC0]);        // sub ax,ax
+        crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
+        return;
+    }
     // `return (char)<e>` / `return <e> & 0xFF` (the parser lowers `& 0xFF` to a
     // CastChar) in a long-returning function: produce the (zero/sign-)extended
     // byte in AX, then extend into the long high word — `sub dx,dx` for unsigned
