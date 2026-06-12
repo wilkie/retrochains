@@ -1815,8 +1815,36 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             cp.mutated_globals.insert(*global_idx);
             cp.g_known.remove(global_idx);
         }
-        Expr::PreMutateDeref { ptr, .. } | Expr::PostIncDeref { ptr, .. }
-        | Expr::PostMutateDeref { ptr, .. } => prop_expr(ptr, cp),
+        Expr::PostMutateDeref { ptr, step, is_byte } => {
+            // `(*p)--` / `(*p)++` where p aliases &x → a DIRECT post-mutate on x
+            // (`mov ax,[x]; dec word[x]`), not a pointer-routed read-modify. The
+            // PostMutateLocal/Global handler then invalidates x's known value so a
+            // later read reloads (the modify changed it — else we'd fold a stale
+            // value, a miscompile). Fixture 2449.
+            if !*is_byte
+                && let Expr::Local(p) = ptr.as_ref()
+                && let Some(&a) = cp.ptr_alias.get(p)
+            {
+                let step = *step;
+                match a {
+                    AliasTarget::Local(x) => {
+                        cp.aliases_used.insert(*p);
+                        *e = Expr::PostMutateLocal { local_idx: x, step };
+                        prop_expr(e, cp);
+                        return;
+                    }
+                    AliasTarget::Global(g) => {
+                        cp.aliases_used.insert(*p);
+                        *e = Expr::PostMutateGlobal { global_idx: g, step };
+                        prop_expr(e, cp);
+                        return;
+                    }
+                    AliasTarget::String(_) => {}
+                }
+            }
+            prop_expr(ptr, cp);
+        }
+        Expr::PreMutateDeref { ptr, .. } | Expr::PostIncDeref { ptr, .. } => prop_expr(ptr, cp),
         Expr::PreMutateIndexedGlobal { array, index, .. }
         | Expr::PostMutateIndexedGlobal { array, index, .. } => {
             prop_expr(index, cp);
