@@ -2366,6 +2366,28 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         }
     }
     // Long global with runtime RHS: compute DX:AX then store both halves.
+    // Long-global = <unsigned int global>: zero-extend. MSC loads the low word
+    // and stores a literal 0 high word — `mov ax,[u]; mov [g],ax; mov word
+    // [g+2],0` — never touching DX (unlike the signed `cwd` path). Fixture 255.
+    if locals.is_long_global(global_idx)
+        && let Expr::Global(u) = value
+        && !locals.is_long_global(*u)
+        && locals.is_unsigned_global(*u)
+    {
+        let off = out.len();
+        out.extend_from_slice(&[0xA1, 0x00, 0x00]); // mov ax, [u]
+        fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: *u } });
+        out.push(0xA3); // mov [g], ax
+        let off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        out.push(0xC7); out.push(0x06); // mov word [g+2], 0
+        let off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     if locals.is_long_global(global_idx) {
         // If it doesn't match any of the earlier specialized arms, the
         // RHS is a runtime expression. Load both words and store both.
