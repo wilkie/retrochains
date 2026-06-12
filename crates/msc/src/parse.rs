@@ -5485,7 +5485,13 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             }
             // An explicit pointer cast on the operand (`*(char *)p`) overrides
             // the inferred pointee size so the access width matches the cast.
+            // A call operand (`*nextp(...)`) takes the callee's recorded return
+            // pointee size, so `*<char*-returning call>` is a byte deref. 1343.
             let pointee_size = cast_pointee
+                .or_else(|| match &inner {
+                    Expr::Call { name, .. } => p.fn_return_pointee.get(&symbol_name(name)).copied(),
+                    _ => None,
+                })
                 .unwrap_or_else(|| pointee_size_of(&inner, &p.globals, &p.local_specs, &p.param_pointee_sizes));
             // `*(p + K)` over a scalar pointer LOCAL: scale the literal index
             // by the pointee size, matching the byte-scaled `p[K]` subscript
