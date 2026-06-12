@@ -417,8 +417,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.push(0x98); // cbw
             }
         }
-        Expr::Index2D { is_global, base, row, col, cols, elem } => {
-            assert!(*is_global, "local 2-D runtime index should have const-folded");
+        Expr::Index2D { is_global: true, base, row, col, cols, elem } => {
             emit_index2d_regs(row, col, *cols, *elem, locals, out, fixups);
             // mov ax/al, [base + bx + si]  (modrm [bx+si]+disp16 = 0x80)
             let op = if *elem == 1 { 0x8A } else { 0x8B };
@@ -427,6 +426,22 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             out.push(0x80);
             out.extend_from_slice(&[0x00, 0x00]);
             fixups.push(Fixup { body_offset: mp, kind: FixupKind::GlobalAddr { global_idx: *base } });
+            if *elem == 1 { out.push(0x98); } // cbw
+        }
+        // Runtime `a[i][j]` on a LOCAL 2-D array: build the whole element offset in
+        // SI (`si = (row*cols)*elem + col*elem`) then read `[bp + base_disp + si]`.
+        // The row is scaled by `cols` (scale_si) then by `elem` (shl); the col is
+        // scaled by `elem`. Fixture 1700. Element size is a power of two here.
+        Expr::Index2D { is_global: false, base, row, col, cols, elem } => {
+            emit_load_si(row, locals, out, fixups);                       // mov si,[row]
+            scale_si(out, *cols);                                          // si *= cols
+            for _ in 0..(*elem).trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE6]); } // shl si,1 (×elem)
+            emit_expr_to_ax(col, locals, out, fixups);                    // mov ax,[col]
+            for _ in 0..(*elem).trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE0]); } // shl ax,1 (×elem)
+            out.extend_from_slice(&[0x03, 0xF0]);                          // add si,ax
+            let disp = locals.disp(*base);
+            let op = if *elem == 1 { 0x8Au8 } else { 0x8B };
+            out.push(op); out.push(bp_modrm(0x42, disp)); push_bp_disp(out, disp); // mov ax/al,[bp+si+disp]
             if *elem == 1 { out.push(0x98); } // cbw
         }
         Expr::IntLit(k) => {

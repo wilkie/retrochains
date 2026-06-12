@@ -2296,6 +2296,15 @@ pub(crate) fn emit_threaded_for(
     // Enclosing levels, inner→outer: each emits its step, its COND (with an exit
     // jcc), then the next-inner level's init and a jmp into that inner COND.
     for l in (0..n - 1).rev() {
+        // MSC aligns each enclosing level's step label (where the inner COND's
+        // exit jcc lands) to an even offset with a nop — but ONLY when the label
+        // is a pure jump target, i.e. the preceding region ended with an
+        // unconditional jmp. The innermost level's body ends that way only in the
+        // no-break case; with a leading `if(c)break;` it ends on a conditional
+        // loop-back and the step label is a FALL-THROUGH target (no pad).
+        // Fixtures 1700 (pad) vs 2229 (no pad).
+        let prev_uncond_jmp = !(l == n - 2 && inner_break.is_some());
+        if prev_uncond_jmp && (base + b.len()) % 2 != 0 { b.push(0x90); }
         exit_tgt[l + 1] = b.len(); // the inner COND's exit lands at this step
         emit_stmt(levels[l].step, &bl, frame, return_int, return_long, &mut b, &mut bfix);
         cond_pos[l] = b.len();
