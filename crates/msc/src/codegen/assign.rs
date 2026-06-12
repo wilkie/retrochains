@@ -4339,6 +4339,23 @@ pub(crate) fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: 
         body_offset: body_offset + 1,
         kind: FixupKind::GlobalAddr { global_idx },
     });
+    // `*p += K` / `*p -= K` (compound through the pointer with the self-read
+    // `*p` on the left) → in-place `add/sub word [bx], K` instead of load-modify-
+    // store (which would reload p for the `*p` read). Fixture 197.
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::DerefWord { ptr } if matches!(ptr.as_ref(), Expr::Global(g) if *g == global_idx))
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let modrm = if matches!(op, BinOp::Add) { 0x07u8 } else { 0x2Fu8 }; // [bx], /0 add | /5 sub
+        if let Ok(k8) = i8::try_from(k) {
+            out.extend_from_slice(&[0x83, modrm, k8 as u8]);
+        } else {
+            out.push(0x81); out.push(modrm);
+            out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         // `c7 07 imm16` — mov word ptr [bx], imm16.
