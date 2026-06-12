@@ -91,6 +91,18 @@ pub(crate) fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_
                 || long_operand_unsigned(right, locals);
             emit_long_cmp_skip(*op, left, right, take_then_disp, unsigned, locals, out, fixups);
         }
+        // `long g <op> int i` — the int operand is promoted to a long (cwd) and
+        // the long stays in memory. Distinct byte shape (`cmp reg,[mem]`, op
+        // swapped). Only simple int operands (Global/Local/Param). Fixtures
+        // 273, 280.
+        Cond::Cmp { op, left, right }
+            if long_operand(left, locals)
+                && !long_operand(right, locals)
+                && matches!(right, Expr::Global(_) | Expr::Local(_) | Expr::Param(_)) =>
+        {
+            let unsigned = long_operand_unsigned(left, locals) || int_is_unsigned(right, locals);
+            emit_long_int_cmp_skip(*op, left, right, take_then_disp, unsigned, locals, out, fixups);
+        }
         _ => {
             let jcc = match cond {
                 Cond::Truthy(_) => 0x74, // je on zero
@@ -138,11 +150,85 @@ fn emit_long_cmp_skip(
         (cl, lf, ch, hf)
     } else {
         emit_long_to_dx_ax(right, locals, &mut load, &mut load_fx);
-        let (cl, lf) = long_cmp_word(left, 0, false, locals);
-        let (ch, hf) = long_cmp_word(left, 2, true, locals);
+        let (cl, lf) = long_cmp_word(left, 0, false, 0x39, locals);
+        let (ch, hf) = long_cmp_word(left, 2, true, 0x39, locals);
         (cl, lf, ch, hf)
     };
 
+    // UNSIGNED ordering against a constant whose HIGH word is 0: the high word
+    // can't be negative, so one of the two high-word jccs (testing `high < 0`) is
+    // dead. The compare collapses to a single `cmp hi,0; jne <dst>` — high != 0
+    // means definitively greater (Gt/Ge → take then) or not-less (Lt/Le → take
+    // else). Fixture 3058 (`unsigned long v > 1000`).
+    let const_hi_zero = unsigned && matches!(right, Expr::IntLit(k) if ((*k >> 16) as u32 & 0xFFFF) == 0);
+    emit_long_cmp_steps(
+        op, unsigned, matches!(right, Expr::IntLit(0)), const_hi_zero,
+        &load, load_fx, &cmp_lo, &lo_fx, &cmp_hi, &hi_fx, take_then_disp, out, fixups,
+    );
+}
+
+/// `long g <op> int i`: MSC promotes the INT to a long (`mov ax,[i]; cwd`),
+/// keeps the long operand in memory, and compares word-wise with the register
+/// as the destination (`cmp dx,[g+2]` / `cmp ax,[g]` — opcode 0x3B). The
+/// register holds the promoted int, so the predicate is evaluated as
+/// `i <swap(op)> g` (Lt↔Gt, Le↔Ge; Eq/Ne unchanged). Fixtures 273, 280.
+fn emit_long_int_cmp_skip(
+    op: RelOp,
+    long_side: &Expr,
+    int_side: &Expr,
+    take_then_disp: i8,
+    unsigned: bool,
+    locals: &Locals<'_>,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    // Promote the int into DX:AX: load to AX, then cwd (signed) / sub dx,dx
+    // (unsigned).
+    let mut load = Vec::new();
+    let mut load_fx = Vec::new();
+    crate::codegen::expr::emit_expr_to_ax(int_side, locals, &mut load, &mut load_fx);
+    if int_is_unsigned(int_side, locals) {
+        load.extend_from_slice(&[0x2B, 0xD2]); // sub dx,dx
+    } else {
+        load.push(0x99); // cwd
+    }
+    // `cmp dx,[g+2]` / `cmp ax,[g]` (reg=destination, 0x3B). reg_is_dx → high.
+    let (cmp_lo, lo_fx) = long_cmp_word(long_side, 0, false, 0x3B, locals);
+    let (cmp_hi, hi_fx) = long_cmp_word(long_side, 2, true, 0x3B, locals);
+    let swapped = match op {
+        RelOp::Lt => RelOp::Gt,
+        RelOp::Gt => RelOp::Lt,
+        RelOp::Le => RelOp::Ge,
+        RelOp::Ge => RelOp::Le,
+        other => other, // Eq/Ne symmetric
+    };
+    emit_long_cmp_steps(
+        swapped, unsigned, false, false,
+        &load, load_fx, &cmp_lo, &lo_fx, &cmp_hi, &hi_fx, take_then_disp, out, fixups,
+    );
+}
+
+/// Lay out and emit the word-wise long-comparison step sequence (high-word
+/// signed/unsigned decision + low-word unsigned tiebreak, or low-then-high for
+/// eq/ne). Shared by the long-vs-long and long-vs-int compare paths. `cmp_lo`/
+/// `cmp_hi` are the pre-built compare instructions; `load` is the optional
+/// RHS-setup prefix (DX:AX load / int promotion).
+#[allow(clippy::too_many_arguments)]
+fn emit_long_cmp_steps(
+    op: RelOp,
+    unsigned: bool,
+    lo_against_zero: bool,
+    const_hi_zero: bool,
+    load: &[u8],
+    load_fx: Vec<Fixup>,
+    cmp_lo: &[u8],
+    lo_fx: &Option<(usize, usize)>,
+    cmp_hi: &[u8],
+    hi_fx: &Option<(usize, usize)>,
+    take_then_disp: i8,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
     // Each step is a cmp (with optional global fixup) or a jcc to a label.
     enum Step<'a> {
         Cmp(&'a [u8], &'a Option<(usize, usize)>),
@@ -152,7 +238,7 @@ fn emit_long_cmp_skip(
     // Low word compared against immediate 0: the unsigned tiebreak collapses,
     // since nothing is unsigned-below 0. `jbe`(Gt) becomes `je` and `ja`(Le)
     // becomes `jne` — MSC emits the collapsed forms. Fixture 433.
-    let lo_f = if matches!(right, Expr::IntLit(0)) {
+    let lo_f = if lo_against_zero {
         match lo_f {
             0x76 => 0x74, // jbe -> jz
             0x77 => 0x75, // ja  -> jnz
@@ -161,34 +247,28 @@ fn emit_long_cmp_skip(
     } else {
         lo_f
     };
-    // UNSIGNED ordering against a constant whose HIGH word is 0: the high word
-    // can't be negative, so one of the two high-word jccs (testing `high < 0`) is
-    // dead. The compare collapses to a single `cmp hi,0; jne <dst>` — high != 0
-    // means definitively greater (Gt/Ge → take then) or not-less (Lt/Le → take
-    // else). Fixture 3058 (`unsigned long v > 1000`).
-    let const_hi_zero = unsigned && matches!(right, Expr::IntLit(k) if ((*k >> 16) as u32 & 0xFFFF) == 0);
-    let steps: Vec<Step> = match op {
+    let steps: Vec<Step<'_>> = match op {
         RelOp::Eq => vec![
-            Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(0x75, false), // jne else
-            Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x75, false), // jne else
+            Step::Cmp(cmp_lo, lo_fx), Step::Jcc(0x75, false), // jne else
+            Step::Cmp(cmp_hi, hi_fx), Step::Jcc(0x75, false), // jne else
         ],
         RelOp::Ne => vec![
-            Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(0x75, true), // jne then
-            Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x74, false), // je else
+            Step::Cmp(cmp_lo, lo_fx), Step::Jcc(0x75, true), // jne then
+            Step::Cmp(cmp_hi, hi_fx), Step::Jcc(0x74, false), // je else
         ],
         RelOp::Gt | RelOp::Ge if const_hi_zero => vec![
-            Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x75, true), // jne then (high!=0 → greater)
-            Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(lo_f, false),
+            Step::Cmp(cmp_hi, hi_fx), Step::Jcc(0x75, true), // jne then (high!=0 → greater)
+            Step::Cmp(cmp_lo, lo_fx), Step::Jcc(lo_f, false),
         ],
         RelOp::Lt | RelOp::Le if const_hi_zero => vec![
-            Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x75, false), // jne else (high!=0 → not less)
-            Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(lo_f, false),
+            Step::Cmp(cmp_hi, hi_fx), Step::Jcc(0x75, false), // jne else (high!=0 → not less)
+            Step::Cmp(cmp_lo, lo_fx), Step::Jcc(lo_f, false),
         ],
         _ => vec![
-            Step::Cmp(&cmp_hi, &hi_fx),
+            Step::Cmp(cmp_hi, hi_fx),
             Step::Jcc(hi_f, false), // high word decides false
             Step::Jcc(hi_t, true),  // high word decides true
-            Step::Cmp(&cmp_lo, &lo_fx),
+            Step::Cmp(cmp_lo, lo_fx),
             Step::Jcc(lo_f, false), // low word (unsigned) tiebreak
         ],
     };
@@ -199,7 +279,7 @@ fn emit_long_cmp_skip(
     let else_off = seq_size as i32 + take_then_disp as i32;
 
     let base = out.len();
-    out.extend_from_slice(&load);
+    out.extend_from_slice(load);
     for mut f in load_fx {
         f.body_offset += base;
         fixups.push(f);
@@ -228,17 +308,30 @@ fn emit_long_cmp_skip(
     }
 }
 
+/// Whether an int operand (Global/Local/Param) is `unsigned`.
+fn int_is_unsigned(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::Global(g) => locals.is_unsigned_global(*g),
+        Expr::Param(i) => locals.is_unsigned_param(*i),
+        _ => false,
+    }
+}
+
 /// `cmp WORD PTR [<left word>], <ax|dx>` for a long LHS in memory. Returns the
 /// bytes plus, for a global, the (offset-of-address-within-bytes, global_idx)
 /// so the caller can register a GlobalAddr fixup. `word_off` is 0 (low) or 2
-/// (high); the placeholder address encodes that addend.
+/// (high); the placeholder address encodes that addend. `opcode` selects the
+/// direction: `0x39` (`cmp [mem], reg`, long-vs-long) or `0x3B` (`cmp reg,
+/// [mem]`, the long-vs-int form where the register holds the promoted int) —
+/// the modrm bytes are identical for both.
 fn long_cmp_word(
     left: &Expr,
     word_off: i16,
     reg_is_dx: bool,
+    opcode: u8,
     locals: &Locals<'_>,
 ) -> (Vec<u8>, Option<(usize, usize)>) {
-    let mut b = vec![0x39u8]; // cmp r/m16, r16
+    let mut b = vec![opcode]; // cmp r/m16,r16 (0x39) | cmp r16,r/m16 (0x3B)
     match left {
         Expr::Global(j) => {
             // The GlobalAddr resolver treats the fixup offset as the byte
