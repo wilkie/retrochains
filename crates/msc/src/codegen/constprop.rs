@@ -1599,6 +1599,18 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 {
                     *a = Expr::StrLit(idx);
                 }
+                // A local/global assigned INSIDE a call argument (`f(n = 7)`) is a
+                // sequence point: a later read in the enclosing expression reloads
+                // from the slot rather than re-materializing the immediate. Drop
+                // the known value (the AssignExpr already marked it mutated).
+                // Fixture 1816.
+                if let Expr::AssignExpr { target, .. } = a {
+                    match target {
+                        AssignTarget::Local(l) => { cp.l_known.remove(l); }
+                        AssignTarget::Global(g) => { cp.g_known.remove(g); }
+                        _ => {}
+                    }
+                }
             }
             cp.saw_call = true;
         }

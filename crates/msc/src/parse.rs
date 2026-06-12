@@ -5882,7 +5882,9 @@ pub(crate) fn parse_call_args(p: &mut Parser<'_>) -> Result<Vec<Expr>, EmitError
         return Ok(args);
     }
     loop {
-        args.push(parse_expr(p)?);
+        // `parse_assign_rhs` so an assignment-as-argument (`f(n = 7)`) parses to
+        // an AssignExpr; a plain arg is returned unchanged. Fixture 1816.
+        args.push(parse_assign_rhs(p)?);
         match p.peek() {
             Some(Tok::Comma) => {
                 p.bump();
