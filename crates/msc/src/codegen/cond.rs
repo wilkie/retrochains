@@ -52,6 +52,23 @@ pub(crate) fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_
                 fixups.push(f);
             }
         }
+        Cond::Cmp { op: op @ (RelOp::Lt | RelOp::Ge), left, right }
+            if long_operand(left, locals)
+                && !long_operand_unsigned(left, locals)
+                && matches!(right, Expr::IntLit(0)) =>
+        {
+            // Signed long `v < 0L` / `v >= 0L` is a pure sign test on the high
+            // word: `cmp WORD PTR [hi],0; jge|jl <skip-then>`. The low word is
+            // irrelevant. Fixture 3026.
+            let (cmp_hi, hi_fx) = long_cmp_word_imm(left, 2, 0, locals);
+            let base = out.len();
+            out.extend_from_slice(&cmp_hi);
+            if let Some((rel, gidx)) = hi_fx {
+                fixups.push(Fixup { body_offset: base + rel, kind: FixupKind::GlobalAddr { global_idx: gidx } });
+            }
+            out.push(if matches!(op, RelOp::Lt) { 0x7D } else { 0x7C }); // jge | jl (skip on false)
+            out.push(take_then_disp as u8);
+        }
         Cond::Cmp { op, left, right }
             if long_operand(left, locals)
                 && (long_operand(right, locals) || matches!(right, Expr::IntLit(k) if *k != 0)) =>
