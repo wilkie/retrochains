@@ -1108,6 +1108,14 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             out.extend_from_slice(&imm.to_le_bytes());
         }
+    } else if locals.is_long_local(local_idx) && long_operand(value, locals) {
+        // Long-local = long RHS (`b = a`): load both words into DX:AX and store
+        // both halves — `mov ax,[lo]; mov dx,[hi]; mov [b],ax; mov [b+2],dx`.
+        // Fixture 2912.
+        emit_long_to_dx_ax(value, locals, out, fixups);
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);   // mov [lo],ax
+        let hi = disp + 2;
+        out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi);       // mov [hi],dx
     } else {
         emit_expr_to_ax(value, locals, out, fixups);
         if is_byte {
