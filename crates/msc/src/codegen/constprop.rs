@@ -529,13 +529,13 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 // Indexed global compound assigns: `a[k] op= rhs` — keep the
                 // Index self-read on the LHS so the in-place mem-op peephole fires.
                 (AssignTarget::IndexedGlobalByte { array: t, byte_off },
-                 Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ref left, .. }) => {
+                 Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ref left, .. }) => {
                     if let Expr::IndexByte { array: lx, index } = left.as_ref() {
                         *lx == t && matches!(index.as_ref(), Expr::IntLit(k) if *k as u16 == byte_off)
                     } else { false }
                 }
                 (AssignTarget::IndexedGlobal { array: t, byte_off },
-                 Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ref left, .. }) => {
+                 Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ref left, .. }) => {
                     if let Expr::Index { array: lx, index } = left.as_ref() {
                         *lx == t && matches!(index.as_ref(), Expr::IntLit(k) if (*k as u16 * 2) == byte_off)
                     } else { false }
