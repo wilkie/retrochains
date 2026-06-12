@@ -26,6 +26,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         globals: Vec::new(),
         global_dims: std::collections::HashMap::new(),
         local_dims: std::collections::HashMap::new(),
+        param_dims: std::collections::HashMap::new(),
         structs: Vec::new(),
         last_field_bits: None,
         strings: Vec::new(),
@@ -1571,6 +1572,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // parameters; other types come with later fixtures.
     p.fn_ptr_params.clear();
     p.fn_ptr_locals.clear();
+    p.param_dims.clear();
     p.block_scope_stack.clear();
     p.free_block_slots.clear();
     p.block_frame_max = 0;
@@ -1726,8 +1728,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     )));
                 }
             };
-            // `int a[]` and `int a[N]` decay to `int *a`. Eat the
-            // optional bracket pair.
+            // `int a[]` / `int a[N]` decay to `int *a`; `int a[N][M]` decays to
+            // `int (*)[M]`. Eat every bracket pair, capturing the dimensions so a
+            // 2-D subscript `a[i][j]` can fold to a flat `ParamIndex`.
             if matches!(p.peek(), Some(Tok::LBrack)) {
                 // array decays to pointer: pointee = the element type size.
                 if pointee_size == 0 {
@@ -1735,11 +1738,22 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         else if float_width != 0 { float_width } else { 2 };
                 }
                 is_char = false; // array decays to pointer: word-sized
-                p.bump();
-                while !matches!(p.peek(), Some(Tok::RBrack)) {
+                let mut dims: Vec<usize> = Vec::new();
+                while matches!(p.peek(), Some(Tok::LBrack)) {
                     p.bump();
+                    // `[N]` captures N; `[]` leaves a 0 placeholder (the leading
+                    // dimension is unused for a fully-subscripted access).
+                    let mut dim = 0usize;
+                    if !matches!(p.peek(), Some(Tok::RBrack)) {
+                        if let Ok(k) = parse_signed_int(p) { if k > 0 { dim = k as usize; } }
+                        while !matches!(p.peek(), Some(Tok::RBrack)) { p.bump(); }
+                    }
+                    dims.push(dim);
+                    p.eat(&Tok::RBrack)?;
                 }
-                p.eat(&Tok::RBrack)?;
+                if dims.len() >= 2 {
+                    p.param_dims.insert(names.len(), dims);
+                }
             }
             pointee_sizes.push(pointee_size);
             names.push(pname);
@@ -5637,6 +5651,24 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
+                    // 2-D array param `a[i][j]` (`int a[2][3]` decays to `int(*)[3]`):
+                    // fold the trailing subscript(s) into a flat element index.
+                    if let Some(dims) = p.param_dims.get(&idx).cloned()
+                        && let Some(ms) = parse_multidim_sub(p, &index, &dims)?
+                    {
+                        let elem = p.param_pointee_sizes.get(idx).copied().unwrap_or(2);
+                        let flat = match ms {
+                            MultiSub::Flat(f) => f,
+                            MultiSub::Runtime(_) => return Err(EmitError::Unsupported(
+                                "runtime 2-D array parameter index not yet supported".to_owned())),
+                        };
+                        if elem == 1 {
+                            let ptr = if flat == 0 { Expr::Param(idx) }
+                                else { Expr::BinOp { op: BinOp::Add, left: Box::new(Expr::Param(idx)), right: Box::new(Expr::IntLit(flat)) } };
+                            return Ok(Expr::DerefByte { ptr: Box::new(ptr) });
+                        }
+                        return Ok(Expr::ParamIndex { param: idx, index: Box::new(Expr::IntLit(flat)) });
+                    }
                     // `char *` / `char []` param subscript → byte deref + widen.
                     // `s[0]` is `*s`; `s[K]` is `*(s + K)` (fixtures 2618/2919).
                     if p.param_pointee_sizes.get(idx).copied().unwrap_or(0) == 1 {

@@ -1505,6 +1505,10 @@ struct Parser<'a> {
     /// (row-major: `i*3 + j`) reusing the 1-D Index codegen.
     global_dims: std::collections::HashMap<usize, Vec<usize>>,
     local_dims: std::collections::HashMap<usize, Vec<usize>>,
+    /// Per-parameter array dimensions for a 2-D array parameter (`int a[2][3]`,
+    /// which decays to `int (*)[3]`). `a[i][j]` with constant subscripts folds
+    /// to a flat `ParamIndex` (`i*cols + j`). Keyed by parameter index.
+    param_dims: std::collections::HashMap<usize, Vec<usize>>,
     /// Named struct definitions collected at parse time, by source
     /// order. The position in the Vec is the `struct_idx` referenced
     /// by `LocalSpec::struct_idx` and `Global::struct_idx`.
