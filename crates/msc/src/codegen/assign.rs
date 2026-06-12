@@ -741,6 +741,32 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
     //   byte (`char c`): `d0 modrm disp` for K=1, else `b1 K d2 modrm disp`.
     //   modrm = 0x66 (shl, /4) or 0x7e (sar, /7).
     //   `<<= K`, `*= 2^k` → shl.   `>>= K` → sar (signed).
+    // Long-local self-compound shift `s <<= K` / `s >>= K` → in-place runtime
+    // helper: `mov al,K; push ax; lea ax,[&s]; push ax; call __aNNal{shl,shr}`
+    // (`__aNNaulshr` for unsigned >>). The helper shifts the 4-byte slot in
+    // place; no caller cleanup. Fixtures 2575/2586/2579.
+    if locals.is_long_local(local_idx)
+        && let Expr::BinOp { op: op @ (BinOp::Shl | BinOp::Shr), left, right } = value
+        && let Expr::Local(li) = left.as_ref()
+        && *li == local_idx
+        && let Some(k) = right.fold(locals.inits)
+        && (1..32).contains(&k)
+    {
+        let helper = match op {
+            BinOp::Shl => "__aNNalshl",
+            BinOp::Shr if locals.is_unsigned_local(local_idx) => "__aNNaulshr",
+            BinOp::Shr => "__aNNalshr",
+            _ => unreachable!(),
+        };
+        out.extend_from_slice(&[0xB0, k as u8]); // mov al, K
+        out.push(0x50); // push ax
+        out.push(0x8D); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // lea ax,[bp+disp]
+        out.push(0x50); // push ax
+        let call_off = out.len();
+        out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
+        fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+        return;
+    }
     if let Expr::BinOp { op, left, right } = value
         && let Expr::Local(li) = left.as_ref()
         && *li == local_idx
