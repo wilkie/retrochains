@@ -7,11 +7,40 @@ thread_local! {
     /// to be threaded through their ~160 call sites. Set at the top of
     /// `emit_function`; each call overwrites the previous function's value.
     static CUR_FN_FAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// BP-relative displacement of each parameter of the CURRENTLY-emitting
+    /// function. Computed once at the top of `emit_function` from the param byte
+    /// sizes (long → 4, float/double → 4/8, struct-by-value → even struct bytes,
+    /// else 2), so a param that follows a wider one (`int c, long a, long b`)
+    /// lands at the correct deeper offset. `param_disp` consults this rather than
+    /// assuming a flat 2 bytes per param. Empty/out-of-range → the 2-byte fallback.
+    static CUR_FN_PARAM_DISPS: std::cell::RefCell<Vec<i16>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// True while emitting a `far` function's body.
 pub(crate) fn cur_fn_far() -> bool {
     CUR_FN_FAR.with(|c| c.get())
+}
+
+/// Install the current function's per-parameter BP displacements (see
+/// `CUR_FN_PARAM_DISPS`). Sizes mirror the stack footprint of each param type.
+pub(crate) fn set_cur_fn_param_disps(func: &Function) {
+    let base: i16 = if func.is_far { 6 } else { 4 };
+    let mut off = base;
+    let mut disps = Vec::with_capacity(func.params.len());
+    for i in 0..func.params.len() {
+        disps.push(off);
+        let sz: i16 = if func.param_is_long.get(i).copied().unwrap_or(false) {
+            4
+        } else if func.param_float_width.get(i).copied().unwrap_or(0) != 0 {
+            func.param_float_width[i] as i16
+        } else if func.param_struct_bytes.get(i).copied().unwrap_or(0) != 0 {
+            ((func.param_struct_bytes[i] + 1) & !1) as i16
+        } else {
+            2
+        };
+        off += sz;
+    }
+    CUR_FN_PARAM_DISPS.with(|c| *c.borrow_mut() = disps);
 }
 
 /// Returns true if the function body contains any runtime local array
@@ -303,6 +332,7 @@ pub(crate) fn emit_function(
     // Record this function's far-ness so `param_disp` shifts params to [bp+6..]
     // and `push_epilogue` emits `retf` (CB) instead of `ret` (C3).
     CUR_FN_FAR.with(|c| c.set(func.is_far));
+    set_cur_fn_param_disps(func);
     let (body, mutated_locals, loop_mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, struct_is_union, union_globals);
     // Splice top-level blocks that contain a switch into the top-level
     // statement stream, so a switch inside a const-folded outer switch's
@@ -988,6 +1018,12 @@ pub(crate) fn callee_symbol_full(c_name: &str, is_pascal: bool, is_static: bool)
     else { symbol_name(c_name) }
 }
 pub(crate) fn param_disp(idx: usize) -> i16 {
+    // Prefer the precomputed per-param displacement table (accounts for wide
+    // params like `long`/`double`/struct-by-value preceding this one). Fall back
+    // to the flat 2-byte-per-param assumption when no table is installed.
+    if let Some(d) = CUR_FN_PARAM_DISPS.with(|c| c.borrow().get(idx).copied()) {
+        return d;
+    }
     // A `far` function's return address is 4 bytes (IP+CS), so its params start
     // 2 bytes deeper at [bp+6] rather than [bp+4].
     let base = if cur_fn_far() { 6 } else { 4 };
