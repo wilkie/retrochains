@@ -5682,6 +5682,27 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
+                    // `pts[i].field` — index a struct-POINTER param then a field.
+                    // Constant index folds to a DerefParamField; a runtime index
+                    // defers to ParamStructArrayField (si = pts + i*stride). 2208.
+                    if matches!(p.peek(), Some(Tok::Dot))
+                        && let Some(Some(sidx)) = p.param_struct_idxs.get(idx).cloned()
+                        && p.param_pointee_sizes.get(idx).copied().unwrap_or(0) > 0
+                    {
+                        let stotal = p.structs[sidx].total_bytes;
+                        p.bump(); // .
+                        let (field_off, size) = parse_field_lookup(p, sidx)?;
+                        let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                        if let Some(k) = index.fold(&init_view) {
+                            let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                                .expect("struct-ptr-param field offset fits");
+                            return Ok(Expr::DerefParamField { ptr_param: idx, byte_off, size });
+                        }
+                        return Ok(Expr::ParamStructArrayField {
+                            param: idx, index: Box::new(index),
+                            stride: stotal as u16, field_off, size,
+                        });
+                    }
                     // 2-D array param `a[i][j]` (`int a[2][3]` decays to `int(*)[3]`):
                     // fold the trailing subscript(s) into a flat element index.
                     if let Some(dims) = p.param_dims.get(&idx).cloned()
@@ -5916,7 +5937,15 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     // A long ARRAY (element_size 4) decays like any array; a long
                     // SCALAR (the 2-word model, element_size 2) does not.
                     let is_array = g.array_len > 1 && !(g.is_long && g.element_size == 2);
-                    if !g.is_pointer && is_array && g.struct_idx.is_none() {
+                    // A struct global's `array_len` is BYTE storage (stotal*count),
+                    // so a single struct also has array_len>1. Decay only a genuine
+                    // struct ARRAY (count>1, i.e. storage exceeds one struct) to its
+                    // base address — a bare `struct S g` stays a value. Fixture 2208.
+                    let struct_is_array = match g.struct_idx {
+                        Some(sidx) => g.array_len > p.structs[sidx].total_bytes,
+                        None => true,
+                    };
+                    if !g.is_pointer && is_array && struct_is_array {
                         Ok(Expr::AddrOfGlobal(idx))
                     } else {
                         Ok(Expr::Global(idx))

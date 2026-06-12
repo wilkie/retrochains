@@ -182,11 +182,12 @@ pub(crate) fn emit_ptr_array_read_elem(inner: &Expr, elem_size: u8, locals: &Loc
     }
     if elem_size == 1 { out.push(0x98); } // cbw
 }
-/// Compute `si = bp + index*stride` — the row base of a LOCAL struct array
-/// element. MSC scales a power-of-two stride directly in SI (`mov cl,n; shl
+/// Compute `si = index*stride` (no base add) — the scaled element offset shared
+/// by the local-array (`add si,bp`) and struct-ptr-param (`add si,[bp+p]`) row
+/// setups. MSC scales a power-of-two stride directly in SI (`mov cl,n; shl
 /// si,cl`); a stride of 6 uses the `×3 (shl+add) then ×2` decomposition in AX;
-/// other strides fall back to `imul ax,ax,stride`. Finishes with `add si,bp`.
-pub(crate) fn emit_local_struct_row_si(index: &Expr, stride: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+/// other strides fall back to `imul ax,ax,stride`.
+fn emit_struct_index_scale_si(index: &Expr, stride: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let s = stride as usize;
     if s.is_power_of_two() {
         emit_load_si(index, locals, out, fixups);          // mov si,[i]
@@ -204,18 +205,42 @@ pub(crate) fn emit_local_struct_row_si(index: &Expr, stride: u16, locals: &Local
         out.push(0x69); out.push(0xC0); out.extend_from_slice(&stride.to_le_bytes()); // imul ax,ax,stride
         out.extend_from_slice(&[0x8B, 0xF0]);               // mov si,ax
     }
+}
+/// `si = bp + index*stride` — the row base of a LOCAL struct array element.
+pub(crate) fn emit_local_struct_row_si(index: &Expr, stride: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    emit_struct_index_scale_si(index, stride, locals, out, fixups);
     out.extend_from_slice(&[0x03, 0xF5]);                    // add si,bp
+}
+/// `si = pts + index*stride` — the row base of a STRUCT-POINTER PARAM element
+/// (`add si,[bp+param]`, the pointer value, rather than `add si,bp`).
+pub(crate) fn emit_param_struct_row_si(index: &Expr, stride: u16, param: usize, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    emit_struct_index_scale_si(index, stride, locals, out, fixups);
+    let d = param_disp(param);
+    out.push(0x03); out.push(bp_modrm(0x76, d)); push_bp_disp(out, d); // add si,[bp+param]
 }
 /// `mov ax/al,[si+disp]` (+cbw for a byte field) — read a struct field at the
 /// frame disp off the SI row base set up by `emit_local_struct_row_si`.
 pub(crate) fn emit_si_field_read(disp: i16, size: u8, out: &mut Vec<u8>) {
     let op = if size == 1 { 0x8Au8 } else { 0x8B };
-    if let Ok(d8) = i8::try_from(disp) {
+    if disp == 0 {
+        out.push(op); out.push(0x04);                        // [si]
+    } else if let Ok(d8) = i8::try_from(disp) {
         out.push(op); out.push(0x44); out.push(d8 as u8);   // [si+disp8]
     } else {
         out.push(op); out.push(0x84); out.extend_from_slice(&disp.to_le_bytes()); // [si+disp16]
     }
     if size == 1 { out.push(0x98); } // cbw
+}
+/// `op ax,[si+disp]` (op = 0x03 add / 0x2B sub / ...) reading a word struct
+/// field off the SI row base. Uses the no-disp `[si]` form when disp == 0.
+fn emit_si_field_word_op(opc: u8, disp: i16, out: &mut Vec<u8>) {
+    if disp == 0 {
+        out.extend_from_slice(&[opc, 0x04]);                 // op ax,[si]
+    } else if let Ok(d8) = i8::try_from(disp) {
+        out.extend_from_slice(&[opc, 0x44, d8 as u8]);       // op ax,[si+disp8]
+    } else {
+        out.push(opc); out.push(0x84); out.extend_from_slice(&disp.to_le_bytes());
+    }
 }
 /// Scale SI by `factor`: power-of-two → `shl si,1` steps; 3 → `mov ax,si; shl
 /// si,1; add si,ax`; otherwise `imul si,si,imm16`.
@@ -1065,6 +1090,10 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             emit_local_struct_row_si(index, *stride, locals, out, fixups);
             let disp = locals.disp(*local) + *field_off as i16;
             emit_si_field_read(disp, *size, out);
+        }
+        Expr::ParamStructArrayField { param, index, stride, field_off, size } => {
+            emit_param_struct_row_si(index, *stride, *param, locals, out, fixups);
+            emit_si_field_read(*field_off as i16, *size, out);
         }
         Expr::PtrArrayElem { array, index } => {
             // Pointer VALUE at element `index` of an array-of-pointers global.
@@ -2355,12 +2384,21 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         let base = locals.disp(local);
         emit_si_field_read(base + offs[0] as i16, 2, out); // mov ax,[si+f0]
         for &fo in &offs[1..] {
-            let disp = base + fo as i16;
-            if let Ok(d8) = i8::try_from(disp) {
-                out.extend_from_slice(&[0x03, 0x44, d8 as u8]);            // add ax,[si+disp8]
-            } else {
-                out.push(0x03); out.push(0x84); out.extend_from_slice(&disp.to_le_bytes());
-            }
+            emit_si_field_word_op(0x03, base + fo as i16, out); // add ax,[si+fk]
+        }
+        return;
+    }
+    // `pts[i].f0 + pts[i].f1 [+ ...]` — word fields of the SAME struct-pointer-param
+    // element. Set up `si = pts + i*stride` ONCE, then read fields in REVERSE
+    // source order: `mov ax,[si+fLast]; add ax,[si+...]; add ax,[si+f0]`. 2208.
+    if matches!(op, BinOp::Add)
+        && let Some((param, index, stride, offs)) = param_struct_field_word_chain(left, right)
+    {
+        emit_param_struct_row_si(index, stride, param, locals, out, fixups);
+        let last = *offs.last().unwrap();
+        emit_si_field_read(last as i16, 2, out); // mov ax,[si+fLast]
+        for &fo in offs[..offs.len() - 1].iter().rev() {
+            emit_si_field_word_op(0x03, fo as i16, out); // add ax,[si+fk]
         }
         return;
     }
@@ -2666,6 +2704,42 @@ fn local_struct_field_word_chain<'a>(left: &'a Expr, right: &'a Expr)
         && offs.len() >= 2
     {
         Some((local?, index?, stride, offs))
+    } else {
+        None
+    }
+}
+/// `pts[i].f0 + pts[i].f1 [+ ...]` — word fields of the SAME struct-pointer-param
+/// element. Returns `(param, &index, stride, [field_off; ...])` in source order.
+/// MSC reads these in REVERSE source order off a shared `si = pts + i*stride`.
+/// Fixture 2208 (`pts[i].x + pts[i].y` → `mov ax,[si+2]; add ax,[si]`).
+fn param_struct_field_word_chain<'a>(left: &'a Expr, right: &'a Expr)
+    -> Option<(usize, &'a Expr, u16, Vec<u16>)> {
+    fn idx_eq(a: &Expr, b: &Expr) -> bool {
+        matches!((a, b), (Expr::Local(x), Expr::Local(y)) if x == y)
+            || matches!((a, b), (Expr::Param(x), Expr::Param(y)) if x == y)
+            || matches!((a, b), (Expr::IntLit(x), Expr::IntLit(y)) if x == y)
+    }
+    fn collect<'a>(e: &'a Expr, param: &mut Option<usize>, index: &mut Option<&'a Expr>,
+                   stride: &mut u16, offs: &mut Vec<u16>) -> bool {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            return collect(left, param, index, stride, offs)
+                && collect(right, param, index, stride, offs);
+        }
+        if let Expr::ParamStructArrayField { param: pa, index: ix, stride: s, field_off, size: 2 } = e {
+            match param { None => { *param = Some(*pa); *stride = *s; } Some(x) if *x == *pa => {} _ => return false }
+            match index { None => *index = Some(ix), Some(pi) if idx_eq(pi, ix) => {} _ => return false }
+            offs.push(*field_off);
+            true
+        } else {
+            false
+        }
+    }
+    let (mut param, mut index, mut stride, mut offs) = (None, None, 0u16, Vec::new());
+    if collect(left, &mut param, &mut index, &mut stride, &mut offs)
+        && collect(right, &mut param, &mut index, &mut stride, &mut offs)
+        && offs.len() >= 2
+    {
+        Some((param?, index?, stride, offs))
     } else {
         None
     }

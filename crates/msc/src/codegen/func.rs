@@ -76,6 +76,8 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             Expr::Index2D { .. } => true,
             // runtime local struct-array read `a[i].f` scales the index into SI.
             Expr::LocalStructArrayField { .. } => true,
+            // runtime struct-ptr-param field read `pts[i].f` scales i into SI.
+            Expr::ParamStructArrayField { .. } => true,
             // `*(ptr + i)` (and the nested `*(p + i + j)`) with a runtime index on
             // a pointer param/local uses SI (`mov si,[p]; mov ax,[bx+si]`); a
             // decayed global array uses BX only. add_deref_uses_si peels the

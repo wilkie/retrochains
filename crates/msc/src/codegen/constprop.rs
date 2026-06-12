@@ -2053,6 +2053,16 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 *e = Expr::LocalField { local: *local, byte_off, size: *size };
             }
         }
+        Expr::ParamStructArrayField { param, index, stride, field_off, size } => {
+            prop_expr(index, cp);
+            // Index known → fold to a plain DerefParamField (addressing only;
+            // params carry no compile-time value so no further substitution).
+            if let Expr::IntLit(k) = index.as_ref()
+                && let Ok(byte_off) = u16::try_from(*k as i64 * *stride as i64 + *field_off as i64)
+            {
+                *e = Expr::DerefParamField { ptr_param: *param, byte_off, size: *size };
+            }
+        }
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }

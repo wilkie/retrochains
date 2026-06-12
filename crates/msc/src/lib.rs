@@ -1275,6 +1275,11 @@ pub enum Expr {
     /// `mov ax/al,[si + base_disp + field_off]`. Const-prop folds to a plain
     /// `LocalField` when `i` is known. Fixtures 1821, 1914, 2438.
     LocalStructArrayField { local: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
+    /// `pts[i].field` read where `pts` is a struct-POINTER PARAM with a RUNTIME
+    /// index: `si = pts + i*stride` (`add si,[bp+param]`), then `mov ax/al,
+    /// [si+field_off]`. Const-prop folds to a plain `DerefParamField` when `i`
+    /// is known. Fixture 2208.
+    ParamStructArrayField { param: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
     /// Pointer member-chain read `o->p->v` / `(*p).x` / `w->data[K]`: load the
     /// `base` pointer into BX, dereference through each `hop` offset
     /// (`mov bx,[bx+hop]`), then read `final_size` bytes at `final_off`. Fixtures
@@ -1360,7 +1365,8 @@ impl Expr {
             Expr::BitField { .. } => None,
             Expr::StrLitByte { .. } => None,
             Expr::PtrChainField { .. } => None,
-            Expr::StructArrayField { .. } | Expr::LocalStructArrayField { .. } => None,
+            Expr::StructArrayField { .. } | Expr::LocalStructArrayField { .. }
+            | Expr::ParamStructArrayField { .. } => None,
             Expr::Index2D { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
