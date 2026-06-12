@@ -1538,6 +1538,23 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                     return;
                 }
             }
+            // `(X + c1) + c2` (trailing constant addends in an add chain) combine
+            // into one immediate `X + (c1+c2)` — MSC folds adjacent constants
+            // rather than emitting two `add ax,K`. Fixture 1850 (`a+c+e+b+d`, b/d
+            // const → a single trailing `add ax,6`).
+            if matches!(op, BinOp::Add)
+                && let Expr::IntLit(c2) = right.as_ref()
+                && let Expr::BinOp { op: BinOp::Add, left: inner_l, right: inner_r } = left.as_ref()
+                && let Expr::IntLit(c1) = inner_r.as_ref()
+            {
+                let combined = *c1 + *c2;
+                *e = Expr::BinOp {
+                    op: BinOp::Add,
+                    left: inner_l.clone(),
+                    right: Box::new(Expr::IntLit(combined)),
+                };
+                return;
+            }
         }
         Expr::Call { args, .. } | Expr::CallStructField { args, .. } => {
             for a in args {
