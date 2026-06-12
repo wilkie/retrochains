@@ -426,6 +426,21 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 }
                 return;
             }
+            // Struct-field pointer aliasing: `o.p = &i` (o.p a pointer field)
+            // records `(o, byte_off) -> i`, so a later chain read `o.p->v` folds
+            // to the direct field `i.v`. Same key shape (local, byte_off) as the
+            // array-of-pointers case above. The init store still emits. Fixture
+            // 1873.
+            if let AssignTarget::LocalField { local, byte_off, .. } = target
+                && matches!(value, Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_))
+            {
+                match value {
+                    Expr::AddrOfLocal(x) => { cp.elem_ptr_alias.insert((*local, *byte_off), AliasTarget::Local(*x)); }
+                    Expr::AddrOfGlobal(g) => { cp.elem_ptr_alias.insert((*local, *byte_off), AliasTarget::Global(*g)); }
+                    _ => unreachable!(),
+                }
+                return;
+            }
             // Pointer aliasing with a base offset: `int *p = &a[K]` / `p = a + K`
             // (already recorded in ptr_addr above). Like the bare `&x` case this
             // is a TRACKED alias, not a genuine escape — keep the base array's
@@ -1820,7 +1835,27 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         // A string-literal byte read is a CONST load — no folding.
         Expr::StrLitByte { .. } => {}
         // A pointer member chain is a runtime BX-walk — no folding.
-        Expr::PtrChainField { .. } => {}
+        Expr::PtrChainField { base, hops, final_off, final_size } => {
+            // `o.p->v` where the field `o.p` aliases `&i` → fold to the direct
+            // field `i.v` (`mov ax,[bp+i+v]`) instead of loading the field pointer
+            // and dereferencing. The base is the field pointer `o.p` (a
+            // LocalField); with no further hops the deref reads the aliased
+            // struct's field at final_off. Fixture 1873.
+            if hops.is_empty()
+                && let Expr::LocalField { local, byte_off, .. } = base.as_ref()
+                && let Some(&a) = cp.elem_ptr_alias.get(&(*local, *byte_off))
+            {
+                match a {
+                    AliasTarget::Local(x) => {
+                        *e = Expr::LocalField { local: x, byte_off: *final_off, size: *final_size };
+                    }
+                    AliasTarget::Global(g) => {
+                        *e = Expr::GlobalField { global: g, byte_off: *final_off, size: *final_size };
+                    }
+                    AliasTarget::String(_) => {}
+                }
+            }
+        }
         Expr::StructArrayField { index, .. } => prop_expr(index, cp),
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
