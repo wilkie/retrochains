@@ -1441,7 +1441,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             } else {
                 // Runtime index: load into SI, scale, load element.
                 // Requires Frame::WithSlideSi (push si in prologue).
-                emit_index_to_si(index, locals, out);
+                emit_index_to_si(index, locals, out, fixups);
                 out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
                 let base_disp = locals.disp(*local);
                 out.push(0x8B); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov ax,[bp+si+base]
@@ -1455,7 +1455,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.push(0x98);
             } else {
                 // Runtime index: load into SI (no scale for bytes), load byte, cbw.
-                emit_index_to_si(index, locals, out);
+                emit_index_to_si(index, locals, out, fixups);
                 let base_disp = locals.disp(*local);
                 out.push(0x8A); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov al,[bp+si+base]
                 out.push(0x98); // cbw

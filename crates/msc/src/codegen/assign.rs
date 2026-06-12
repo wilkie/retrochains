@@ -3237,9 +3237,10 @@ pub(crate) fn emit_assign_indexed_local_byte(local_idx: usize, byte_off: u16, va
     out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); out.push(imm);
 }
 /// Load the index expression into SI for BP+SI-based local array
-/// indexing.  Only `Expr::Local` and `Expr::Param` are supported
-/// (runtime indices must be scalar variables).
-pub(crate) fn emit_index_to_si(index: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>) {
+/// indexing. A scalar `Local`/`Param` loads SI directly; any other
+/// (computed) index — e.g. a call result `a[idx()]` — is evaluated
+/// into AX then moved to SI. Fixture 1372.
+pub(crate) fn emit_index_to_si(index: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match index {
         Expr::Local(i) => {
             let disp = locals.disp(*i);
@@ -3249,7 +3250,12 @@ pub(crate) fn emit_index_to_si(index: &Expr, locals: &Locals<'_>, out: &mut Vec<
             let pdisp = param_disp(*i);
             out.extend_from_slice(&[0x8B, 0x76, pdisp as u8]);
         }
-        other => panic!("unsupported runtime local-array index expr: {other:?}"),
+        other => {
+            // Computed index (call result, arithmetic, …): build it in AX, then
+            // `mov si,ax`. Fixture 1372 (`a[idx()]`).
+            crate::codegen::expr::emit_expr_to_ax(other, locals, out, fixups);
+            out.extend_from_slice(&[0x8B, 0xF0]); // mov si,ax
+        }
     }
 }
 /// Emit a byte-sized RHS into AL. For simple locals/params, use
@@ -3315,13 +3321,13 @@ pub(crate) fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, valu
     // Constant RHS: store the immediate directly (no AX). `mov si,[i]; shl si,1;
     // mov word [bp+si+base], imm` (c7 /0). Fixture 1933 (`a[i] = 0`).
     if let Some(k) = value.fold(locals.inits) {
-        emit_index_to_si(index, locals, out);
+        emit_index_to_si(index, locals, out, fixups);
         out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
         out.push(0xC7); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp);
         out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
         return;
     }
-    emit_index_to_si(index, locals, out);
+    emit_index_to_si(index, locals, out, fixups);
     out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
     emit_expr_to_ax(value, locals, out, fixups);
     out.push(0x89); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov [bp+si+base], ax
@@ -3338,7 +3344,7 @@ pub(crate) fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, valu
 pub(crate) fn emit_indexed_global_read_via_si(rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) -> bool {
     let Expr::Index { array, index } = rhs else { return false };
     if index.fold(locals.inits).is_some() { return false; }
-    emit_index_to_si(index, locals, out);            // mov si,[j]
+    emit_index_to_si(index, locals, out, fixups);            // mov si,[j]
     out.extend_from_slice(&[0xD1, 0xE6]);            // shl si,1
     out.push(0x8B); out.push(0x84);                  // mov ax,[si+disp16]
     let dp = out.len();
@@ -3478,7 +3484,7 @@ pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is
 /// Codegen: `mov si, [idx]; <rhs→AL>; mov [bp+si+base], al`.
 /// No shl since char elements are 1 byte each. Fixture 1219.
 pub(crate) fn emit_assign_indexed_local_byte_var(local_idx: usize, index: &Expr, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    emit_index_to_si(index, locals, out);
+    emit_index_to_si(index, locals, out, fixups);
     emit_byte_rhs_to_al(value, locals, out, fixups);
     let base_disp = locals.disp(local_idx);
     out.push(0x88); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov [bp+si+base], al
