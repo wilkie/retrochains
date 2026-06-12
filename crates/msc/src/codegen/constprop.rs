@@ -281,6 +281,48 @@ fn addr_value_of(e: &Expr) -> Option<(AliasTarget, i32)> {
         _ => None,
     }
 }
+/// Build the address expression for a known base + byte offset:
+/// `&base` (offset 0) or `&base + off`.
+fn addr_expr(base: AliasTarget, off: i32) -> Expr {
+    let a = match base {
+        AliasTarget::Local(x) => Expr::AddrOfLocal(x),
+        AliasTarget::Global(g) => Expr::AddrOfGlobal(g),
+        AliasTarget::String(_) => return Expr::IntLit(0), // unreachable in callers
+    };
+    if off == 0 {
+        a
+    } else {
+        Expr::BinOp { op: BinOp::Add, left: Box::new(a), right: Box::new(Expr::IntLit(off)) }
+    }
+}
+/// Fold a pointer-arithmetic init `q = (cast)(p + K)` (or `q = p`) where `p`
+/// holds a KNOWN base address (`p = a` / `p = &a[J]`) into a link-time address
+/// constant `&base + (off+K)`. MSC folds `(char*)p + 4` to `OFFSET a+4` and
+/// stores it directly, rather than loading p and adding at runtime. Fixture
+/// 2328. Only fires when the pointer's address is statically known (ptr_alias
+/// or ptr_addr); a runtime pointer stays a load+add. Skips the self-compound
+/// case (`p += K` → `p = p + K`, target == source), which MSC emits as an
+/// in-place `add word[p], K` (fixtures 542/564/577/313/1651/1778).
+fn fold_ptr_value_init(target: usize, value: &mut Expr, cp: &ConstProp) -> bool {
+    let resolve = |p: usize| -> Option<(AliasTarget, i32)> {
+        if let Some(&b) = cp.ptr_alias.get(&p) {
+            Some((b, 0))
+        } else {
+            cp.ptr_addr.get(&p).copied()
+        }
+    };
+    if let Expr::BinOp { op: BinOp::Add, left, right } = value
+        && let Expr::Local(p) = left.as_ref()
+        && *p != target
+        && let Expr::IntLit(k) = right.as_ref()
+        && let Some((base, off)) = resolve(*p)
+        && !matches!(base, AliasTarget::String(_))
+    {
+        *value = addr_expr(base, off + *k);
+        return true;
+    }
+    false
+}
 pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
     prop_stmt_inner(stmt, cp);
     // Statement boundary: a call anywhere in this statement invalidates
@@ -317,6 +359,22 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                         (false, true) => AssignTarget::IndexedLocalByte { local: *base, byte_off },
                     };
                 }
+            }
+            // Pointer-arith init from a known-address pointer: `q = (char*)p + K`
+            // folds to `&base + (off+K)` (a link-time address constant) so the
+            // init stores directly instead of loading p and adding. MSC
+            // constant-propagates p's value into the init STORE but does not
+            // alias-track q for later derefs — so q gets no ptr_addr/ptr_alias
+            // entry and a following `*q` stays a runtime pointer deref. Fixture
+            // 2328.
+            if let AssignTarget::Local(q) = target
+                && fold_ptr_value_init(*q, value, cp)
+            {
+                cp.l_known.remove(q);
+                cp.mutated_locals.insert(*q);
+                cp.ptr_addr.remove(q);
+                cp.ptr_alias.remove(q);
+                return;
             }
             // Pointer-value tracking: record/clear p's known address (&g[K]).
             if let AssignTarget::Local(p) = target {
