@@ -3269,7 +3269,42 @@ pub(crate) fn emit_byte_rhs_to_al(value: &Expr, locals: &Locals<'_>, out: &mut V
         Expr::IntLit(k) => {
             out.extend_from_slice(&[0xB0, (*k as u32 & 0xFF) as u8]); // mov al, imm8
         }
+        // `var ± K` / `var & K` / `var | K` / `var ^ K` stored as a byte: compute
+        // in AL (`mov al,[var]; <op> al, K8`) — the byte store truncates anyway, so
+        // 8-bit arithmetic gives the same low byte as MSC. Commutative ops accept
+        // the const on either side (the variable is always loaded into AL first).
+        // Fixture 1276 (`s[i] = 'a' + i`).
+        Expr::BinOp { op, left, right }
+            if byte_var_const_split(*op, left, right).is_some() =>
+        {
+            let (var, k) = byte_var_const_split(*op, left, right).unwrap();
+            emit_byte_rhs_to_al(var, locals, out, fixups);
+            let al_op = match op {
+                BinOp::Add => 0x04u8,    // add al, imm8
+                BinOp::Sub => 0x2C,      // sub al, imm8
+                BinOp::BitAnd => 0x24,   // and al, imm8
+                BinOp::BitOr => 0x0C,    // or  al, imm8
+                BinOp::BitXor => 0x34,   // xor al, imm8
+                _ => unreachable!(),
+            };
+            out.push(al_op); out.push((k as u32 & 0xFF) as u8);
+        }
         _ => emit_expr_to_ax(value, locals, out, fixups),
+    }
+}
+/// For a byte-context `<var> <op> <const>` RHS, return (var-expr, const) when
+/// `op` is a low-byte-preserving binop and exactly one side is a simple
+/// variable (Local/Param) and the other a literal. Commutative ops accept the
+/// const on either side; `Sub` requires the variable on the left.
+fn byte_var_const_split<'a>(op: BinOp, left: &'a Expr, right: &'a Expr) -> Option<(&'a Expr, i32)> {
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
+        return None;
+    }
+    let is_var = |e: &Expr| matches!(e, Expr::Local(_) | Expr::Param(_));
+    match (left, right) {
+        (v, Expr::IntLit(k)) if is_var(v) => Some((v, *k)),
+        (Expr::IntLit(k), v) if is_var(v) && !matches!(op, BinOp::Sub) => Some((v, *k)),
+        _ => None,
     }
 }
 /// `<local-int-array>[<expr>] = <expr>;` — SI-based word store.
