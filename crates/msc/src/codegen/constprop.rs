@@ -96,6 +96,11 @@ pub(crate) fn const_prop_globals(
         // (`int x = 5;` 4081, `char c = 'A'+1;` 1023).
         if !spec.init_is_literal { continue; }
         if let Some(k) = spec.init {
+            // A signed `char` local holds a sign-extended byte: `char c = 200`
+            // reads as -56 when promoted to int (`(int)c`, `c > 100`, `n = c`).
+            // The byte store still writes the low byte (0xC8) via spec.init, so
+            // only the const-prop fold view is sign-corrected. Fixtures 2130/2284/4005.
+            let k = if spec.size == 1 && !spec.is_unsigned { (k as i8) as i32 } else { k };
             cp.l_known.insert(i, k);
         }
     }
