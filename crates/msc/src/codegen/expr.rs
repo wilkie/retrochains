@@ -810,6 +810,22 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al, [bx]; cbw
                 return;
             }
+            // `*(char *)&x` — byte read of a local/global's own storage. The
+            // address is the slot itself, so read the low byte directly and
+            // widen (`mov al,[bp+d]; cbw` / `mov al,[g]; cbw`). Fixture 2430.
+            if let Expr::AddrOfLocal(li) = ptr.as_ref() {
+                let d = locals.disp(*li);
+                out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // mov al,[bp+d]
+                out.push(0x98); // cbw
+                return;
+            }
+            if let Expr::AddrOfGlobal(gi) = ptr.as_ref() {
+                let body_offset = out.len();
+                out.extend_from_slice(&[0xA0, 0x00, 0x00]); // mov al,[g]
+                fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *gi } });
+                out.push(0x98); // cbw
+                return;
+            }
             // `*<char-ptr param>` / `s[0]` on a char* param: load p from its
             // slot, byte-deref + widen (`mov bx,[bp+pd]; mov al,[bx]; cbw`).
             // Fixtures 2618 / 2919 / 2702.
