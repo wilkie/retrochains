@@ -32,6 +32,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         enum_consts: std::collections::HashMap::new(),
         typedefs: std::collections::HashMap::new(),
         int_cast_ptrs: std::collections::HashSet::new(),
+        cast_ptr_pointee: None,
         fn_ptr_globals: std::collections::HashSet::new(),
         fn_ptr_params: std::collections::HashSet::new(),
         fn_ptr_locals: std::collections::HashSet::new(),
@@ -4726,6 +4727,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 | Some(Tok::Kw("float")) | Some(Tok::Kw("double"))) {
                 let cast_char = matches!(p.peek(), Some(Tok::Kw("char")));
                 let cast_int = matches!(p.peek(), Some(Tok::Kw("int")));
+                let cast_long = matches!(p.peek(), Some(Tok::Kw("long")));
                 p.bump();
                 // Accept `long int`, then skip any pointer-distance
                 // qualifiers (`far`/`near`/`huge`) that may appear between
@@ -4775,6 +4777,14 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         }
                         _ => {}
                     }
+                }
+                // A pointer cast `(char *)`/`(int *)`/`(long *)` records its
+                // pointee size so a directly-following unary `*` reads the right
+                // width (`*(char *)p` → byte). Set AFTER the inner atom so the
+                // OUTERMOST cast wins for nested casts; a following deref consumes
+                // (and clears) it. Fixtures 3163/3278/2430.
+                if had_star {
+                    p.cast_ptr_pointee = if cast_char { Some(1) } else if cast_long { Some(4) } else { Some(2) };
                 }
                 return Ok(inner);
             }
@@ -5328,8 +5338,12 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
         }
         Some(Tok::Star) => {
             // Unary deref `*<expr>`. Pick the byte- vs word-sized
-            // variant from the inner expression's pointee type.
+            // variant from the inner expression's pointee type. Clear any
+            // stale pointer-cast pointee first; a cast inside `inner`
+            // (`*(char *)p`) sets it, and we consume it below.
+            p.cast_ptr_pointee = None;
             let inner = parse_atom(p)?;
+            let cast_pointee = p.cast_ptr_pointee.take();
             // `*arr[i]` on an array-of-pointers — deref the pointer element,
             // equivalent to `arr[i][0]`. Fixture 2608.
             if let Expr::PtrArrayElem { array, index } = inner {
@@ -5338,7 +5352,10 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     array, index, inner: Box::new(Expr::IntLit(0)), elem_size,
                 });
             }
-            let pointee_size = pointee_size_of(&inner, &p.globals, &p.local_specs, &p.param_pointee_sizes);
+            // An explicit pointer cast on the operand (`*(char *)p`) overrides
+            // the inferred pointee size so the access width matches the cast.
+            let pointee_size = cast_pointee
+                .unwrap_or_else(|| pointee_size_of(&inner, &p.globals, &p.local_specs, &p.param_pointee_sizes));
             // `*(p + K)` over a scalar pointer LOCAL: scale the literal index
             // by the pointee size, matching the byte-scaled `p[K]` subscript
             // production — the alias-fold and emit paths see one convention.

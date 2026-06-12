@@ -1509,6 +1509,10 @@ struct Parser<'a> {
     typedefs: std::collections::HashMap<String, &'static str>,
     /// Pointer params/locals cast with `(int)` in the current function.
     int_cast_ptrs: std::collections::HashSet<(bool, usize)>,
+    /// Pointee size declared by the most recently parsed pointer cast
+    /// (`(char *)` → 1, `(int *)` → 2, `(long *)` → 4). Consumed by a
+    /// following unary `*` so `*(char *)p` reads a byte. Fixtures 3163/3278/2430.
+    cast_ptr_pointee: Option<usize>,
     /// Names of file-scope function-pointer variables (`int (*fp)(args);`).
     /// A call `fp(...)` whose name is here lowers to an indirect `CallPtr`
     /// (`call WORD PTR _fp`) rather than a direct `call _fp`.
