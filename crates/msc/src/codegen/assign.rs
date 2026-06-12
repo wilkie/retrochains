@@ -1665,6 +1665,47 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
             return;
         }
     }
+    // `c &= K` / `c |= K` / `c ^= K` (char-param self-compound bitop) → in-place
+    // `<op> byte [bp+disp], K8` (0x80 /digit) instead of load-modify-store.
+    // Fixture 723.
+    if is_char
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && let Some(digit) = match op {
+            BinOp::BitAnd => Some(4u8),
+            BinOp::BitOr => Some(1u8),
+            BinOp::BitXor => Some(6u8),
+            _ => None,
+        }
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let modrm = 0x46 | (digit << 3); // [bp+disp8], reg=digit
+        out.extend_from_slice(&[0x80, modrm, disp as u8, (k as u32 & 0xFF) as u8]);
+        return;
+    }
+    // `c op= d` (char-param self-compound with a CHAR-PARAM operand d) → load d
+    // into AL, then in-place byte op `<op> byte [bp+c], al`. The byte op keeps
+    // the low byte (chars promote+truncate), so no widening is needed. Fixture
+    // 724.
+    if is_char
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && let Some(op_byte) = match op {
+            BinOp::Add => Some(0x00u8),
+            BinOp::Sub => Some(0x28),
+            BinOp::BitAnd => Some(0x20),
+            BinOp::BitOr => Some(0x08),
+            BinOp::BitXor => Some(0x30),
+            _ => None,
+        }
+        && let Expr::Param(j) = right.as_ref()
+        && locals.is_char_param(*j)
+    {
+        let rd = param_disp(*j);
+        out.push(0x8A); out.push(bp_modrm(0x46, rd)); push_bp_disp(out, rd); // mov al,[bp+d]
+        out.push(op_byte); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // <op> byte[bp+c],al
+        return;
+    }
     // Generic: const RHS → store imm; else eval then store.
     if let Some(k) = value.fold(locals.inits) {
         if is_char {
