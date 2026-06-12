@@ -3405,6 +3405,24 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.push(0xF6); out.push(if uns { 0xF1 } else { 0xF9 }); // div cl / idiv cl
         return;
     }
+    // Char param / K (value context): byte division. Load the param, widen,
+    // `mov cl,K; idiv cl`, then widen the AL quotient back to a word (the result
+    // is consumed as an int). `8a 46 pd; 98; b1 K; f6 f9; 98`. Fixture 3687.
+    if matches!(op, BinOp::Div)
+        && let Expr::Param(pi) = left
+        && locals.is_char_param(*pi)
+        && let Expr::IntLit(k) = right
+    {
+        let pd = param_disp(*pi);
+        let uns = locals.is_unsigned_param(*pi);
+        let widen: &[u8] = if uns { &[0x2A, 0xE4] } else { &[0x98] };
+        out.push(0x8A); out.push(bp_modrm(0x46, pd)); push_bp_disp(out, pd); // mov al,[bp+pd]
+        out.extend_from_slice(widen);
+        out.push(0xB1); out.push((*k as u32 & 0xFF) as u8); // mov cl, K
+        out.push(0xF6); out.push(if uns { 0xF1 } else { 0xF9 }); // div cl / idiv cl
+        out.extend_from_slice(widen);
+        return;
+    }
     // Signed int division by a power of two 2^m with m >= 2: MSC avoids `idiv`
     // with the abs idiom — `cwd; xor ax,dx; sub ax,dx` (ax = |x|), `mov cx,m;
     // sar ax,cl`, then `xor ax,dx; sub ax,dx` to restore the sign. Division by
