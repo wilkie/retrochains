@@ -4899,6 +4899,24 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 if had_star {
                     p.cast_ptr_pointee = if cast_char { Some(1) } else if cast_long { Some(4) } else { Some(2) };
                 }
+                // `(long)<scalar int>` — preserve long-ness that the bare AST drops
+                // (a long cast is otherwise identity), so a later long multiply /
+                // arithmetic recognizes it. fold() delegates to the inner, so const
+                // contexts (a long-local init) are unaffected. Fixture 1683.
+                if cast_long && !had_star {
+                    let int_scalar_unsigned: Option<bool> = match &inner {
+                        Expr::Param(i)
+                            if !p.param_is_long.get(*i).copied().unwrap_or(false)
+                                && p.param_pointee_sizes.get(*i).copied().unwrap_or(0) == 0
+                                && p.param_struct_idxs.get(*i).map(|s| s.is_none()).unwrap_or(true)
+                                && !p.param_is_char.get(*i).copied().unwrap_or(false) =>
+                            Some(cast_unsigned || p.param_is_unsigned.get(*i).copied().unwrap_or(false)),
+                        _ => None,
+                    };
+                    if let Some(unsigned) = int_scalar_unsigned {
+                        return Ok(Expr::CastLong { value: Box::new(inner), unsigned });
+                    }
+                }
                 return Ok(inner);
             }
             let inner = parse_expr(p)?;

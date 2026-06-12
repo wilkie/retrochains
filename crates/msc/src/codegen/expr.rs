@@ -353,6 +353,11 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 other => panic!("AssignExpr target not yet supported: {other:?}"),
             }
         }
+        Expr::CastLong { value, .. } => {
+            // Reached in an int (AX) context — the long-ness is being truncated
+            // back to a word, so just materialize the inner int value.
+            emit_expr_to_ax(value, locals, out, fixups);
+        }
         Expr::CastChar { value, unsigned, .. } => {
             // Truncate to a byte then widen back. A constant operand (incl. a
             // foldable arithmetic expression like `a+b` with known a,b) is

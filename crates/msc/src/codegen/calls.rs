@@ -559,6 +559,8 @@ pub(crate) fn long_operand(e: &Expr, locals: &Locals<'_>) -> bool {
         Expr::GlobalField { size: 4, .. } => true,
         // Long field of a struct local / by-value struct param (`s.v` / `b.v`).
         Expr::LocalField { size: 4, .. } | Expr::ParamField { size: 4, .. } => true,
+        // `(long)<int>` widening cast — a long value.
+        Expr::CastLong { .. } => true,
         Expr::Index { array, .. } => locals.is_long_global(*array),
         _ => false,
     }
@@ -570,6 +572,7 @@ pub(crate) fn long_operand_unsigned(e: &Expr, locals: &Locals<'_>) -> bool {
         Expr::Param(i) => locals.is_unsigned_param(*i),
         Expr::Local(i) => locals.is_unsigned_local(*i),
         Expr::Global(j) => locals.is_unsigned_global(*j),
+        Expr::CastLong { unsigned, .. } => *unsigned,
         _ => false,
     }
 }
@@ -793,6 +796,12 @@ pub(crate) fn push_long_operand(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>
             }
             out.push(0x52); out.push(0x50); // push dx; push ax
         }
+        // `(long)<int>` operand: load the int, widen to DX:AX, push both words.
+        Expr::CastLong { value, unsigned } => {
+            crate::codegen::expr::emit_expr_to_ax(value, locals, out, fixups);
+            if *unsigned { out.extend_from_slice(&[0x2B, 0xD2]); } else { out.push(0x99); }
+            out.push(0x52); out.push(0x50); // push dx; push ax
+        }
         _ => unreachable!("long_operand gates these forms"),
     }
 }
@@ -1009,6 +1018,12 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
         {
             emit_long_to_dx_ax(left, locals, out, fixups);
             emit_long_op_mem(*op, right, locals, out, fixups);
+        }
+        // `(long)<int>` — materialize the inner int into AX, then widen to DX:AX:
+        // signed → `cwd`, unsigned → `sub dx,dx`. Fixture 1683.
+        Expr::CastLong { value, unsigned } => {
+            crate::codegen::expr::emit_expr_to_ax(value, locals, out, fixups);
+            if *unsigned { out.extend_from_slice(&[0x2B, 0xD2]); } else { out.push(0x99); }
         }
         Expr::Call { name, args } => {
             emit_call(name, args, locals, out, fixups);

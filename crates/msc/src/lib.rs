@@ -1262,6 +1262,13 @@ pub enum Expr {
     /// to an immediate — see [`crate::codegen::cast_rhs_needs_al_form`]. The flag
     /// must survive const-prop (which substitutes the inner operand to a literal).
     CastChar { value: Box<Expr>, unsigned: bool, from_var: bool },
+    /// `(long)<int-expr>` — widen an int value to a long. Carries the inner int
+    /// expression; `unsigned` selects zero-extend (`sub dx,dx`) vs sign-extend
+    /// (`cwd`) when materialized into DX:AX. Marks long-ness that the bare AST
+    /// would lose (a `(long)x` cast is otherwise identity), so `(long)x * 1000L`
+    /// is recognized as a long multiply. `fold` delegates to the inner value, so
+    /// constant contexts (a long-local init) are unaffected. Fixture 1683.
+    CastLong { value: Box<Expr>, unsigned: bool },
     /// `"string"[K]` — byte at constant offset K of a string literal. Reads
     /// `mov al, $SG+K; cbw` (a CONST-segment byte load, not folded). Fixtures
     /// 1209, 2381.
@@ -1425,6 +1432,9 @@ impl Expr {
                 let v = value.fold(locals)?;
                 Some(if *unsigned { (v as u8) as i32 } else { (v as i8) as i32 })
             }
+            // A long-cast folds to its inner int value; the long-ness only
+            // matters for runtime materialization into DX:AX.
+            Expr::CastLong { value, .. } => value.fold(locals),
         }
     }
 }

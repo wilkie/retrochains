@@ -1195,7 +1195,7 @@ fn mark_cond_reads(c: &Cond, cp: &mut ConstProp) {
                 mark_expr(left, cp);
                 mark_expr(right, cp);
             }
-            Expr::CastChar { value, .. } => mark_expr(value, cp),
+            Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => mark_expr(value, cp),
             _ => {}
         }
     }
@@ -1327,7 +1327,7 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
 pub(crate) fn eval_const_int(e: &Expr) -> Option<i32> {
     match e {
         Expr::IntLit(k) => Some(*k),
-        Expr::CastChar { value, .. } => eval_const_int(value),
+        Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => eval_const_int(value),
         Expr::BinOp { op, left, right } => {
             let a = eval_const_int(left)? as i16;
             let b = eval_const_int(right)? as i16;
@@ -1395,7 +1395,7 @@ fn flatten_add(e: &Expr, out: &mut Vec<Expr>) {
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     match e {
         Expr::FloatLit(..) => {} // no int const-prop into float literals
-        Expr::CastChar { value, .. } => prop_expr(value, cp),
+        Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => prop_expr(value, cp),
         Expr::AssignExpr { target, value } => {
             // Substitute into the RHS so the cond can fold, then invalidate the
             // target's known value: MSC reloads/reuses-AX for later reads rather
@@ -1891,7 +1891,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                                     mark_reads(then_arm, cp);
                                     mark_reads(else_arm, cp);
                                 }
-                                Expr::CastChar { value, .. } => mark_reads(value, cp),
+                                Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => mark_reads(value, cp),
                                 _ => {}
                             }
                         }
