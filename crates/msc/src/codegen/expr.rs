@@ -3429,6 +3429,29 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.push(0xC1); // op ax, cx
         return;
     }
+    // `<char global> + <int>`: MSC loads the CHAR GLOBAL into AX (`mov al,_c;
+    // cbw`), parks it in CX, loads the INT into AX, then `add ax,cx` — rather
+    // than adding the int as a memory operand. (A char PARAM/LOCAL operand
+    // instead uses the `mov al,..; cbw; add ax,[int]` shape — 2980/3685 — so
+    // this is gated to char globals.) Fixture 3344 (`c + n`).
+    if matches!(op, BinOp::Add) {
+        let is_char_global = |e: &Expr| matches!(e, Expr::Global(g)
+            if locals.is_char_global(*g) && !locals.is_unsigned_global(*g));
+        let pair = if is_char_global(left) {
+            simple_word_bp(right, locals).map(|d| (left, d))
+        } else if is_char_global(right) {
+            simple_word_bp(left, locals).map(|d| (right, d))
+        } else {
+            None
+        };
+        if let Some((char_op, int_disp)) = pair {
+            emit_expr_to_ax(char_op, locals, out, fixups);                        // mov al,..; cbw
+            out.extend_from_slice(&[0x8B, 0xC8]);                                 // mov cx, ax
+            out.push(0x8B); out.push(bp_modrm(0x46, int_disp)); push_bp_disp(out, int_disp); // mov ax,[int]
+            out.extend_from_slice(&[0x03, 0xC1]);                                 // add ax, cx
+            return;
+        }
+    }
     // Commutative-op swap: when the RHS is a value that needs AX
     // (call, complex expression) and the LHS is a BP-rel operand,
     // MSC emits the RHS first and then uses the BP-rel as a memory
