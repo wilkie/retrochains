@@ -656,6 +656,16 @@ pub(crate) fn is_long_muldiv(e: &Expr, locals: &Locals<'_>) -> bool {
 
 /// Shift-left amount for a long `<<` / `* 2^n`: `v << k` (1..=31) or
 /// `v * 2^n` both lower to a left shift by that many bits.
+/// Two expressions denote the SAME scalar lvalue operand (same Local/Param/
+/// Global index) — used to recognize `x + x`, `x & x`, etc.
+fn same_long_operand(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::Local(i), Expr::Local(j))
+        | (Expr::Param(i), Expr::Param(j))
+        | (Expr::Global(i), Expr::Global(j)) => i == j,
+        _ => false,
+    }
+}
 pub(crate) fn long_shl_amount(op: BinOp, right: &Expr, locals: &Locals<'_>) -> Option<u8> {
     let k = right.fold(locals.inits)?;
     match op {
@@ -935,6 +945,15 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             emit_long_to_dx_ax(left, locals, out, fixups);
             emit_word_const_bitop(*op, (k as u32 & 0xFFFF) as u16, false, out); // AX (low)
             emit_word_const_bitop(*op, ((k as u32) >> 16) as u16, true, out);   // DX (high)
+        }
+        // `x + x` (long, the SAME operand on both sides) is `x * 2` → strength-
+        // reduce to a single in-place left shift `shl ax,1; rcl dx,1` instead of
+        // re-loading x and two-word adding. Fixture 4037.
+        Expr::BinOp { op: BinOp::Add, left, right }
+            if long_operand(left, locals) && same_long_operand(left, right) =>
+        {
+            emit_long_to_dx_ax(left, locals, out, fixups);
+            out.extend_from_slice(&[0xD1, 0xE0, 0xD1, 0xD2]); // shl ax,1; rcl dx,1
         }
         // Inline 2-word arithmetic: `a <op> b` where both are long. Load a
         // into DX:AX, then combine b (in memory) word-wise: add/adc, sub/sbb,
