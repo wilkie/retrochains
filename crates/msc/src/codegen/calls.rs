@@ -697,6 +697,15 @@ pub(crate) fn is_long_shl(e: &Expr, locals: &Locals<'_>) -> bool {
         if long_operand(left, locals) && long_shl_amount(*op, right, locals).is_some())
 }
 
+/// `e` is a long left shift by a VARIABLE (non-constant) count (`v << n`), which
+/// emit_long_to_dx_ax lowers to a cl-counted shift loop. Fixture 3430.
+pub(crate) fn is_long_shl_var(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op: BinOp::Shl, left, right }
+        if long_operand(left, locals)
+            && long_shl_amount(BinOp::Shl, right, locals).is_none()
+            && right.fold(locals.inits).is_none())
+}
+
 /// `e` is a long-valued expression that emit_long_to_dx_ax can load directly:
 /// a long struct field, a long array element (const index), or `<long> ± <const>`.
 pub(crate) fn is_long_field_elem_or_const_arith(e: &Expr, locals: &Locals<'_>) -> bool {
@@ -901,6 +910,25 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             let n = long_shl_amount(*op, right, locals).expect("shl amount");
             emit_long_to_dx_ax(left, locals, out, fixups);
             emit_long_shl_k(n, out);
+        }
+        // Long left shift by a VARIABLE count `v << n`: load DX:AX, `mov cl,<n>`,
+        // then a test-first cl-counted loop (n may be 0):
+        //   jmp short L2; nop; L1: shl ax,1; rcl dx,1; dec cl; L2: or cl,cl; jne L1
+        // Fixture 3430 (`long a << n`).
+        Expr::BinOp { op: BinOp::Shl, left, right }
+            if long_operand(left, locals)
+                && long_shl_amount(BinOp::Shl, right, locals).is_none()
+                && right.fold(locals.inits).is_none() =>
+        {
+            emit_long_to_dx_ax(left, locals, out, fixups);
+            match right.as_ref() {
+                Expr::Param(i) => { let d = long_param_disp(*i, locals); out.push(0x8A); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); }
+                Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8A); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); }
+                _ => { crate::codegen::expr::emit_expr_to_ax(right, locals, out, fixups); out.extend_from_slice(&[0x8A, 0xC8]); } // mov cl,al
+            }
+            out.extend_from_slice(&[0xEB, 0x07, 0x90]);                   // jmp short L2; nop
+            out.extend_from_slice(&[0xD1, 0xE0, 0xD1, 0xD2, 0xFE, 0xC9]); // L1: shl ax,1; rcl dx,1; dec cl
+            out.extend_from_slice(&[0x0A, 0xC9, 0x75, 0xF6]);             // L2: or cl,cl; jne L1
         }
         // Long right shift by a constant `v >> K` (1..=15): high word first so
         // the carry threads into the low word; SAR vs SHR by signedness; k>1 uses

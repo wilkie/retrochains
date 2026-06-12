@@ -1726,6 +1726,7 @@ pub(crate) fn emit_return(
             fixups.push(Fixup { body_offset: body_offset_hi, kind: FixupKind::GlobalAddr { global_idx: *idx } });
         } else if return_long
             && (is_long_shl(expr, locals)
+                || is_long_shl_var(expr, locals)
                 || is_long_shr1(expr, locals)
                 || is_long_neg(expr, locals)
                 || is_long_not(expr, locals)
