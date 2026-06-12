@@ -98,6 +98,12 @@ pub struct Unit {
     /// definition position. Raw (not symbol-mangled) so the lookup works for
     /// `pascal` functions too. Fixtures 506/1762/3360/2154.
     pub fn_appearance: Vec<String>,
+    /// Symbol names of variadic functions (prototype ends in `, ...`). A long
+    /// or float argument in a variadic position is pushed by its natural width
+    /// (long → two words, float → promoted double) rather than truncated to the
+    /// prototype, since the prototype gives no type for those positions.
+    /// Fixtures 2197/3983 (`printf("%ld", n)`).
+    pub variadic_fns: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -517,6 +523,9 @@ pub struct Locals<'a> {
     /// `push cs` before the near `call` so the callee's `retf` pops both words.
     /// Fixtures 1654/2060/2251.
     pub far_fns: &'a std::collections::HashSet<String>,
+    /// Set of variadic function SYMBOL names. A long/float argument in a
+    /// vararg position is pushed by natural width. Fixtures 2197/3983.
+    pub variadic_fns: &'a std::collections::HashSet<String>,
     /// When the CURRENT function is `pascal`, the byte count its epilogue must
     /// pop via `ret N` (total argument bytes); 0 for a cdecl function.
     pub pascal_cleanup: u16,
@@ -676,6 +685,7 @@ impl Locals<'_> {
             pascal_fns: self.pascal_fns,
             static_fns: self.static_fns,
             far_fns: self.far_fns,
+            variadic_fns: self.variadic_fns,
             pascal_cleanup: self.pascal_cleanup,
             si_local: self.si_local,
             di_local: self.di_local,
@@ -2020,7 +2030,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .functions
         .iter()
         .enumerate()
-        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &unit.variadic_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.

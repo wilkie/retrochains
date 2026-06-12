@@ -33,6 +33,14 @@ pub(crate) fn emit_call_inner(
     let struct_bytes_at = |i: usize| -> usize {
         param_structs.and_then(|v| v.get(i).copied()).unwrap_or(0)
     };
+    // A variadic callee gives no prototype for its vararg positions, so a long
+    // argument there is pushed as two words by its natural width rather than
+    // truncated. Fixtures 2197/3983.
+    let is_variadic = locals.variadic_fns.contains(&sym);
+    let push_long_at = |i: usize| -> bool {
+        param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false)
+            || (is_variadic && long_operand(&args[i], locals))
+    };
     // cdecl pushes args right-to-left; the `pascal` convention pushes them
     // left-to-right (and the callee cleans the stack via `ret N`).
     let order: Vec<usize> = if is_pascal_call {
@@ -42,7 +50,7 @@ pub(crate) fn emit_call_inner(
     };
     for &i in &order {
         let arg = &args[i];
-        let is_long_param = param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false);
+        let is_long_param = push_long_at(i);
         let struct_bytes = struct_bytes_at(i);
         if struct_bytes > 0 {
             emit_push_struct_arg(arg, struct_bytes, locals, out, fixups);
@@ -72,7 +80,7 @@ pub(crate) fn emit_call_inner(
         let sb = struct_bytes_at(i);
         if sb > 0 { sb }
         else if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } }
-        else if param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false) { 4 } else { 2 }
+        else if push_long_at(i) { 4 } else { 2 }
     }).sum();
     // The single last call before a slide-frame epilogue elides its cleanup
     // (the `mov sp,bp` teardown restores SP) — signalled by the function view's

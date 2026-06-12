@@ -49,6 +49,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     let mut proto_struct_returns: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut proto_char_returns: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut prototyped_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut variadic_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Order in which function names FIRST appear in the source (prototype or
     // definition, whichever comes first). MSC lists functions in PUBDEF/EXTDEF
     // in this order — a forward-declared function (`int helper(int);` before
@@ -195,6 +196,12 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
                         fn_appearance.push(nm.clone());
                     }
                     prototyped_fns.insert(symbol_name(nm));
+                    // Variadic prototype: the param list ends with `...` (three
+                    // `Dot` tokens). A long/float arg in a vararg position is
+                    // pushed by natural width. Fixtures 2197/3983.
+                    if (lparen_idx..close_idx).filter(|&j| matches!(p.toks.get(j), Some(Tok::Dot))).count() >= 3 {
+                        variadic_fns.insert(symbol_name(nm));
+                    }
                     let longs = proto_param_longs(p.toks, lparen_idx, close_idx);
                     if longs.iter().any(|&b| b) {
                         proto_long_params.insert(symbol_name(nm), longs);
@@ -238,7 +245,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     }
     // A function-less translation unit (only global declarations) is valid —
     // MSC emits an OBJ with just the data segments. Fixtures 3657/3659/3660/3680.
-    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns, proto_char_returns, fn_appearance })
+    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns, proto_char_returns, fn_appearance, variadic_fns })
 }
 /// Parse a file-scope `struct <Name> <var> [= { ... }];` declaration.
 /// Stores the struct global as if it were a `char` array sized to
