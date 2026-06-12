@@ -557,6 +557,8 @@ pub(crate) fn long_operand(e: &Expr, locals: &Locals<'_>) -> bool {
         // Long struct field / long array element (emit_long_to_dx_ax loads both
         // words; long_global_rhs_addr supplies the address as an RHS).
         Expr::GlobalField { size: 4, .. } => true,
+        // Long field of a struct local / by-value struct param (`s.v` / `b.v`).
+        Expr::LocalField { size: 4, .. } | Expr::ParamField { size: 4, .. } => true,
         Expr::Index { array, .. } => locals.is_long_global(*array),
         _ => false,
     }
@@ -1031,6 +1033,21 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global } });
             let bo = out.len() + 1; out.extend_from_slice(&[0x8B, 0x16]); out.extend_from_slice(&(lo + 2).to_le_bytes()); // mov dx, [g+lo+2]
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global } });
+        }
+        // Long field of a struct local / by-value struct param: low word at the
+        // field's bp offset, high word at +2. Fixture 2592 (`b.v`, b a by-value
+        // struct param).
+        Expr::LocalField { local, byte_off, size: 4 } => {
+            let lo = locals.disp(*local) + *byte_off as i16;
+            let hi = lo + 2;
+            out.push(0x8B); out.push(bp_modrm(0x46, lo)); push_bp_disp(out, lo); // mov ax,[bp+lo]
+            out.push(0x8B); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // mov dx,[bp+hi]
+        }
+        Expr::ParamField { param, byte_off, size: 4 } => {
+            let lo = locals.param_base_disp(*param) + *byte_off as i16;
+            let hi = lo + 2;
+            out.push(0x8B); out.push(bp_modrm(0x46, lo)); push_bp_disp(out, lo); // mov ax,[bp+lo]
+            out.push(0x8B); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // mov dx,[bp+hi]
         }
         Expr::Index { array, index }
             if locals.is_long_global(*array) && index.fold(locals.inits).is_some() =>
