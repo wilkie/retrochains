@@ -660,6 +660,12 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             let rhs_source_lit = matches!(value, Expr::BinOp { .. })
                 && pure_literal_tree(value)
                 && value.fold(&[]).is_some();
+            // A struct-field/array element assigned a value COMPUTED from
+            // substituted variables (`s.x = a + b`) stores its folded immediate
+            // but is NOT propagated to later reads — MSC reloads it. Only direct
+            // literals and pure-literal trees propagate. Captured before prop_expr
+            // folds the BinOp away. Fixture 1084 (vs `s.x = 5+3` source-literal).
+            let rhs_is_computed = matches!(value, Expr::BinOp { .. }) && !rhs_source_lit;
             if self_assign_addsub
                 && let Expr::BinOp { right, .. } = value
             {
@@ -797,7 +803,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     // Record the (truncated) element value so later reads fold —
                     // UNLESS this store came through a pointer, which MSC's element
                     // table does not track (the element stays unknown). Fixture 1017.
-                    if !from_ptr_store && let Some(k) = value.fold(&[]) {
+                    if !from_ptr_store && !rhs_is_computed && let Some(k) = value.fold(&[]) {
                         cp.la_known.insert((*local, *byte_off), k);
                         if let Some(sz) = write_field_size {
                             cp.la_field_size.insert((*local, *byte_off), sz);
@@ -813,7 +819,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     if let Some(k) = value.fold(&[]) {
                         *value = Expr::IntLit(k);
                     }
-                    if !from_ptr_store && let Expr::IntLit(k) = value {
+                    if !from_ptr_store && !rhs_is_computed && let Expr::IntLit(k) = value {
                         cp.ga_known.insert((*array, *byte_off), *k);
                         if let Some(sz) = write_field_size {
                             cp.ga_field_size.insert((*array, *byte_off), sz);
