@@ -71,7 +71,16 @@ pub(crate) fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_
         }
         Cond::Cmp { op, left, right }
             if long_operand(left, locals)
-                && (long_operand(right, locals) || matches!(right, Expr::IntLit(k) if *k != 0)) =>
+                && (long_operand(right, locals)
+                    || matches!(right, Expr::IntLit(k) if *k != 0)
+                    // Signed long `v > 0L` / `v <= 0L`: unlike `< 0L` / `>= 0L`
+                    // (a pure high-word sign test above), these need the full
+                    // word-wise ordering — the high word decides, the low word
+                    // breaks the tie at high==0. Routed here with the low-word
+                    // tiebreak collapsed against 0 below. Fixture 433.
+                    || (matches!(op, RelOp::Gt | RelOp::Le)
+                        && matches!(right, Expr::IntLit(0))
+                        && !long_operand_unsigned(left, locals))) =>
         {
             // 32-bit comparison: a multi-branch sequence (not the single
             // cmp+jcc int shape). A long compared against a NON-ZERO int
@@ -140,6 +149,18 @@ fn emit_long_cmp_skip(
         Jcc(u8, bool), // (opcode, to_then?)
     }
     let (hi_f, hi_t, lo_f) = long_ordering_jccs(op, unsigned);
+    // Low word compared against immediate 0: the unsigned tiebreak collapses,
+    // since nothing is unsigned-below 0. `jbe`(Gt) becomes `je` and `ja`(Le)
+    // becomes `jne` — MSC emits the collapsed forms. Fixture 433.
+    let lo_f = if matches!(right, Expr::IntLit(0)) {
+        match lo_f {
+            0x76 => 0x74, // jbe -> jz
+            0x77 => 0x75, // ja  -> jnz
+            other => other,
+        }
+    } else {
+        lo_f
+    };
     // UNSIGNED ordering against a constant whose HIGH word is 0: the high word
     // can't be negative, so one of the two high-word jccs (testing `high < 0`) is
     // dead. The compare collapses to a single `cmp hi,0; jne <dst>` — high != 0
