@@ -710,6 +710,20 @@ fn emit_long_shl_k(k: u8, out: &mut Vec<u8>) {
         out.extend_from_slice(&[0xD1, 0xE0, 0xD1, 0xD2, 0xFE, 0xC9, 0x75, 0xF8]);
     }
 }
+/// Long right shift by `k` (DX:AX): high word first so the carry threads into
+/// the low word. `sar` (signed) / `shr` (unsigned) on DX, then `rcr ax,1`. For
+/// k>1 MSC uses a cl-counted loop (`dec cl; jne`). Fixtures 230/3179/3180.
+fn emit_long_shr_k(k: u8, unsigned: bool, out: &mut Vec<u8>) {
+    let hi: [u8; 2] = if unsigned { [0xD1, 0xEA] } else { [0xD1, 0xFA] }; // shr|sar dx,1
+    if k == 1 {
+        out.extend_from_slice(&hi);
+        out.extend_from_slice(&[0xD1, 0xD8]); // rcr ax,1
+    } else {
+        out.extend_from_slice(&[0xB1, k]); // mov cl, k
+        out.extend_from_slice(&hi);
+        out.extend_from_slice(&[0xD1, 0xD8, 0xFE, 0xC9, 0x75, 0xF8]); // rcr ax,1; dec cl; jne -8
+    }
+}
 
 /// Push a long operand's two words (high then low) from memory, as MSC does
 /// for the helper-call calling convention.
@@ -848,18 +862,16 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             emit_long_to_dx_ax(left, locals, out, fixups);
             emit_long_shl_k(n, out);
         }
-        // Long right shift by one `v >> 1`: high word first so the carry
-        // threads into the low word; SAR vs SHR by signedness. Fixtures
-        // 2885, 2886, 3300, 378.
+        // Long right shift by a constant `v >> K` (1..=15): high word first so
+        // the carry threads into the low word; SAR vs SHR by signedness; k>1 uses
+        // a cl-counted loop. Fixtures 2885/2886/3300/378 (>>1), 230/3179/3180 (>>K).
         Expr::BinOp { op: BinOp::Shr, left, right }
-            if right.fold(locals.inits) == Some(1) && long_operand(left, locals) =>
+            if matches!(right.fold(locals.inits), Some(k) if (1..16).contains(&k))
+                && long_operand(left, locals) =>
         {
+            let k = right.fold(locals.inits).unwrap() as u8;
             emit_long_to_dx_ax(left, locals, out, fixups);
-            if long_operand_unsigned(left, locals) {
-                out.extend_from_slice(&[0xD1, 0xEA, 0xD1, 0xD8]); // shr dx,1; rcr ax,1
-            } else {
-                out.extend_from_slice(&[0xD1, 0xFA, 0xD1, 0xD8]); // sar dx,1; rcr ax,1
-            }
+            emit_long_shr_k(k, long_operand_unsigned(left, locals), out);
         }
         // Long negate `-x` (parsed as `0 - x`): neg ax; adc dx,0; neg dx.
         // Fixtures 2673, 2877.
