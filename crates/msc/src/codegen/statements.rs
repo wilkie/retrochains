@@ -1735,7 +1735,8 @@ pub(crate) fn emit_return(
                 || is_long_muldiv(expr, locals)
                 || is_long_field_elem_or_const_arith(expr, locals)
                 || matches!(expr, Expr::Index { array, .. } if locals.is_long_global(*array))
-                || matches!(expr, Expr::LocalIndex { local, .. } if locals.is_long_local(*local)))
+                || matches!(expr, Expr::LocalIndex { local, .. } if locals.is_long_local(*local))
+                || matches!(expr, Expr::PostMutateGlobal { global_idx, .. } if locals.is_long_global(*global_idx)))
         {
             // `return <long> <op> ..` lowered across DX:AX (shift-by-1,
             // inline 2-word arithmetic, or a mul/div/mod helper call).

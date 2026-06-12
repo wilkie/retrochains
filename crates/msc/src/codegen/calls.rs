@@ -970,6 +970,26 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             out.extend_from_slice(&[0x8B, 0x16, 0x02, 0x00]); // mov dx, [g+2]
             fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *j } });
         }
+        // `g++` / `g--` (long global) used as a value: load the OLD long into
+        // DX:AX, then increment/decrement the 4-byte global in place — `add
+        // word[g],step; adc word[g+2],0` (sub/sbb for --). Fixture 3294.
+        Expr::PostMutateGlobal { global_idx, step } if locals.is_long_global(*global_idx) => {
+            let g = *global_idx;
+            let bo = out.len();
+            out.extend_from_slice(&[0xA1, 0x00, 0x00]); // mov ax, [g]
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+            let bo = out.len() + 1;
+            out.extend_from_slice(&[0x8B, 0x16, 0x02, 0x00]); // mov dx, [g+2]
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+            let (lo_op, hi_op) = if *step >= 0 { (0x06u8, 0x16u8) } else { (0x2Eu8, 0x1Eu8) }; // add/adc | sub/sbb
+            let mag = step.unsigned_abs() as u16;
+            out.push(0x83); out.push(lo_op); // add/sub word [g], step_lo (imm8sx)
+            let bo = out.len(); out.extend_from_slice(&[0x00, 0x00]); out.push(mag as u8);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: g } });
+            out.push(0x83); out.push(hi_op); // adc/sbb word [g+2], 0
+            let bo = out.len(); out.extend_from_slice(&2u16.to_le_bytes()); out.push(0x00);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: g } });
+        }
         // Long struct field `s.f` / long array element `a[K]` (constant K): load the
         // low word at the byte offset and the high word at +2. Fixtures 363, 364.
         Expr::GlobalField { global, byte_off, size: 4 } => {
