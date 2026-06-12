@@ -4086,7 +4086,7 @@ pub(crate) fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn
 pub(crate) fn bp_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     match e {
         Expr::Local(i) => Some(locals.disp(*i)),
-        Expr::Param(i) => Some(4 + (*i as i16) * 2),
+        Expr::Param(i) => Some(param_disp(*i)),
         // Word field of a by-value struct param: a `[bp+disp]` operand.
         Expr::ParamField { param, byte_off, size: 2 } => Some(locals.param_base_disp(*param) + *byte_off as i16),
         // Word field of a struct local: a `[bp+disp]` operand.

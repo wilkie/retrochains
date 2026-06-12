@@ -410,7 +410,7 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             }
         }
         Expr::Param(idx) => {
-            let disp = i8::try_from(4 + (idx * 2)).expect("param disp fits");
+            let disp = i8::try_from(crate::codegen::func::param_disp(*idx)).expect("param disp fits");
             if locals.is_char_param(*idx) {
                 // A char param passed as an int arg widens first: `mov al,[c];
                 // cbw|sub ah,ah; push ax` (pushing the raw word would carry the
