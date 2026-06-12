@@ -1465,7 +1465,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
 }
 /// `mov ax, word ptr [bp + 4 + 2*idx]` — load a parameter into AX.
 pub(crate) fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
-    let disp = i8::try_from(4 + (idx * 2)).expect("param disp fits in i8");
+    let disp = i8::try_from(param_disp(idx)).expect("param disp fits in i8");
     out.push(0x8B);
     out.push(0x46);
     out.push(disp as u8);

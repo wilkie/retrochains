@@ -1470,6 +1470,21 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         }
         found
     };
+    // Detect the `far` calling convention in the declarator prefix (it may
+    // precede or follow the return type, e.g. `int far helper(...)`). A far
+    // function returns with `retf` and its params sit at [bp+6..].
+    let is_far_fn = {
+        let mut j = p.pos;
+        let mut found = false;
+        while let Some(t) = p.toks.get(j) {
+            match t {
+                Tok::LParen => break,
+                Tok::Kw("far") => { found = true; break; }
+                _ => j += 1,
+            }
+        }
+        found
+    };
     let had_mod = skip_decl_modifiers(p) > 0;
     let mut return_char = false;
     let mut return_long = false;
@@ -2530,7 +2545,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // while the body was parsed. For functions without nested-block
     // declarations the two are identical.
     let locals = p.local_specs.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, param_struct_ptr_bytes, locals, local_names, int_cast_ptrs: std::mem::take(&mut p.int_cast_ptrs), body, struct_field_temp_count: p.struct_field_temp_count, is_pascal, is_static: is_static_fn })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, param_struct_ptr_bytes, locals, local_names, int_cast_ptrs: std::mem::take(&mut p.int_cast_ptrs), body, struct_field_temp_count: p.struct_field_temp_count, is_pascal, is_static: is_static_fn, is_far: is_far_fn })
 }
 /// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
 /// and `)` at `close_idx`) and return each param's `is_long` flag. A param is

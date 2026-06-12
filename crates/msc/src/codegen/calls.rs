@@ -54,6 +54,11 @@ pub(crate) fn emit_call_inner(
             emit_push_arg(arg, locals, out, fixups);
         }
     }
+    // A same-segment `far` callee is reached with a near call preceded by
+    // `push cs`, so its `retf` finds CS:IP on the stack (fixtures 1654/2060/2251).
+    if locals.far_fns.contains(name) {
+        out.push(0x0E); // push cs
+    }
     let body_offset = out.len();
     out.extend_from_slice(&[0xE8, 0x00, 0x00]);
     // Both TU-local and external calls record their target name.

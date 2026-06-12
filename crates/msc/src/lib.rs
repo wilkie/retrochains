@@ -262,6 +262,10 @@ pub struct Function {
     /// the bare C name (no leading `_`) and it is published via LEXTDEF (0xB4) /
     /// LPUBDEF (0xB6) records rather than EXTDEF/PUBDEF. Fixtures 1708/1916/2155.
     pub is_static: bool,
+    /// `far` calling convention — the function returns with `retf` (CB) and its
+    /// params sit at `[bp+6..]` (the far return address is 4 bytes). Same-segment
+    /// callers reach it via `push cs` + a near `call`. Fixtures 1654/2060/2251.
+    pub is_far: bool,
 }
 
 /// A function-local variable's storage descriptor. `size` is bytes
@@ -509,6 +513,10 @@ pub struct Locals<'a> {
     /// symbol (no leading `_`), matching the LEXTDEF/LPUBDEF name. Fixtures
     /// 1708/1916/2155.
     pub static_fns: &'a std::collections::HashSet<String>,
+    /// Set of `far` function names (bare C name). A same-segment caller emits
+    /// `push cs` before the near `call` so the callee's `retf` pops both words.
+    /// Fixtures 1654/2060/2251.
+    pub far_fns: &'a std::collections::HashSet<String>,
     /// When the CURRENT function is `pascal`, the byte count its epilogue must
     /// pop via `ret N` (total argument bytes); 0 for a cdecl function.
     pub pascal_cleanup: u16,
@@ -667,6 +675,7 @@ impl Locals<'_> {
             long_returners: self.long_returners,
             pascal_fns: self.pascal_fns,
             static_fns: self.static_fns,
+            far_fns: self.far_fns,
             pascal_cleanup: self.pascal_cleanup,
             si_local: self.si_local,
             di_local: self.di_local,
@@ -1946,6 +1955,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .filter(|f| f.is_static)
         .map(|f| f.name.clone())
         .collect();
+    // Keyed by BARE C name so emit_call can detect a far callee and prepend
+    // `push cs` to its near call (fixtures 1654/2060/2251).
+    let far_fns: std::collections::HashSet<String> = unit.functions.iter()
+        .filter(|f| f.is_far)
+        .map(|f| f.name.clone())
+        .collect();
     let mut long_param_funcs: std::collections::HashMap<String, Vec<bool>> = unit.functions.iter()
         .filter(|f| f.param_is_long.iter().any(|&b| b))
         .map(|f| (fn_symbol(f), f.param_is_long.clone()))
@@ -2005,7 +2020,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .functions
         .iter()
         .enumerate()
-        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &pascal_fns, &static_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -2014,9 +2029,15 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let mut offset_by_name: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut defined_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Symbols of `far` functions defined in this TU. Even a backward call to
+    // one is left as `E8 0000` + a self-relative FIXUPP to its EXTDEF entry
+    // (rather than an in-band displacement), because the `push cs` makes it a
+    // relocatable far reference. Fixtures 1654/2060/2251.
+    let mut far_syms: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, fe) in function_emits.iter().enumerate() {
         function_offsets.push(cursor);
         let sym = fn_symbol(&unit.functions[i]);
+        if unit.functions[i].is_far { far_syms.insert(sym.clone()); }
         offset_by_name.insert(sym.clone(), cursor);
         defined_names.insert(sym);
         cursor += fe.bytes.len();
@@ -2703,7 +2724,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 // the ExtCall path below. Fixtures 506/1762/3360/2154.
                 FixupKind::TuLocalCall { target }
                     if defined_names.contains(target)
-                        && offset_by_name[target] <= caller_off =>
+                        && offset_by_name[target] <= caller_off
+                        && !far_syms.contains(target) =>
                 {
                     let target_off = offset_by_name[target];
                     let disp = (target_off as i32)

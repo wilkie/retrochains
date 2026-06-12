@@ -1,5 +1,19 @@
 use crate::*;
 
+thread_local! {
+    /// Set to the CURRENTLY-emitting function's `far` flag. A far function's
+    /// params sit at `[bp+6..]` (4-byte far return address) and it returns with
+    /// `retf` (CB). `param_disp` and `push_epilogue` consult this so neither has
+    /// to be threaded through their ~160 call sites. Set at the top of
+    /// `emit_function`; each call overwrites the previous function's value.
+    static CUR_FN_FAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True while emitting a `far` function's body.
+pub(crate) fn cur_fn_far() -> bool {
+    CUR_FN_FAR.with(|c| c.get())
+}
+
 /// Returns true if the function body contains any runtime local array
 /// access (read or write with non-constant index). These require the SI
 /// register to be saved/restored, upgrading the frame to WithSlideSi.
@@ -269,6 +283,7 @@ pub(crate) fn emit_function(
     long_returners: &std::collections::HashSet<String>,
     pascal_fns: &std::collections::HashSet<String>,
     static_fns: &std::collections::HashSet<String>,
+    far_fns: &std::collections::HashSet<String>,
     float_returners_arg: &std::collections::HashMap<String, usize>,
     long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
     struct_param_funcs: &std::collections::HashMap<String, Vec<usize>>,
@@ -276,6 +291,9 @@ pub(crate) fn emit_function(
     struct_is_union: &[bool],
     union_globals: &std::collections::HashSet<usize>,
 ) -> FunctionEmit {
+    // Record this function's far-ness so `param_disp` shifts params to [bp+6..]
+    // and `push_epilogue` emits `retf` (CB) instead of `ret` (C3).
+    CUR_FN_FAR.with(|c| c.set(func.is_far));
     let (body, mutated_locals, loop_mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, struct_is_union, union_globals);
     // Splice top-level blocks that contain a switch into the top-level
     // statement stream, so a switch inside a const-folded outer switch's
@@ -726,6 +744,7 @@ pub(crate) fn emit_function(
         long_returners,
         pascal_fns,
         static_fns,
+        far_fns,
         pascal_cleanup,
         si_local,
         di_local,
@@ -959,7 +978,10 @@ pub(crate) fn callee_symbol_full(c_name: &str, is_pascal: bool, is_static: bool)
     else { symbol_name(c_name) }
 }
 pub(crate) fn param_disp(idx: usize) -> i16 {
-    i16::try_from(4 + (idx * 2)).expect("param disp fits in i16")
+    // A `far` function's return address is 4 bytes (IP+CS), so its params start
+    // 2 bytes deeper at [bp+6] rather than [bp+4].
+    let base = if cur_fn_far() { 6 } else { 4 };
+    i16::try_from(base + (idx * 2)).expect("param disp fits in i16")
 }
 /// Append the function epilogue. For a `pascal` function (`pascal_cleanup > 0`)
 /// the trailing `ret` (0xC3) becomes `ret N` (0xC2 + imm16), popping the
@@ -970,6 +992,10 @@ pub(crate) fn push_epilogue(frame: Frame, pascal_cleanup: u16, out: &mut Vec<u8>
         out.extend_from_slice(&epi[..epi.len() - 1]); // all but the trailing C3
         out.push(0xC2);
         out.extend_from_slice(&pascal_cleanup.to_le_bytes());
+    } else if cur_fn_far() {
+        // Far function: the trailing `ret` (C3) becomes `retf` (CB).
+        out.extend_from_slice(&epi[..epi.len() - 1]);
+        out.push(0xCB);
     } else {
         out.extend_from_slice(epi);
     }
