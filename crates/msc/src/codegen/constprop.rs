@@ -1523,6 +1523,15 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::Call { args, .. } | Expr::CallStructField { args, .. } => {
             for a in args {
                 prop_expr(a, cp);
+                // A string-pointer arg `s` (`char *s = "hi"`) is pushed as its
+                // constant CONST address (`mov ax,OFFSET str; push ax`), not
+                // loaded from the slot. Rewrite to StrLit so the arg emits the
+                // immediate. Fixture 3976.
+                if let Expr::Local(s) = a
+                    && let Some(&AliasTarget::String(idx)) = cp.ptr_alias.get(s)
+                {
+                    *a = Expr::StrLit(idx);
+                }
             }
             cp.saw_call = true;
         }
