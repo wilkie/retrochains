@@ -675,7 +675,14 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             if is_byte {
                 out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             } else {
-                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                // Reuse AX if it already holds x (e.g. `r1 = ++x; r2 = x++;` — the
+                // ++x left x's value in AX), skipping the OLD-value reload.
+                // Fixture 2398.
+                let load = { let mut v = vec![0x8B, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+                let store = { let mut v = vec![0x89, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+                if !ax_holds_word_operand(out, &load, &store, locals.last_branch_barrier.get()) {
+                    out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                }
             }
             emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
             if is_byte {
@@ -4594,6 +4601,31 @@ pub(crate) fn emit_binop_right(op: BinOp, right: &Expr, locals: &Locals<'_>, out
     }
     if let Some(disp) = bp_disp(right, locals) {
         emit_mem_op_at(op, disp, out);
+        return;
+    }
+    // `<ax> + (var * const)` where the product strength-reduces: MSC computes the
+    // product in CX (with DX as the addend scratch) and folds via `add ax,cx`,
+    // rather than spilling the running sum across a second AX computation. The CX
+    // build mirrors the AX strength-reduce. Fixture 2398 (`r1*100 + r2*10 + x`).
+    if matches!(op, BinOp::Add)
+        && let Expr::BinOp { op: BinOp::Mul, left: mvar, right: mk } = right
+        && let Some(k) = mk.fold(locals.inits)
+        && k > 1
+        && let Some(vdisp) = simple_word_bp(mvar, locals)
+    {
+        out.push(0x8B); out.push(bp_modrm(0x4E, vdisp)); push_bp_disp(out, vdisp); // mov cx,[var]
+        let ku = k as u32;
+        if ku.is_power_of_two() {
+            for _ in 0..ku.trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE1]); } // shl cx,1
+        } else {
+            out.extend_from_slice(&[0x8B, 0xD1]); // mov dx,cx
+            let bits = 32 - ku.leading_zeros();
+            for i in (0..bits - 1).rev() {
+                out.extend_from_slice(&[0xD1, 0xE1]); // shl cx,1
+                if (ku >> i) & 1 == 1 { out.extend_from_slice(&[0x03, 0xCA]); } // add cx,dx
+            }
+        }
+        out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
         return;
     }
     // Generic fallback for complex RHS (Call, Ternary, deref...):
