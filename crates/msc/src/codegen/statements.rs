@@ -2462,7 +2462,13 @@ fn emit_for_fused_if(
     let c_base = out.len();
     out.extend_from_slice(&c_buf);
     for mut f in c_fx { f.body_offset += c_base; fixups.push(f); }
-    let c_fwd = i8::try_from(d_buf.len() + 2 + s_buf.len()).expect("fused-for guard disp fits");
+    // MSC pads after the inline then-branch S with a NOP so the after-loop code
+    // (the guard's exit target) lands on an even offset. Compute that pad now —
+    // the end-of-S position is fully determined by the buffer sizes — and fold
+    // it into the guard's forward displacement. Fixture 521 (1256 needs no pad).
+    let s_end = c_base + c_buf.len() + 2 + d_buf.len() + 2 + s_buf.len();
+    let s_pad = usize::from(s_end % 2 != 0);
+    let c_fwd = i8::try_from(d_buf.len() + 2 + s_buf.len() + s_pad).expect("fused-for guard disp fits");
     out.push(jcc_c);
     out.push(c_fwd as u8);
     // Back-edge: D, then a backward jcc to STEP when D is false.
@@ -2476,6 +2482,7 @@ fn emit_for_fused_if(
     let s_base = out.len();
     out.extend_from_slice(&s_buf);
     for mut f in s_fx { f.body_offset += s_base; fixups.push(f); }
+    if s_pad == 1 { out.push(0x90); }
     true
 }
 pub(crate) fn emit_for(
