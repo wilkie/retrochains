@@ -45,6 +45,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         fn_return_struct_idx: std::collections::HashMap::new(),
         fn_return_pointee: std::collections::HashMap::new(),
         param_dptr_elem: std::collections::HashMap::new(),
+        ptr_array_stride: std::collections::HashMap::new(),
         struct_field_temp_count: 0,
     };
     let mut proto_long_params: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
@@ -1587,6 +1588,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     p.fn_ptr_locals.clear();
     p.param_dims.clear();
     p.param_dptr_elem.clear();
+    p.ptr_array_stride.clear();
     p.block_scope_stack.clear();
     p.free_block_slots.clear();
     p.block_frame_max = 0;
@@ -1703,6 +1705,35 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 p.fn_ptr_params.insert(names.len());
                 pointee_sizes.push(2);
                 names.push(fpname);
+                struct_idxs.push(None);
+                is_chars.push(false);
+                is_longs.push(false);
+                is_unsigned_ints.push(false);
+                float_widths.push(0);
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+                break;
+            }
+            // Pointer-to-array parameter: `<elem> (*name)[N]` — a 2-byte near
+            // pointer to an array of N elements. `(*name)[K]` reads element K
+            // (like `name[K]`); `name + K` strides by N*elem. Fixture 2493.
+            if matches!(p.peek(), Some(Tok::LParen))
+                && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+                && matches!(p.toks.get(p.pos + 2), Some(Tok::Ident(_)))
+                && matches!(p.toks.get(p.pos + 3), Some(Tok::RParen))
+                && matches!(p.toks.get(p.pos + 4), Some(Tok::LBrack))
+            {
+                p.bump(); p.bump(); // `(` `*`
+                let paname = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+                p.bump(); // `)`
+                p.eat(&Tok::LBrack)?;
+                let dim = parse_signed_int(p).ok().filter(|&k| k > 0).map(|k| k as usize).unwrap_or(0);
+                while !matches!(p.peek(), Some(Tok::RBrack)) { p.bump(); }
+                p.eat(&Tok::RBrack)?;
+                let elem = if is_char { 1 } else if is_long { 4 }
+                    else if float_width != 0 { float_width } else { 2 };
+                p.ptr_array_stride.insert(paname.clone(), dim * elem);
+                pointee_sizes.push(elem); // (*p)[K] element scaling
+                names.push(paname);
                 struct_idxs.push(None);
                 is_chars.push(false);
                 is_longs.push(false);
@@ -2203,6 +2234,42 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 };
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
+                break;
+            }
+            // Pointer-to-array local: `<elem> (*name)[N] [= expr];` — a 2-byte
+            // near pointer to an array of N elements. `(*name)[K]` reads element
+            // K; `name + K` strides by N*elem. Fixtures 2686, 2329.
+            if matches!(p.peek(), Some(Tok::LParen))
+                && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+                && matches!(p.toks.get(p.pos + 2), Some(Tok::Ident(_)))
+                && matches!(p.toks.get(p.pos + 3), Some(Tok::RParen))
+                && matches!(p.toks.get(p.pos + 4), Some(Tok::LBrack))
+            {
+                p.bump(); p.bump(); // `(` `*`
+                let paname = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+                p.bump(); // `)`
+                p.eat(&Tok::LBrack)?;
+                let dim = parse_signed_int(p).ok().filter(|&k| k > 0).map(|k| k as usize).unwrap_or(0);
+                while !matches!(p.peek(), Some(Tok::RBrack)) { p.bump(); }
+                p.eat(&Tok::RBrack)?;
+                let elem = size.max(1);
+                p.ptr_array_stride.insert(paname.clone(), dim * elem);
+                let local_idx = locals.len();
+                p.local_names.push(paname);
+                let spec = LocalSpec {
+                    size: 2, array_len: 1, init: None, struct_idx: None, is_long: false,
+                    init_is_literal: false, is_far_ptr: false, pointee_size: elem, is_unsigned: false,
+                    init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None,
+                    block_offset: None, is_register: false,
+                };
+                p.local_specs.push(spec.clone());
+                locals.push(spec);
+                if matches!(p.peek(), Some(Tok::Assign)) {
+                    p.bump();
+                    let value = parse_expr(p)?;
+                    prelude.push(Stmt::Assign { target: AssignTarget::Local(local_idx), value });
+                }
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
                 break;
             }
             // Function-pointer local: `<ret> (*name)(params) [= func];` — a
@@ -5068,6 +5135,41 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     return Ok(Expr::CallPtr { target: Box::new(target), args });
                 }
             }
+            // `(*p)[K]` where p is a pointer-to-array param/local (`int (*p)[N]`):
+            // the deref decays to the array base, so this reads element K — the
+            // same access as `p[K]` on an `int *`. A param uses ParamIndex (load
+            // ptr into BX, `[bx+K*elem]`); a local uses the `*(p + K*elem)`
+            // pointer-deref form so const-prop folds it through a known alias
+            // (`row = &matrix[1]` → moffs). Fixtures 2493, 2329, 2686.
+            if matches!(p.peek(), Some(Tok::LBrack))
+                && let Expr::DerefWord { ptr } | Expr::DerefByte { ptr } = &inner
+                && match ptr.as_ref() {
+                    Expr::Param(i) => p.param_names.get(*i).is_some_and(|n| p.ptr_array_stride.contains_key(n)),
+                    Expr::Local(i) => p.local_names.get(*i).is_some_and(|n| p.ptr_array_stride.contains_key(n)),
+                    _ => false,
+                }
+            {
+                let ptr = (**ptr).clone();
+                p.bump(); // `[`
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                if let Expr::Param(i) = ptr {
+                    return Ok(Expr::ParamIndex { param: i, index: Box::new(index) });
+                }
+                let Expr::Local(i) = ptr else { unreachable!() };
+                let elem = p.local_specs[i].pointee_size as i32;
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let inner_addr = match index.fold(&init_view) {
+                    Some(0) => Expr::Local(i),
+                    Some(k) => Expr::BinOp { op: BinOp::Add, left: Box::new(Expr::Local(i)), right: Box::new(Expr::IntLit(k * elem)) },
+                    None => Expr::BinOp { op: BinOp::Add, left: Box::new(Expr::Local(i)), right: Box::new(index) },
+                };
+                return Ok(if elem == 1 {
+                    Expr::DerefByte { ptr: Box::new(inner_addr) }
+                } else {
+                    Expr::DerefWord { ptr: Box::new(inner_addr) }
+                });
+            }
             // `(*p)++` / `(*p)--` — the parens group the deref, so this mutates
             // the POINTEE (by 1), unlike `*p++` which advances the pointer.
             // Build a PostMutateDeref directly so the generic postfix loop
@@ -5411,31 +5513,36 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 p.eat(&Tok::RBrack)?;
                 if let Some(local_idx) = p.resolve_local(&name) {
                     let elem_size = p.local_specs[local_idx].size as i32;
+                    // A subscript on the OUTER dimension of a multi-D array
+                    // (`&m[1]` for `int m[2][3]`) yields a ROW; its address
+                    // strides by the row size (inner dims product * elem). 2493.
+                    let stride = match p.local_dims.get(&local_idx) {
+                        Some(dims) if dims.len() > 1 => dims[1..].iter().product::<usize>() as i32 * elem_size,
+                        _ => elem_size,
+                    };
                     let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
                     let k = idx_expr.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
                         "non-constant index in `&<local>[K]` not yet supported".to_owned()
                     ))?;
-                    let base_disp = -(elem_size * k);
-                    let _ = base_disp;
-                    // Synthesize: lea ax, [bp-disp_a + K*elem_size].
-                    // We don't have a direct AST node for that; fall
-                    // back to "address-of slot at element K".
-                    // For now, use AddrOfLocal + IntLit offset binop.
                     return Ok(Expr::BinOp {
                         op: BinOp::Add,
                         left: Box::new(Expr::AddrOfLocal(local_idx)),
-                        right: Box::new(Expr::IntLit(k * elem_size)),
+                        right: Box::new(Expr::IntLit(k * stride)),
                     });
                 }
                 if let Some(global_idx) = p.global_names.iter().position(|n| *n == name) {
                     let g = &p.globals[global_idx];
                     let elem_size = g.element_size as i32;
+                    let stride = match p.global_dims.get(&global_idx) {
+                        Some(dims) if dims.len() > 1 => dims[1..].iter().product::<usize>() as i32 * elem_size,
+                        _ => elem_size,
+                    };
                     let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
                     if let Some(k) = idx_expr.fold(&init_view) {
                         return Ok(Expr::BinOp {
                             op: BinOp::Add,
                             left: Box::new(Expr::AddrOfGlobal(global_idx)),
-                            right: Box::new(Expr::IntLit(k * elem_size)),
+                            right: Box::new(Expr::IntLit(k * stride)),
                         });
                     }
                     // Runtime index → `<i→ax>; shl ax; add ax,OFFSET _arr`.

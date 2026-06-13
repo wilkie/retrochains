@@ -1614,6 +1614,10 @@ struct Parser<'a> {
     /// `int **pp` → 2), keyed by param name. Lets `argv[i][j]` pick byte vs word
     /// at the inner deref. Cleared per function. Fixture 2962.
     param_dptr_elem: std::collections::HashMap<String, usize>,
+    /// Row stride (bytes) of a pointer-to-array `T (*p)[N]` param/local, keyed by
+    /// name. `(*p)[K]` accesses element K (elem-sized); `p + K` strides by N*elem.
+    /// Cleared per function. Fixtures 2493, 2329, 2686.
+    ptr_array_stride: std::collections::HashMap<String, usize>,
     /// Per-function counter of `make().field` temps assigned so far (reset at the
     /// start of each function body). Each such expression gets the next index,
     /// laid out at the deepest frame slots in source order.
