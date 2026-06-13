@@ -2706,10 +2706,33 @@ pub(crate) fn emit_loop(
             if !labels_before.contains(name) { *pos += delta; }
         }
     };
+    // `while (A || B) { ...; if (c) break; }` — when the OR-loop body ENDS with
+    // `if (c) break;`, MSC fuses that test into the loop's back edge (loop back
+    // when !c instead of an unconditional jmp). The body arrives as a single
+    // Block, so unwrap it, check its last statement, and on a match emit the
+    // block WITHOUT that trailing `if` and use `c` as the back-edge cond.
+    // Fixture 3233.
+    let is_break_stmt = |s: &Stmt| matches!(s, Stmt::Break)
+        || matches!(s, Stmt::Block(b) if b.len() == 1 && matches!(b[0], Stmt::Break));
+    let mut or_break_cond: Option<Cond> = None;
+    let mut fused_segments: Option<Vec<&Stmt>> = None;
+    if matches!(cond, Cond::Or(_, _)) {
+        let inner: Vec<&Stmt> = match body_segments {
+            [single] => match single { Stmt::Block(stmts) => stmts.iter().collect(), _ => vec![*single] },
+            _ => body_segments.to_vec(),
+        };
+        if let Some(Stmt::If { cond: c, then_branch, else_branch: None }) = inner.last().copied()
+            && is_break_stmt(then_branch)
+        {
+            or_break_cond = Some(c.clone());
+            fused_segments = Some(inner[..inner.len() - 1].to_vec());
+        }
+    }
+    let segs_to_emit: &[&Stmt] = fused_segments.as_deref().unwrap_or(body_segments);
     // For a `for` loop, `continue` jumps to the step segment, not the cond.
     // Record the body-buffer offset at the start of that segment.
     let mut cont_off: Option<usize> = None;
-    for (idx, seg) in body_segments.iter().enumerate() {
+    for (idx, seg) in segs_to_emit.iter().enumerate() {
         if Some(idx) == cont_seg { cont_off = Some(body_buf.len()); }
         emit_stmt(seg, &body_locals, frame, return_int, return_long, &mut body_buf, &mut body_fixups);
     }
@@ -2723,7 +2746,7 @@ pub(crate) fn emit_loop(
     // Validated against 4163. (Break-fused loop-backs like 3233 are not yet
     // covered — the trailing `if(c)break` keeps the generic jmp here.)
     if let Cond::Or(cond_a, cond_b) = cond {
-        use crate::codegen::cond::{emit_cond_skip, emit_cond_take};
+        use crate::codegen::cond::{emit_cond_cmp, emit_cond_skip, emit_cond_take};
         // Measure A/B (rel8 jcc is fixed-size, so a dummy disp is fine).
         let mut a_buf = Vec::new();
         let mut a_fx: Vec<Fixup> = Vec::new();
@@ -2734,16 +2757,41 @@ pub(crate) fn emit_loop(
         let (la, lb) = (a_buf.len(), b_buf.len());
         let a_start = out.len();
         let body_len = body_buf.len();
-        // L_exit (after the 2-byte jmp-back) is padded to an even offset.
-        let pad = usize::from((a_start + la + lb + body_len + 2) % 2 != 0);
-        // Re-emit with real disps: A jumps to body (disp = lb), B jumps to exit
-        // (disp = body_len + jmp(2) + pad).
+        // Back edge: either a fused `if(c) break` (cmp + jcc-back-when-!c) or an
+        // unconditional `jmp` back to L_top. The disp byte is `be_disp_pos`.
+        let mut be_buf: Vec<u8> = Vec::new();
+        let mut be_fx: Vec<Fixup> = Vec::new();
+        if let Some(c) = &or_break_cond {
+            emit_cond_cmp(c, &body_locals, &mut be_buf, &mut be_fx);
+            let back_jcc = match c {
+                Cond::Truthy(_) => 0x74, // je: loop back when expr == 0 (break is when != 0)
+                Cond::Cmp { op, .. } => {
+                    let j = loop_back_jcc(negate_relop(*op));
+                    if cmp_is_unsigned(c, locals) { to_unsigned_jcc(j) } else { j }
+                }
+                _ => unreachable!("break-cond is Cmp/Truthy"),
+            };
+            be_buf.push(back_jcc);
+        } else {
+            be_buf.push(0xEB); // jmp short L_top
+        }
+        let be_disp_pos = be_buf.len();
+        be_buf.push(0x00); // disp placeholder
+        let be_len = be_buf.len();
+        // L_exit (after the back edge) is padded to an even offset.
+        let pad = usize::from((a_start + la + lb + body_len + be_len) % 2 != 0);
+        // Re-emit A/B with real disps: A jumps to body (disp = lb), B jumps to
+        // exit (disp = body_len + back-edge + pad).
         a_buf.clear();
         a_fx.clear();
         emit_cond_take(cond_a, i8::try_from(lb).expect("|| A disp fits"), &body_locals, &mut a_buf, &mut a_fx);
         b_buf.clear();
         b_fx.clear();
-        emit_cond_skip(cond_b, i8::try_from(body_len + 2 + pad).expect("|| B disp fits"), &body_locals, &mut b_buf, &mut b_fx);
+        emit_cond_skip(cond_b, i8::try_from(body_len + be_len + pad).expect("|| B disp fits"), &body_locals, &mut b_buf, &mut b_fx);
+        // Patch the back-edge disp → L_top (a_start).
+        let be_start = a_start + la + lb + body_len;
+        let be_disp = a_start as i32 - (be_start as i32 + be_disp_pos as i32 + 1);
+        be_buf[be_disp_pos] = i8::try_from(be_disp).expect("|| back-edge disp fits") as u8;
         let base_a = out.len();
         out.extend_from_slice(&a_buf);
         for mut f in a_fx { f.body_offset += base_a; fixups.push(f); }
@@ -2754,10 +2802,9 @@ pub(crate) fn emit_loop(
         out.extend_from_slice(&body_buf);
         for mut f in body_fixups { f.body_offset += body_base; fixups.push(f); }
         rebase_body_labels(body_base);
-        let jmp_pos = out.len();
-        out.push(0xEB);
-        let back = i8::try_from(a_start as i32 - (jmp_pos as i32 + 2)).expect("|| loop-back disp fits");
-        out.push(back as u8);
+        let be_base = out.len();
+        out.extend_from_slice(&be_buf);
+        for mut f in be_fx { f.body_offset += be_base; fixups.push(f); }
         if pad == 1 { out.push(0x90); }
         let loop_end = out.len();
         // break → L_exit; continue → L_top (re-evaluate the condition).
