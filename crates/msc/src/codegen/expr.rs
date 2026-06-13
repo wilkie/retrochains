@@ -2408,6 +2408,29 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         out.extend_from_slice(&[0xF7, 0xE8]); // imul ax
         return;
     }
+    // `<char* p> - <local char array>` (pointer minus a local array's address):
+    // the array base is `bp + arr_disp`, so `p - &arr` = `p - bp - arr_disp` →
+    // `mov ax,p; sub ax,bp; add ax,-arr_disp`. Reuses BX for p when a loop
+    // condition left it there. Byte (char) elements only. Fixture 2347.
+    if matches!(op, BinOp::Sub)
+        && let Expr::AddrOfLocal(arr) = right
+        && locals.is_array_local(*arr) && locals.size(*arr) == 1
+        && let Some(pd) = match left {
+            Expr::Local(i) if locals.local_pointee_size(*i) == 1 => Some(locals.disp(*i)),
+            Expr::Param(i) if locals.param_pointee_size(*i) == 1 => Some(param_disp(*i)),
+            _ => None,
+        }
+    {
+        if crate::codegen::assign::bx_holds_param(out, pd, locals.last_branch_barrier.get()) {
+            out.extend_from_slice(&[0x8B, 0xC3]); // mov ax,bx
+        } else {
+            emit_expr_to_ax(left, locals, out, fixups); // mov ax,[p]
+        }
+        out.extend_from_slice(&[0x2B, 0xC5]); // sub ax,bp
+        let k = (-(locals.disp(*arr) as i32)) as u32 & 0xFFFF;
+        out.push(0x05); out.extend_from_slice(&(k as u16).to_le_bytes()); // add ax,imm16
+        return;
+    }
     // Pointer difference: emit the raw byte-difference subtraction, then
     // convert bytes → elements with `sar ax,1` per shift step.
     if matches!(op, BinOp::Sub)
