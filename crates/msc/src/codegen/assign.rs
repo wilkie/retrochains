@@ -1114,15 +1114,22 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         && let Some(k) = right.fold(locals.inits)
     {
         let unsigned = locals.is_unsigned_local(local_idx);
+        // Reuse DX for the dividend when a preceding `x %= K2` left x's value in DX
+        // (its remainder store `mov [x],dx` followed by the now-dead result
+        // `mov ax,dx`): drop that dead `mov ax,dx` and load the dividend with
+        // `mov ax,dx`. Fixture 1460 (`x %= 7; x /= 2;`).
+        let reuse_dx = dx_holds_local_via_mod(out, disp, locals.last_branch_barrier.get());
+        if reuse_dx { out.truncate(out.len() - 2); } // pop the dead `mov ax,dx`
         out.push(0xB9); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov cx,K
-        out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[x]
+        if reuse_dx { out.extend_from_slice(&[0x8B, 0xC2]); } // mov ax,dx
+        else { out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); } // mov ax,[x]
         if unsigned { out.extend_from_slice(&[0x2B, 0xD2, 0xF7, 0xF1]); } // sub dx,dx; div cx
         else { out.extend_from_slice(&[0x99, 0xF7, 0xF9]); } // cwd; idiv cx
         if matches!(op, BinOp::Div) {
             out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [x],ax
         } else {
             out.push(0x89); out.push(bp_modrm(0x56, disp)); push_bp_disp(out, disp); // mov [x],dx
-            out.extend_from_slice(&[0x8B, 0xC2]); // mov ax,dx
+            out.extend_from_slice(&[0x8B, 0xC2]); // mov ax,dx (mod result in AX)
         }
         return;
     }
@@ -1341,6 +1348,16 @@ fn bx_holds_param_after_temp_copy(out: &[u8], pdisp: i16, barrier: usize) -> boo
 /// exactly the end. Conservative — any unrecognized byte fails the candidate, so
 /// a false positive (wrong BX) cannot occur. Generalizes the swap-footprint
 /// check to cross-statement reuse like `s += p->v; p = p->next`. Fixture 3343.
+/// DX still holds local `x` from a preceding `x %= K` whose emit ends with
+/// `mov [bp+disp],dx` then a now-dead `mov ax,dx` (`89 56 disp 8B C2`). disp8
+/// frames. The caller pops the dead `mov ax,dx` and reuses DX. Fixture 1460.
+fn dx_holds_local_via_mod(out: &[u8], disp: i16, barrier: usize) -> bool {
+    if !(-128..=127).contains(&disp) { return false; }
+    let n = out.len();
+    n >= 5 && out[n - 5] == 0x89 && out[n - 4] == 0x56 && out[n - 3] == disp as u8
+        && out[n - 2] == 0x8B && out[n - 1] == 0xC2
+        && n - 5 >= barrier
+}
 pub(crate) fn bx_holds_param(out: &[u8], pdisp: i16, barrier: usize) -> bool {
     // Length of a BX-preserving instruction at `s[0..]`, or None if not one.
     fn step(s: &[u8]) -> Option<usize> {
