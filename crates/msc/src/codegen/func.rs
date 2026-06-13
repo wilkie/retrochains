@@ -133,6 +133,11 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             // the left call runs. Fixtures 1277, 1536, 1918.
             Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right }
                 if crate::codegen::expr::is_two_call_binop(left, right, inits) => true,
+            // A char-array-element add chain of ≥5 terms parks into SI (the 4th
+            // pool slot). Fixtures 2097/2109.
+            Expr::BinOp { op: BinOp::Add, .. }
+                if crate::codegen::expr::char_array_chain(e, inits)
+                    .is_some_and(|(_, offs)| offs.len() >= 5) => true,
             Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
             Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
             // `ops[i](args)` — a runtime-indexed fn-ptr array call scales the
@@ -185,6 +190,11 @@ pub(crate) fn body_needs_di_si(stmts: &[Stmt], inits: &[Option<i32>]) -> bool {
         match e {
             Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right }
                 if crate::codegen::expr::is_three_call_binop(left, right, inits) => true,
+            // A char-array-element add chain of ≥6 terms parks into DI (the 5th
+            // pool slot), needing both DI and SI pushed. Fixture 2097.
+            Expr::BinOp { op: BinOp::Add, .. }
+                if crate::codegen::expr::char_array_chain(e, inits)
+                    .is_some_and(|(_, offs)| offs.len() >= 6) => true,
             Expr::BinOp { left, right, .. } => expr_has(left, inits) || expr_has(right, inits),
             _ => false,
         }

@@ -2184,6 +2184,36 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
             }
         }
     }
+    // All-char-array-element add chain `a[i]+a[j]+...` (5–6 terms, same global
+    // char/byte array, constant indices): MSC byte-loads each element, parking
+    // them HIGH-term-first into the pool CX,DX,BX,SI,DI, loads the FIRST term
+    // into AX, then adds them back in ascending source order. The generic
+    // emit_binop_right path otherwise mis-reads the 5th/6th element as a WORD
+    // (`add ax,[a+off]`, no cbw). Push SI at ≥5 terms, DI at ≥6 — handled by
+    // body_needs_si / body_needs_di_si recognizing the same shape. 2–4 term
+    // chains are left on the (already-correct) generic path. Fixtures 2097, 2109.
+    if matches!(op, BinOp::Add)
+        && let Some((garr, offs)) = char_array_chain(&Expr::BinOp {
+            op, left: Box::new(left.clone()), right: Box::new(right.clone()),
+        }, locals.inits)
+        && (5..=6).contains(&offs.len())
+    {
+        const PARK: [u8; 5] = [0xC8, 0xD0, 0xD8, 0xF0, 0xF8]; // mov cx/dx/bx/si/di, ax
+        const ADD: [u8; 5] = [0xC1, 0xC2, 0xC3, 0xC6, 0xC7];  // add ax, cx/dx/bx/si/di
+        let n = offs.len() - 1; // number of parked terms
+        let leaf = |off: i32| Expr::IndexByte { array: garr, index: Box::new(Expr::IntLit(off)) };
+        // Park terms n..1 (descending source order) into pool slots 0..n.
+        for slot in 0..n {
+            emit_expr_to_ax(&leaf(offs[n - slot]), locals, out, fixups); // mov al,[g+off]; cbw
+            out.extend_from_slice(&[0x8B, PARK[slot]]);                  // mov <reg>, ax
+        }
+        emit_expr_to_ax(&leaf(offs[0]), locals, out, fixups);           // first term → AX
+        // Add back ascending: term k (1..=n) lives in pool slot n-k.
+        for term in 1..=n {
+            out.extend_from_slice(&[0x03, ADD[n - term]]);              // add ax, <reg>
+        }
+        return;
+    }
     // `make().a OP make().b` — two by-value struct-return field reads. Eval both
     // calls left-to-right (each spilling DX:AX to its temp), then combine: left's
     // field is reloaded from its temp (AX was clobbered by the 2nd call), right's
@@ -2704,6 +2734,39 @@ pub(crate) fn bf_load_word_cx(base: BitBase, byte_off: u16, locals: &Locals<'_>,
             true
         }
         BitBase::DerefParam(_) => false,
+    }
+}
+/// Flatten a left-assoc `+` chain whose leaves are ALL constant-indexed elements
+/// of the SAME global byte/char array (`Expr::IndexByte` — the variant the parser
+/// chooses for a 1-byte element). Returns `(array_idx, offsets-in-source-order)`,
+/// or `None` if any leaf is a non-Add, non-matching node. `Expr::IndexByte`
+/// inherently denotes a byte element, so no element-size lookup (and hence no
+/// `Locals`) is needed — only `inits`, to fold the constant indices. Shared by
+/// the codegen arm and the SI/DI frame-reservation checks. Fixtures 2097, 2109.
+pub(crate) fn char_array_chain(e: &Expr, inits: &[Option<i32>]) -> Option<(usize, Vec<i32>)> {
+    fn walk(e: &Expr, g: &mut Option<usize>, offs: &mut Vec<i32>, inits: &[Option<i32>]) -> bool {
+        match e {
+            Expr::BinOp { op: BinOp::Add, left, right } =>
+                walk(left, g, offs, inits) && walk(right, g, offs, inits),
+            Expr::IndexByte { array, index } => {
+                let Some(k) = index.fold(inits) else { return false };
+                match g {
+                    None => *g = Some(*array),
+                    Some(gg) if *gg == *array => {}
+                    _ => return false,
+                }
+                offs.push(k);
+                true
+            }
+            _ => false,
+        }
+    }
+    let mut g = None;
+    let mut offs = Vec::new();
+    if walk(e, &mut g, &mut offs, inits) && offs.len() >= 2 {
+        Some((g.unwrap(), offs))
+    } else {
+        None
     }
 }
 /// Flatten a left-assoc `+` chain into its leaves in source order, descending
