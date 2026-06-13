@@ -364,6 +364,34 @@ pub(crate) fn emit_push_arg_float(bits: u64, width: usize, out: &mut Vec<u8>, fi
 /// via `mov ax, K; push ax`; locals/params via direct memory push;
 /// string literals via `mov ax, <pool offset>; push ax` with a
 /// FIXUP for the linker to fill in the actual offset.
+/// CX still holds the param at `[bp+disp]` — its load `mov cx,[bp+disp]`
+/// (`8B 4E disp`) is the most recent CX write, followed only by CX-preserving
+/// instructions (idiv cx, push dx/ax, cwd). Used to push a param arg from CX
+/// when a preceding arg's idiv loaded it there. Fixture 1391 (`gcd(b, a%b)`).
+fn cx_holds_param(out: &[u8], disp: i8, barrier: usize) -> bool {
+    fn step(s: &[u8]) -> Option<usize> {
+        match s {
+            [0xF7, 0xF9, ..] => Some(2), // idiv cx
+            [0x52, ..] | [0x50, ..] | [0x99, ..] => Some(1), // push dx / push ax / cwd
+            _ => None,
+        }
+    }
+    if out.len() < 3 { return false; }
+    let mut p = out.len() - 3;
+    loop {
+        if p < barrier { return false; }
+        if out[p] == 0x8B && out[p + 1] == 0x4E && out[p + 2] == disp as u8 {
+            let mut i = p + 3;
+            let mut ok = true;
+            while i < out.len() {
+                match step(&out[i..]) { Some(l) => i += l, None => { ok = false; break; } }
+            }
+            if ok { return true; }
+        }
+        if p == 0 { return false; }
+        p -= 1;
+    }
+}
 pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match arg {
         Expr::IntLit(0) => {
@@ -427,6 +455,11 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
                 if locals.is_unsigned_param(*idx) { out.extend_from_slice(&[0x2A, 0xE4]); } // sub ah,ah
                 else { out.push(0x98); } // cbw
                 out.push(0x50); // push ax
+            } else if cx_holds_param(out, disp, locals.last_branch_barrier.get()) {
+                // CX still holds this param (loaded as a divisor by a preceding
+                // arg's idiv, e.g. `gcd(b, a % b)` — the `a%b` loaded b into CX).
+                // Push CX directly instead of reloading. Fixture 1391.
+                out.push(0x51); // push cx
             } else {
                 out.push(0xFF);
                 out.push(0x76);
@@ -543,7 +576,18 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             // Computed value: build the result in AX then push.
             // Fixture 4144 (BinOp), 1270 (Call), 3626 (`putchar(*s++)`).
             emit_expr_to_ax(arg, locals, out, fixups);
-            out.push(0x50);
+            // A `%` (mod) arg leaves its result in DX (the idiv remainder), which
+            // emit_expr_to_ax moved to AX with a trailing `mov ax,dx`. MSC pushes
+            // the remainder directly — drop that `mov ax,dx` and `push dx`.
+            // Fixture 1391 (`gcd(b, a % b)`).
+            if matches!(arg, Expr::BinOp { op: BinOp::Mod, .. })
+                && out.ends_with(&[0x8B, 0xC2])
+            {
+                out.truncate(out.len() - 2);
+                out.push(0x52); // push dx
+            } else {
+                out.push(0x50); // push ax
+            }
         }
         other => panic!("argument shape not yet supported: {other:?}"),
     }
