@@ -1998,6 +1998,77 @@ fn emit_while_si_accum(accum: usize, p: usize, locals: &Locals<'_>, out: &mut Ve
     let fwd = cond_pos as i64 - (disp_pos as i64 + 1);
     out[disp_pos] = i8::try_from(fwd).expect("si-accum fwd jmp fits rel8") as u8;
 }
+/// Match `while (*s) { n = n + *s; s++; }` where `s` is a `char *` (param or
+/// local) and `n` an int local — the byte-deref accumulate loop. `*s` is a
+/// `DerefByte`. Returns `(n_local, s_is_param, s_idx)`. The char value is cached
+/// in a hidden stack temp (it must survive the condition's `or al,al` and the
+/// body's `cbw`), unlike the int variant which uses SI. Fixture 1690.
+pub(crate) fn while_char_accum(cond: &Cond, body: &Stmt) -> Option<(usize, bool, usize)> {
+    let Cond::Truthy(Expr::DerefByte { ptr }) = cond else { return None };
+    let (s_is_param, s) = match ptr.as_ref() {
+        Expr::Param(s) => (true, *s),
+        Expr::Local(s) => (false, *s),
+        _ => return None,
+    };
+    let same_s = |e: &Expr| match e {
+        Expr::Param(x) => s_is_param && *x == s,
+        Expr::Local(x) => !s_is_param && *x == s,
+        _ => false,
+    };
+    let Stmt::Block(stmts) = body else { return None };
+    if stmts.len() != 2 { return None; }
+    // stmt 0: n = n + *s
+    let Stmt::Assign { target: AssignTarget::Local(n), value } = &stmts[0] else { return None };
+    let Expr::BinOp { op: BinOp::Add, left, right } = value else { return None };
+    if !matches!(left.as_ref(), Expr::Local(ln) if ln == n) { return None; }
+    if !matches!(right.as_ref(), Expr::DerefByte { ptr: rp } if same_s(rp.as_ref())) { return None; }
+    // stmt 1: s = s + 1
+    let pv = match &stmts[1] {
+        Stmt::Assign { target: AssignTarget::Param(p), value } if s_is_param && *p == s => value,
+        Stmt::Assign { target: AssignTarget::Local(l), value } if !s_is_param && *l == s => value,
+        _ => return None,
+    };
+    let Expr::BinOp { op: BinOp::Add, left: pl, right: pr } = pv else { return None };
+    if !same_s(pl.as_ref()) || !matches!(pr.as_ref(), Expr::IntLit(1)) { return None; }
+    Some((*n, s_is_param, s))
+}
+/// True when any top-level `while` in `stmts` is a char-accumulate loop — used by
+/// the prologue to reserve the 2-byte caching temp below the locals. Fixture 1690.
+pub(crate) fn body_has_char_accum(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| matches!(s, Stmt::While { cond, body }
+        if while_char_accum(cond, body).is_some()))
+}
+/// Emit the char-deref accumulate loop (see [`while_char_accum`]). `*s` is cached
+/// in a 2-byte stack temp at `min(local disp) - 2` (one slot below the locals,
+/// reserved by the prologue): `jmp COND; [nop]; BODY: mov al,[temp]; cbw;
+/// add [n],ax; inc [s]; COND: mov bx,[s]; mov al,[bx]; mov [temp],al; or al,al;
+/// jne BODY`. The body starts on an even offset.
+fn emit_while_char_accum(n: usize, s_is_param: bool, s: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let nd = locals.disp(n);
+    let sd = if s_is_param { param_disp(s) } else { locals.disp(s) };
+    let temp = locals.deepest_local_disp() - 2; // one 2-byte slot below the locals
+    let jmp_pos = out.len();
+    let needs_nop = (jmp_pos + 2) % 2 == 1;
+    out.push(0xEB);
+    let disp_pos = out.len();
+    out.push(0x00);
+    if needs_nop { out.push(0x90); }
+    let body_pos = out.len();
+    out.push(0x8A); out.push(bp_modrm(0x46, temp)); push_bp_disp(out, temp);       // mov al,[temp]
+    out.push(0x98);                                                                // cbw
+    out.push(0x01); out.push(bp_modrm(0x46, nd)); push_bp_disp(out, nd);           // add [bp+n],ax
+    out.push(0xFF); out.push(bp_modrm(0x46, sd)); push_bp_disp(out, sd);           // inc word [bp+s]
+    let cond_pos = out.len();
+    out.push(0x8B); out.push(bp_modrm(0x5E, sd)); push_bp_disp(out, sd);           // mov bx,[bp+s]
+    out.extend_from_slice(&[0x8A, 0x07]);                                          // mov al,[bx]
+    out.push(0x88); out.push(bp_modrm(0x46, temp)); push_bp_disp(out, temp);       // mov [temp],al
+    out.extend_from_slice(&[0x0A, 0xC0]);                                          // or al,al
+    out.push(0x75);                                                                // jne BODY
+    let back = body_pos as i64 - (out.len() as i64 + 1);
+    out.push(i8::try_from(back).expect("char-accum back jmp fits rel8") as u8);
+    let fwd = cond_pos as i64 - (disp_pos as i64 + 1);
+    out[disp_pos] = i8::try_from(fwd).expect("char-accum fwd jmp fits rel8") as u8;
+}
 pub(crate) fn emit_while(
     cond: &Cond,
     body_stmt: &Stmt,
@@ -2015,6 +2086,12 @@ pub(crate) fn emit_while(
     // the value. Fixture 1849.
     if let Some((accum, p)) = while_si_accum(cond, body_stmt) {
         emit_while_si_accum(accum, p, locals, out);
+        return;
+    }
+    // `while (*s) { n = n + *s; s++; }` (char* s, int n): the byte value is cached
+    // in a hidden stack temp across the condition and body. Fixture 1690.
+    if let Some((n, s_is_param, s)) = while_char_accum(cond, body_stmt) {
+        emit_while_char_accum(n, s_is_param, s, locals, out);
         return;
     }
     // Infinite loop with a trailing `if (c) break;`: MSC folds the break into the

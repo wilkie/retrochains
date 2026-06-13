@@ -663,6 +663,12 @@ impl Locals<'_> {
     pub fn disp(&self, idx: usize) -> i16 {
         self.disps[idx]
     }
+    /// The most-negative (deepest) local slot displacement, i.e. the lowest
+    /// address occupied by a function-scope local. A hidden temp goes below this.
+    /// Returns 0 when there are no locals. Used to place the char-accum loop temp.
+    pub fn deepest_local_disp(&self) -> i16 {
+        self.disps.iter().copied().min().unwrap_or(0)
+    }
     /// If local `idx` is enregistered (a `register int` routed to SI/DI),
     /// returns the ModRM register code (6 = SI, 7 = DI). Such a local lives in
     /// the register, not its stack slot — reads/writes go through the register

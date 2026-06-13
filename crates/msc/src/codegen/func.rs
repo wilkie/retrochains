@@ -600,10 +600,20 @@ pub(crate) fn emit_function(
     } else {
         0
     };
+    // A `while(*s){n+=*s; s++;}` char-accumulate loop caches *s in a 2-byte stack
+    // temp one slot below the locals. Reserve it so chkstk sizes the frame for it.
+    // Fixture 1690. (Gated to functions with no other compiler temps so the temp
+    // lands at the shallowest extra slot, matching emit_while_char_accum's
+    // `deepest_local_disp() - 2`.)
+    let has_char_accum_temp = func.struct_field_temp_count == 0
+        && !has_float_arg_call
+        && !returns_float_call
+        && crate::codegen::statements::body_has_char_accum(&body);
     let frame_bytes: usize = cumulative as usize
         + 4 * func.struct_field_temp_count as usize
         + if has_float_arg_call { 2 } else { 0 }
-        + if returns_float_call { 8 } else { 0 };
+        + if returns_float_call { 8 } else { 0 }
+        + if has_char_accum_temp { 2 } else { 0 };
     // The float-call-return temp is the deepest 8-byte slot.
     let float_call_temp_disp: i16 = if returns_float_call {
         -i16::try_from(frame_bytes).expect("frame fits")
