@@ -93,6 +93,11 @@ pub(crate) fn emit_stmt(
             let pointee = locals.local_pointee_size(*local_idx);
             let eff = if pointee > 0 { *step * pointee as i32 } else { *step };
             crate::codegen::assign::emit_postmutate_local(eff, slot_size, disp, out);
+            // A `huge` pointer normalizes its segment word after the offset
+            // advance. A plain `far` pointer does not. Fixtures 1771/1774.
+            if locals.is_huge_ptr_local(*local_idx) {
+                crate::codegen::assign::emit_huge_normalize(eff, disp, out, fixups);
+            }
         }
         Stmt::ExprStmt(Expr::PostMutateGlobal { global_idx, step })
         | Stmt::ExprStmt(Expr::PreMutateGlobal { global_idx, step }) => {
@@ -2202,6 +2207,7 @@ pub(crate) fn emit_threaded_for(
         long_locals: locals.long_locals,
         init_literals: locals.init_literals,
         far_ptr_locals: locals.far_ptr_locals,
+        huge_ptr_locals: locals.huge_ptr_locals,
         array_locals: locals.array_locals,
         unsigned_locals: locals.unsigned_locals,
         local_pointee_sizes: locals.local_pointee_sizes,
@@ -2635,6 +2641,7 @@ pub(crate) fn emit_loop(
         long_locals: locals.long_locals,
         init_literals: locals.init_literals,
         far_ptr_locals: locals.far_ptr_locals,
+        huge_ptr_locals: locals.huge_ptr_locals,
         array_locals: locals.array_locals,
         unsigned_locals: locals.unsigned_locals,
         local_pointee_sizes: locals.local_pointee_sizes,
@@ -3746,6 +3753,7 @@ pub(crate) fn emit_do_while(
         long_locals: locals.long_locals,
         init_literals: locals.init_literals,
         far_ptr_locals: locals.far_ptr_locals,
+        huge_ptr_locals: locals.huge_ptr_locals,
         array_locals: locals.array_locals,
         unsigned_locals: locals.unsigned_locals,
         local_pointee_sizes: locals.local_pointee_sizes,

@@ -606,8 +606,28 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             && *li == local_idx
             && let Some(k) = right.fold(locals.inits)
         {
-            let k_u16 = (k.unsigned_abs() as u32 & 0xFFFF) as u16;
             let is_sub = matches!(op, BinOp::Sub);
+            if locals.is_huge_ptr_local(local_idx) {
+                // A `huge` pointer's offset advance always uses the
+                // add-with-signed-immediate form (`add word [off], ±K`),
+                // followed by segment carry-normalization. Fixtures 1771/1774.
+                let delta = if is_sub { -k } else { k };
+                let imm = delta as i16;
+                if (-128..=127).contains(&imm) {
+                    out.push(0x83);
+                    out.push(bp_modrm(0x46, offset_disp));
+                    push_bp_disp(out, offset_disp);
+                    out.push(imm as u8);
+                } else {
+                    out.push(0x81);
+                    out.push(bp_modrm(0x46, offset_disp));
+                    push_bp_disp(out, offset_disp);
+                    out.extend_from_slice(&(imm as u16).to_le_bytes());
+                }
+                emit_huge_normalize(delta as i32, offset_disp, out, fixups);
+                return;
+            }
+            let k_u16 = (k.unsigned_abs() as u32 & 0xFFFF) as u16;
             let modrm = if is_sub { 0x6Eu8 } else { 0x46u8 };
             if k_u16 == 1 {
                 out.push(0xFF);
@@ -4138,6 +4158,31 @@ pub(crate) fn emit_postmutate_local(step: i32, slot_size: usize, disp: i16, out:
             }
         }
     }
+}
+/// After a huge-pointer `p++`/`p--` advances the offset word, MSC
+/// normalizes the segment with a carry-propagation sequence. `byte_delta`
+/// is the signed change applied to the offset (`step * pointee`); `disp`
+/// is the offset word's displacement (the segment word sits at `disp+2`).
+/// Increment:  `sbb ax,ax; and ax,hi; add [bp+seg],ax`
+/// Decrement:  `sbb ax,ax; not ax; and ax,hi; sub [bp+seg],ax`
+/// where `hi` is the high word of the byte-delta magnitude (0 for the
+/// element-sized strides exercised so far). Fixtures 1771, 1774.
+pub(crate) fn emit_huge_normalize(byte_delta: i32, disp: i16, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let seg_disp = disp + 2;
+    out.push(0x1B); out.push(0xC0); // sbb ax,ax
+    if byte_delta < 0 {
+        out.push(0xF7); out.push(0xD0); // not ax
+    }
+    // `and ax, __AHINCR` — the immediate is a 0000 placeholder that the
+    // linker fixes up (seg-relative external) to the huge-pointer
+    // per-64K segment-paragraph increment (0x1000). Fixtures 1771/1774.
+    let bo = out.len();
+    out.push(0x25); out.extend_from_slice(&[0x00, 0x00]);
+    fixups.push(Fixup { body_offset: bo, kind: FixupKind::ExtData { target: "__AHINCR" } });
+    let opcode = if byte_delta < 0 { 0x29 } else { 0x01 }; // sub/add [bp+seg],ax
+    out.push(opcode);
+    out.push(bp_modrm(0x46, seg_disp));
+    push_bp_disp(out, seg_disp);
 }
 /// Emit the mutation half of a postfix `global++`/`global--` expression.
 /// `step` encodes direction and magnitude; requires a GlobalAddr fixup.

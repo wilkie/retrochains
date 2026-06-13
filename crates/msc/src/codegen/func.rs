@@ -388,6 +388,7 @@ pub(crate) fn emit_function(
     let local_long: Vec<bool> = func.locals.iter().map(|l| l.is_long).collect();
     let local_literals: Vec<bool> = func.locals.iter().map(|l| l.init_is_literal).collect();
     let local_far_ptrs: Vec<bool> = func.locals.iter().map(|l| l.is_far_ptr).collect();
+    let local_huge_ptrs: Vec<bool> = func.locals.iter().map(|l| l.is_huge_ptr).collect();
     let local_arrays: Vec<bool> = func.locals.iter().map(|l| l.array_len > 1).collect();
     let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
     let local_pointee: Vec<usize> = func.locals.iter().map(|l| if l.array_len > 1 { 0 } else { l.pointee_size as usize }).collect();
@@ -767,6 +768,7 @@ pub(crate) fn emit_function(
         long_locals: &local_long,
         init_literals: &local_literals,
         far_ptr_locals: &local_far_ptrs,
+        huge_ptr_locals: &local_huge_ptrs,
         array_locals: &local_arrays,
         unsigned_locals: &local_unsigned,
         local_pointee_sizes: &local_pointee,

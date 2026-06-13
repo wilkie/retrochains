@@ -301,6 +301,12 @@ pub struct LocalSpec {
     /// (2-byte offset at disp + 2-byte segment at disp+2). Uses
     /// `les`/`mov es:[bx]` codegen for deref.
     pub is_far_ptr: bool,
+    /// True specifically for `int huge *p` (a superset of `is_far_ptr`).
+    /// Unlike a plain `far` pointer, `huge++`/`huge--` normalize the
+    /// segment: after the offset add MSC emits a carry-propagation
+    /// sequence (`sbb ax,ax; [not ax;] and ax,hi; add/sub [seg],ax`).
+    /// Fixtures 1771, 1774.
+    pub is_huge_ptr: bool,
     /// For pointer locals (`int *p`, `char *p`): the byte size of the
     /// pointed-to element (1 for char*, 2 for int*). Zero for non-pointer
     /// locals. Used to compute the step for postfix `p++`/`p--`.
@@ -381,20 +387,20 @@ pub enum BitBase {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     /// `float`/`double` local. `width` is 4 (float) or 8 (double); `bits` is
     /// the f64 value of a literal initializer (None for uninitialized). `init`
     /// carries the truncated int value so `(int)f` const-folds.
     pub fn float_(width: usize, bits: Option<u64>) -> Self {
         let init = bits.map(|b| f64::from_bits(b) as i32);
-        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None, is_register: false }
+        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None, is_register: false }
     }
     /// A `float`/`double` local whose initializer is a const-foldable cast or
     /// arithmetic (`(float)i`, `double d = f`, `a + b`) rather than a direct
@@ -402,7 +408,7 @@ impl LocalSpec {
     /// so the int-fold view does NOT replace `(int)<local>` with `mov ax,K`;
     /// instead the store keeps st(0) live (`fst`) and the cast is `call __ftol`.
     pub fn float_nonliteral(width: usize, bits: u64) -> Self {
-        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None, is_register: false }
+        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None, is_register: false }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -462,6 +468,9 @@ pub struct Locals<'a> {
     /// Parallel-indexed: true for `int far *p` / `int huge *p` locals.
     /// Uses les+ES-override codegen for deref; 4-byte frame slot.
     pub far_ptr_locals: &'a [bool],
+    /// Parallel-indexed: true for `int huge *p` locals specifically.
+    /// `huge++`/`huge--` emit segment carry-normalization. Fixtures 1771/1774.
+    pub huge_ptr_locals: &'a [bool],
     /// Parallel-indexed: true when array_len > 1, i.e. the local is an
     /// array. Used to distinguish array decay (`p = a`) from value
     /// copy in far-pointer assignment codegen.
@@ -670,6 +679,7 @@ impl Locals<'_> {
             long_locals: self.long_locals,
             init_literals: self.init_literals,
             far_ptr_locals: self.far_ptr_locals,
+            huge_ptr_locals: self.huge_ptr_locals,
             array_locals: self.array_locals,
             unsigned_locals: self.unsigned_locals,
             local_pointee_sizes: self.local_pointee_sizes,
@@ -744,6 +754,9 @@ impl Locals<'_> {
     }
     pub fn is_far_ptr_local(&self, idx: usize) -> bool {
         self.far_ptr_locals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_huge_ptr_local(&self, idx: usize) -> bool {
+        self.huge_ptr_locals.get(idx).copied().unwrap_or(false)
     }
     pub fn is_array_local(&self, idx: usize) -> bool {
         self.array_locals.get(idx).copied().unwrap_or(false)
