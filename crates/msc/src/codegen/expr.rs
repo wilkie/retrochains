@@ -910,7 +910,15 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             // `*p++` for char* locals: load old ptr into BX, advance, byte-deref.
             if let Expr::PostMutateLocal { local_idx, step } = ptr.as_ref() {
                 let disp = locals.disp(*local_idx);
-                { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }  // mov bx,[bp-p]
+                // Reuse AX if it still holds p (the preceding `p = <addr>` store was
+                // `mov [bp-p],ax`) — `mov bx,ax` instead of reloading. Mirrors the
+                // DerefWord case. Fixture 2000 (`p = a; *p++`).
+                let store = { let mut v = vec![0x89, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+                if out.len() >= store.len() && out[out.len() - store.len()..] == store[..] {
+                    out.extend_from_slice(&[0x8B, 0xD8]); // mov bx,ax
+                } else {
+                    out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[bp-p]
+                }
                 emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
                 out.extend_from_slice(&[0x8A, 0x07, 0x98]);         // mov al,[bx]; cbw
                 return;

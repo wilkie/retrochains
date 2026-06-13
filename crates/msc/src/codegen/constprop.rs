@@ -1984,6 +1984,11 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::PostMutateLocal { local_idx, .. } => {
             cp.mutated_locals.insert(*local_idx);
             cp.l_known.remove(local_idx);
+            // `p++` / `*p++` advances the pointer, so any alias (`p = &x`) is now
+            // stale — a later `*p` must reload, not re-fold to the old base.
+            // Fixture 2000 (`p=a; *p++; *p++; *p`).
+            cp.ptr_alias.remove(local_idx);
+            cp.ptr_addr.remove(local_idx);
         }
         Expr::PostMutateGlobal { global_idx, .. } => {
             cp.mutated_globals.insert(*global_idx);
@@ -1992,6 +1997,8 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::PreMutateLocal { local_idx, .. } => {
             cp.mutated_locals.insert(*local_idx);
             cp.l_known.remove(local_idx);
+            cp.ptr_alias.remove(local_idx);
+            cp.ptr_addr.remove(local_idx);
         }
         Expr::PreMutateGlobal { global_idx, .. } => {
             cp.mutated_globals.insert(*global_idx);
