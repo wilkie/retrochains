@@ -5278,6 +5278,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     Ok(Expr::PreMutateIndexedGlobal { array, index, step: 1, is_byte: false }),
                 Expr::IndexByte { array, index } if matches!(index.as_ref(), Expr::Param(_) | Expr::Local(_)) =>
                     Ok(Expr::PreMutateIndexedGlobal { array, index, step: 1, is_byte: true }),
+                Expr::GlobalField { global, byte_off, size } =>
+                    Ok(Expr::PreMutateGlobalField { global, byte_off, size, step: 1 }),
                 other => Ok(Expr::BinOp {
                     op: BinOp::Add,
                     left: Box::new(other),
@@ -5295,6 +5297,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 Expr::Param(idx) => Ok(Expr::PreMutateParam { param_idx: idx, step: -1 }),
                 Expr::DerefWord { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: false }),
                 Expr::DerefByte { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: true }),
+                Expr::GlobalField { global, byte_off, size } =>
+                    Ok(Expr::PreMutateGlobalField { global, byte_off, size, step: -1 }),
                 other => Ok(Expr::BinOp {
                     op: BinOp::Sub,
                     left: Box::new(other),

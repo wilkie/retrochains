@@ -1163,6 +1163,10 @@ pub enum Expr {
     /// `<struct-global>.<field>` — read a field of a struct global.
     /// Lowers to `a1 disp+off` (word) or `a0 disp+off; 98` (byte).
     GlobalField { global: usize, byte_off: u16, size: u8 },
+    /// `++<struct-global>.<field>` / `--…` in value context — mutate the
+    /// field in place then load the NEW value. `inc/dec word [g+off]` then
+    /// `mov ax,[g+off]` (word) or byte form + cbw. Fixture 3444.
+    PreMutateGlobalField { global: usize, byte_off: u16, size: u8, step: i32 },
     /// `<struct-ptr-param>-><field>` — deref through a struct
     /// pointer parameter. `mov bx, [bp+param_disp]; mov ax, [bx+off]`.
     DerefParamField { ptr_param: usize, byte_off: u16, size: u8 },
@@ -1408,6 +1412,7 @@ impl Expr {
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
             Expr::LocalField { .. } | Expr::DerefLocalField { .. } | Expr::GlobalField { .. } => None,
+            Expr::PreMutateGlobalField { .. } => None,
             Expr::ParamField { .. } => None,
             Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,

@@ -868,6 +868,23 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global_idx } });
             }
         }
+        Expr::PreMutateGlobalField { global, byte_off, size, step } => {
+            // Mutate the field in place, then load the NEW value. `inc/dec
+            // word [g+off]; mov ax,[g+off]` (byte form adds cbw). Fixture 3444.
+            let inc_op = if *size == 1 { 0xFE } else { 0xFF };
+            let modrm = if *step < 0 { 0x0E } else { 0x06 }; // /1 = dec, /0 = inc; [disp16]
+            out.push(inc_op);
+            // GlobalAddr patches the disp16 at body_offset+1, so anchor the
+            // fixup on the modrm byte (the disp follows it).
+            let bo = out.len();
+            out.push(modrm); out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global } });
+            let bo = out.len();
+            out.push(if *size == 1 { 0xA0 } else { 0xA1 });
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global } });
+            if *size == 1 { out.push(0x98); } // cbw
+        }
         Expr::DerefByte { ptr } => {
             // Phase 1: `*<char-ptr-global>` and `*(<char-ptr> + K)`.
             // Both lower to `mov bx, [p]; mov al, [bx+disp]; cbw`,

@@ -1964,6 +1964,10 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             cp.mutated_globals.insert(*global_idx);
             cp.g_known.remove(global_idx);
         }
+        Expr::PreMutateGlobalField { global, .. } => {
+            cp.mutated_globals.insert(*global);
+            cp.g_known.remove(global);
+        }
         Expr::PostMutateDeref { ptr, step, is_byte } => {
             // `(*p)--` / `(*p)++` where p aliases &x → a DIRECT post-mutate on x
             // (`mov ax,[x]; dec word[x]`), not a pointer-routed read-modify. The
