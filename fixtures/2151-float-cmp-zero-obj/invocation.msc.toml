@@ -1,4 +1,0 @@
-description = "Auto-derived from 2151-float-cmp-zero-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

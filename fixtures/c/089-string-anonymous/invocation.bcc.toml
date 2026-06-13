@@ -1,0 +1,4 @@
+description = "String literal indexed directly without a named pointer. Pins whether BCC folds this to a single byte at compile time, or still emits the string in _DATA and reads back at runtime."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,4 +1,0 @@
-description = "Standalone `<=` returning 0/1."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

@@ -5,7 +5,11 @@
 set -e
 F="$1"
 ROOT=/home/wilkie/retrochains
-FX="$ROOT/fixtures/$F"
+# Resolve the fixture under the language-organized tree: accept a full
+# sub-path (`c/bitfields/foo`) or a bare name (`foo`/`123-foo`, tried under c/).
+if [ -d "$ROOT/fixtures/$F" ]; then FX="$ROOT/fixtures/$F";
+elif [ -d "$ROOT/fixtures/c/$F" ]; then FX="$ROOT/fixtures/c/$F";
+else FX=$(dirname "$(find "$ROOT/fixtures" -maxdepth 3 -type d -name "$F" -print -quit)"/.); fi
 TMP=$(mktemp -d)
 cp "$FX/HELLO.C" "$TMP/HELLO.C"
 ( cd "$TMP" && "$ROOT/target/debug/msc" /c /Fa /AS HELLO.C >/dev/null 2>&1 || true )

@@ -140,14 +140,10 @@ fn verify_all(
     jobs: Option<usize>,
     compiler: &str,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let inv_name = format!("invocation.{compiler}.toml");
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(workspace_root.join("fixtures"))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .filter(|p| p.join(&inv_name).is_file())
-        .collect();
-    paths.sort();
+    // Fixtures live under fixtures/<language>/[<category>/]<name>/; discover
+    // them recursively so the layout can be organized by language and category.
+    let paths: Vec<PathBuf> =
+        fixtures::discover_fixtures(&workspace_root.join("fixtures"), Some(compiler))?;
     let total = paths.len();
 
     let num_threads = jobs

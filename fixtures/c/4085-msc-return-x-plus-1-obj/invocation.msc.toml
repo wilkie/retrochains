@@ -1,0 +1,4 @@
+description = "return x + 1; with uninitialized local — forces runtime add. Probes the load-add-return sequence."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,0 +1,4 @@
+description = "Two printf calls each with its own string literal. Probes CONST layout when there are multiple distinct literals, FIXUP ordering inside _TEXT (descending), and ensures the StrLoad placeholder carries the correct per-string offset."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

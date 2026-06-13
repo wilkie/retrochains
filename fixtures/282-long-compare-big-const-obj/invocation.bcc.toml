@@ -1,5 +1,0 @@
-description = "`if (g < 1000)` long-vs-const with K too big for i8sx. Probes wider imm encoding for cmp."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

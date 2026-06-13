@@ -1,4 +1,0 @@
-description = "g = g + 1; return g; — companion to 4141 confirming `inc word ptr [g]` is the increment shape too. Final return reloads the freshly-incremented value (const-prop can't see across the inc-mem)."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

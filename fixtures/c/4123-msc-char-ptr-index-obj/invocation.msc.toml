@@ -1,0 +1,4 @@
+description = "return p[1]; where p is a char pointer global. Probes pointer-indexing through a load+index sequence (load pointer, add disp, read byte) — distinct from the array-index pattern of 4121."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

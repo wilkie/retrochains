@@ -14,7 +14,7 @@ the project, following the layout migration described in
   BC2 oracle drives `BCC.EXE`.
 - Single MSC fixture: `4075-msc-empty-main-obj` — `int main(void)
   { return 0; }` compiled with `cl /c /AS`. Captured byte-exact;
-  `xfix verify --toolchain oracle --compiler msc fixtures/4075-…`
+  `xfix verify --toolchain oracle --compiler msc fixtures/c/4075-…`
   reproduces it deterministically.
 - `crates/msc/` does **not** exist. `xfix verify-all --toolchain
   ours --compiler msc` reports "tool not yet implemented in our
@@ -240,7 +240,7 @@ collide with the existing BCC corpus. Numbering starts at 4075
 Each fixture file shape (post-migration):
 
 ```
-fixtures/4076-msc-return-int-obj/
+fixtures/c/4076-msc-return-int-obj/
   HELLO.C
   invocation.msc.toml      # tool="cl", args=["/c","/AS","HELLO.C"]
   expected/msc/

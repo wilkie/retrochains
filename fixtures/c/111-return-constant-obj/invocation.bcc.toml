@@ -1,0 +1,5 @@
+description = "Return a non-zero constant, compiled to OBJ. Same source as 003-return-constant but -c. Exercises `mov ax,imm16` encoding in LEDATA."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

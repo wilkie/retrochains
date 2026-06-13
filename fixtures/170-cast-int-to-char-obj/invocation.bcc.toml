@@ -1,5 +1,0 @@
-description = "`(char)x` truncates an int (300 = 0x012C) to a signed 8-bit value (0x2C = 44, then sign-extended back to int for return). The interesting question is what BCC emits — likely load AL from the int (low byte), then cbw to sign-extend back to AX. No data loss in this case, but the truncation pattern is what we're pinning."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

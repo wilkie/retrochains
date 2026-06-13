@@ -1,4 +1,0 @@
-description = "Call an undeclared function (`puts`) with a string literal. K&R-style implicit declaration. Pins how BCC names and references an external function symbol."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

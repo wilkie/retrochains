@@ -1,4 +1,0 @@
-description = "Pass an array to a function taking `int *`. Pins (a) array-to-pointer decay at the call site — `sum(a)` should become `lea ax, [bp-N] / push ax / call`, and (b) pointer parameter reception in the callee."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

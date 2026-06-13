@@ -1,5 +1,0 @@
-description = "do-while loop. -c parallel of 062. Exercises tail-test loop shape (no top-of-loop jmp)."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

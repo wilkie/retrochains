@@ -1,0 +1,4 @@
+description = "Modulo of two local ints. Same machinery as div but returns the remainder (DX) instead of the quotient (AX); we need to see how BCC moves the result back to AX for the return."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

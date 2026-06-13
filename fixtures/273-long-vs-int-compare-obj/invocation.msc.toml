@@ -1,4 +1,0 @@
-description = "Auto-derived from 273-long-vs-int-compare-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

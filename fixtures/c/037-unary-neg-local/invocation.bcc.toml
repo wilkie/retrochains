@@ -1,0 +1,4 @@
+description = "Unary minus on a local variable. Pins the asm shape (probably `mov ax, [bp-N] / neg ax`)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

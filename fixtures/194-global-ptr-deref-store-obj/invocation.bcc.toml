@@ -1,5 +1,0 @@
-description = "`*p = 42;` — store through a global pointer's dereference. Tests the write-side companion to fixture 193's read path: `mov bx,word ptr DGROUP:_p` then `mov word ptr [bx],<imm>`. The `g` global lives in _BSS (uninitialized), `_p` in _DATA pointing at it."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

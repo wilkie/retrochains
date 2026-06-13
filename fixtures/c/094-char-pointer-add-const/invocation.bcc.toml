@@ -1,0 +1,4 @@
+description = "Char pointer plus a constant offset. Should produce `[reg + 1]` indexing — the char-pointer variant of fixture 091."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

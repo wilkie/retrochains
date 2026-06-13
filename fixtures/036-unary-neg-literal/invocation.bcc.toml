@@ -1,4 +1,0 @@
-description = "Unary minus on a literal. Pins whether BCC folds `-5` at parse/codegen time (and how negative immediates are spelled in the asm: `-5` or unsigned-wrapped `65531`)."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

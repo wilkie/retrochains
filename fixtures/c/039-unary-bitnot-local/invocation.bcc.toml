@@ -1,0 +1,4 @@
+description = "Bitwise not on a local. Pins asm shape (probably `mov ax, [bp-N] / not ax`)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -590,7 +590,7 @@ impl Locals {
         // (The former "exactly-5-eligible VARIED-use swaps to [BX,DI,CX,DX]"
         // special case was a misreading — it is just the use-count-descending
         // assignment over the standard [DI,DX,BX,CX] pool, now applied
-        // uniformly below. Validated by zz01/zz02/zz04 + 1850/1979/1505.)
+        // uniformly below. Validated by 4156/4157/4158 + 1850/1979/1505.)
         // 2D array indexing (or any access that needs an `imul` to
         // scale the outer stride) uses BX as scratch for the address
         // computation. When that happens, ints in BX have to be
@@ -633,7 +633,7 @@ impl Locals {
         // the output is indistinguishable, and the apparent `[BX,DI,CX,DX]`
         // "swap" for 1850/1979 is just the use-count order over the standard
         // `[DI,DX,BX,CX]` pool. Validated against oracle-captured probes
-        // zz01-zz04 (4/5/6 ints, varied use distributions) plus 1850/1979/1505.
+        // 4156/4157/4158 (4/5 ints, varied use distributions) plus 1850/1979/1505.
         let mut ordered_eligibles: Vec<usize> = eligible_int.to_vec();
         ordered_eligibles.sort_by(|&a, &b| {
             let ca = counts.get(&declared[a].name).copied().unwrap_or(0);

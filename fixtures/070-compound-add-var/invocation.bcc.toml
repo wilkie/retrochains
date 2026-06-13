@@ -1,4 +1,0 @@
-description = "`x += y` where both are register-resident. Pins how BCC handles a variable RHS in a compound assignment."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

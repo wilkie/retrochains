@@ -1,7 +1,7 @@
 # MSC — the Microsoft C 5.0 compiler
 
 Discoveries about `CL.EXE` from MS C 5.0 go here. The corpus lives in
-`fixtures/4075-…` onward, captured via the `microsoft-msc5` oracle
+`fixtures/c/4075-…` onward, captured via the `microsoft-msc5` oracle
 profile and replayed against `target/debug/msc`.
 
 Existing docs:

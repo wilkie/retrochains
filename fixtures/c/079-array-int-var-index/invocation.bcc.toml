@@ -1,0 +1,4 @@
+description = "Local int array indexed by a variable, both write and read. Pins the dynamic-index addressing mode (probably `[bp+si]` or `[bp+bx]`)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

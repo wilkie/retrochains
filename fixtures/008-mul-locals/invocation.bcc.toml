@@ -1,4 +1,0 @@
-description = "Multiplication of two local ints. 8086 has constraints around IMUL (one-operand AX*src → DX:AX; two-operand `imul reg, src` is 186/286+). Discover which encoding BCC picks for the small memory model."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

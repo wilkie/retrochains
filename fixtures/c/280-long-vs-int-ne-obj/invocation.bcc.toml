@@ -1,0 +1,5 @@
+description = "`if (g != i)` long-vs-int inequality. Probes mixed-type != pattern."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

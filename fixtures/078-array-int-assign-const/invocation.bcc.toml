@@ -1,4 +1,0 @@
-description = "Local int array, write then read element by constant index. Pins the lvalue side of constant array indexing."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

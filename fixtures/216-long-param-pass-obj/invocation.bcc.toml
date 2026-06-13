@@ -1,5 +1,0 @@
-description = "Passing a long literal to a function. Tests caller-side push order and callee-side stack-frame layout for a long parameter. Probably: caller pushes both 16-bit halves (high then low?) onto stack, callee accesses via [bp+N] (low) and [bp+N+2] (high)."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

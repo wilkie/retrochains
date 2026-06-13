@@ -1,0 +1,4 @@
+description = "Small dense switch (3 consecutive cases). Pins BCC's strategy choice — at this size, chained compares are usually shorter than a jump table."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

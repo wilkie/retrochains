@@ -556,10 +556,10 @@ fn write_bss_globals_with_debug(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
     // every prior fixture (181/462/234 single-char names hash to their ASCII =
     // ascending; 465 `g`(103)<`buf`(522); 3059 `src`(771)<`dst`(1020); 1401
     // `s1`(459)<`s2`(715) — all happened to match) but is wrong in general.
-    // Pinned by oracle-captured 9201 (`foo`,`bar` → bar,foo not foo,bar),
-    // 9202 (`cd`,`z` → cd,z — a 2-char name sorts BEFORE a 1-char one, breaking
-    // the short-bucket-first rule), 9203 (`foo`,`bar`,`qux` → bar,qux,foo),
-    // 9204 (`bar`,`baz` collide @362 → bar,baz, FIRST→LAST chain).
+    // Pinned by oracle-captured 4151 (`foo`,`bar` → bar,foo not foo,bar),
+    // 4152 (`cd`,`z` → cd,z — a 2-char name sorts BEFORE a 1-char one, breaking
+    // the short-bucket-first rule), 4153 (`foo`,`bar`,`qux` → bar,qux,foo),
+    // 4154 (`bar`,`baz` collide @362 → bar,baz, FIRST→LAST chain).
     let mut bss_chain: Vec<Option<Vec<&crate::ast::Global>>> = vec![None; 0x400];
     for g in unit.globals.iter().filter(|g| !g.is_extern && g.init.is_none()) {
         let h = pubs_hash(g.name.strip_prefix('_').unwrap_or(&g.name));
@@ -1432,10 +1432,10 @@ fn write_tail(
     // The earlier rule (name length ASC, reverse-alpha within ties)
     // was a coincidental approximation: it agreed with the hash on all
     // 9 prior multi-extern fixtures but is WRONG in general. Pinned by
-    // oracle-captured 9101 (`cd`,`foo` → foo,cd, not cd,foo), 9102
-    // (`ab`,`cd` → ab,cd, not cd,ab), 9103 (`ab`,`cd`,`foo` →
-    // foo,ab,cd). Also explains the long-standing fopen/fclose anomaly
-    // (fclose before fopen) the length rule could not.
+    // oracle-captured 4148 (`cd`,`foo` → foo,cd, not cd,foo), 4149 (`ab`,`cd`
+    // → ab,cd, not cd,ab), 4150 (`ab`,`cd`,`foo` → foo,ab,cd). Also explains
+    // the long-standing fopen/fclose anomaly (fclose before fopen) the length
+    // rule could not.
     let mut ext_chain: Vec<Option<Vec<String>>> = vec![None; 0x400];
     for name in &externs {
         let h = pubs_hash(name);

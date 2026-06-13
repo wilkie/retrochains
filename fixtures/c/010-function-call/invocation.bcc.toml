@@ -1,0 +1,4 @@
+description = "Call a no-arg local function and return its result. Discover the calling convention (cdecl variant for small memory model: caller's responsibility, return value in AX) and how externs/publics are emitted for inter-function references."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

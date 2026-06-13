@@ -1,0 +1,4 @@
+description = "return s[0]; — read a single byte out of a char array global. Probes the byte-load + sign-extend shape (mov al, [addr]; cbw) MSC uses for narrow lvalues on a wide return path."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,4 +1,0 @@
-description = "Bitfield add-chain read-order validation fixture (hand-authored)."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

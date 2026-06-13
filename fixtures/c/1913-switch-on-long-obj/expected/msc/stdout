@@ -1,0 +1,2 @@
+HELLO.C
+HELLO.C(4) : warning C4075: size of switch expression or case constant too large - converted to int

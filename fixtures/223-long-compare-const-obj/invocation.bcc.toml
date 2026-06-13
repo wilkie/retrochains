@@ -1,5 +1,0 @@
-description = "`if (g == 5)` for long g — equality against a non-zero constant. Differs from fixture 215's zero-compare (OR-then-test) because both halves must be checked independently against the constant's two halves."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

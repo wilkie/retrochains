@@ -1,5 +1,0 @@
-description = "`return a + b;` long arithmetic from params, then return. Probes function-local long arithmetic."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,5 +1,0 @@
-description = "`unsigned long g = a * b;`. Verifies BCC uses the same `N_LXMUL@` helper for unsigned long multiplication (signed/unsigned mul produce identical bytes for the low 32 bits)."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

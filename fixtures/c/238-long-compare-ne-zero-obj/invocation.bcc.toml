@@ -1,0 +1,5 @@
+description = "`if (g != 0)` for long. Counterpart to slice 215 (== 0); should use the OR-then-test idiom with je (not jne) on the test."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

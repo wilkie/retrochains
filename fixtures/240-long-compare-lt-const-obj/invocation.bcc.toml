@@ -1,5 +1,0 @@
-description = "`if (g < 5)` for long. Probes whether BCC inlines K into cmp (using `cmp <mem>, imm`) for the 3-jump pattern."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,0 +1,4 @@
+description = "Two functions in a single translation unit, no call between them. Discover the @<func-idx>@<label-idx> scheme — does the second function get @2@50, or some other numbering?"
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,4 +1,0 @@
-description = "Division of two local ints. Discover BCC's IDIV pattern (likely CWD sign-extend then IDIV) and which register holds the quotient (AX) vs remainder (DX)."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

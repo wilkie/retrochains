@@ -1,4 +1,0 @@
-description = "Function param `x` is read 4× and written once. Tells us whether incoming params follow the same use-count register-promotion heuristic as locals, or whether they're always stack-bound at their incoming-stack slot."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

@@ -79,17 +79,18 @@ pub fn generate(
     let compilers: Vec<&'static str> = oracle::TOOLCHAINS.iter().map(|t| t.name).collect();
     let tool_paths = ToolPaths::from_workspace_debug(workspace_root);
 
-    // Every fixture directory that targets at least one registered compiler.
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(workspace_root.join("fixtures"))?
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .filter(|p| {
-            compilers
-                .iter()
-                .any(|c| p.join(format!("invocation.{c}.toml")).is_file())
-        })
-        .collect();
+    // Every fixture directory (any language/category subtree) that targets at
+    // least one registered compiler. Recursive discovery; `None` matches any
+    // invocation, then keep those whose compiler is registered.
+    let mut paths: Vec<PathBuf> =
+        crate::discover_fixtures(&workspace_root.join("fixtures"), None)?
+            .into_iter()
+            .filter(|p| {
+                compilers
+                    .iter()
+                    .any(|c| p.join(format!("invocation.{c}.toml")).is_file())
+            })
+            .collect();
     paths.sort();
     let total = paths.len();
 

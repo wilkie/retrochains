@@ -1,0 +1,5 @@
+description = "Two int locals left-shifted at return. Same source as 017 but -c. Exercises mov cl,byte ptr [bp-N] and shl ax,cl."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

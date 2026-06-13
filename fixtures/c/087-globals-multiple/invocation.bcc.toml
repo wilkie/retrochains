@@ -1,0 +1,4 @@
+description = "Multiple globals with mixed init state and types. Pins segment ordering, symbol layout, and how multiple `public` declarations stack."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

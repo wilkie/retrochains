@@ -3267,12 +3267,12 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             // and parks f0 (the lowest field) in CX. The only choice is which
             // field goes to AX: a trailing `:8` byte field MUST (only AX widens a
             // byte cheaply), so AX=f_{n-1} and DX=f1..f_{n-2} (fixtures 1691/1879/
-            // 2104, 9002). When every field is sub-word MSC left-rotates: AX=f1
-            // and DX=f2..f_{n-1} (fixtures 1694/2106/1880, 9001/9003). Read order
+            // 2104, 4146). When every field is sub-word MSC left-rotates: AX=f1
+            // and DX=f2..f_{n-1} (fixtures 1694/2106/1880, 4145/4147). Read order
             // is therefore `f1,f2,..,f_{n-1},f0` (sub-word) or `f_{n-1},f1,..,
             // f_{n-2},f0` (trailing byte). NOTE: at n=3 the two differ only in
-            // which of f1/f2 lands in AX — the n=4 byte fixture 9002 is what pins
-            // the DX order to FORWARD (a `.rev()` here passes n=3 but breaks n=4).
+            // which of f1/f2 lands in AX — the n=4 byte fixture 4146 pins the DX
+            // order to FORWARD (a `.rev()` here passes n=3 but breaks n=4).
             let last_is_byte = fields[n - 1].3 == 8 && fields[n - 1].2 % 8 == 0;
             let (ax_field, dx_fields): (_, Vec<_>) = if last_is_byte {
                 (fields[n - 1], fields[1..n - 1].iter().copied().collect())

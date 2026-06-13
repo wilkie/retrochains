@@ -1,4 +1,0 @@
-description = "Local char array, write then read element by constant index. Char arrays exercise `byte ptr` addressing modes and 1-byte stride."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

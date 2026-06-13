@@ -1,4 +1,0 @@
-description = "`if (x || y)` with int locals. Pins the OR short-circuit: x true short-circuits to entering the then-branch; only on x false do we test y."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

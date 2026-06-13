@@ -1,4 +1,0 @@
-description = "`x -= 1` on register int. Confirms the `-=1` peephole (analogous to `--x`)."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

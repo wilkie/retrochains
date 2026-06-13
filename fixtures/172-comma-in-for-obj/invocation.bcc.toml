@@ -1,5 +1,0 @@
-description = "Comma operator in `for` init and step clauses. Also exercises multi-declarator `int i, j, sum;`. Comma sequences are the canonical for-loop idiom — each side runs in order with its result discarded. The body just runs serially: two stmts in init, two stmts in step."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

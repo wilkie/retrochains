@@ -1,4 +1,0 @@
-description = "Two distinct string literals in the same TU. Pins how BCC lays out the second literal in the `s@` block (offset s@+<len-of-first+1>?) and how each call references its own literal address."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

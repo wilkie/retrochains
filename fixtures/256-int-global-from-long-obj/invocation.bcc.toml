@@ -1,5 +1,0 @@
-description = "`int i = g;` long-to-int truncation. Probes: BCC should load just the low half and store."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

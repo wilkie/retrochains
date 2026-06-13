@@ -1,4 +1,0 @@
-description = "Pre-increment as a statement on a stack-resident local. Pins whether BCC emits `inc word ptr [bp-N]` (memory-form) or the `mov / inc ax / mov` round-trip."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

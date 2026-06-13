@@ -1,4 +1,0 @@
-description = "Single uninitialized global int. Expected to land in _BSS with a `comm`-style declaration. Pins the simplest case of global-variable emission."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

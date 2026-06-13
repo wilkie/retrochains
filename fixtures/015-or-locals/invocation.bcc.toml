@@ -1,4 +1,0 @@
-description = "Bitwise OR of two local ints."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

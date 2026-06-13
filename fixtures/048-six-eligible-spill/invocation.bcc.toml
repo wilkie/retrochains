@@ -1,4 +1,0 @@
-description = "Six register-eligible names (4 params + 2 locals, all heavily used). The 8086 only has 5 GP registers usable for variables (SI, DI, DX, BX, CX — AX is BCC's working register). One of the six should spill to the stack. Pins which one (most-used wins? source-order tiebreaker?)."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

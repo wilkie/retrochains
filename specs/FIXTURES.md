@@ -7,21 +7,43 @@ that we want our toolchain to reproduce. The collection is the spec for
 
 ## Directory layout
 
-Fixtures live at the repo root in `fixtures/`. One subdirectory per
-fixture, numbered for ordering:
+Fixtures live under `fixtures/`, organized **by source language first** and
+then optionally **by category**. The harness discovers fixtures
+**recursively** (`fixtures::discover_fixtures`) — a fixture is any directory
+containing an `invocation.<compiler>.toml`, at any depth — so the tree can
+grow new languages and categories freely:
 
 ```
 fixtures/
-├── 001-empty-main/
-│   ├── invocation.toml      # how to invoke the oracle / our toolchain
-│   ├── HELLO.C              # the source(s); DOS-style filenames are recommended
-│   └── expected/            # captured oracle outputs (the goldens)
-│       ├── stdout           # captured stdout from the tool
-│       ├── stderr           # captured stderr; empty under DOSBox 0.74 today
-│       ├── manifest.toml    # exit code, output list, hashes, mtimes, invocation summary
-│       └── HELLO.ASM        # every output file the tool produced, by name
-└── 002-...
+├── c/                          # C fixtures (Borland C++ 2.0 / MSC 5.0 as C)
+│   ├── 001-empty-main/         # bulk oracle-derived corpus: flat, numbered
+│   │   ├── invocation.bcc.toml # how to invoke each oracle / our toolchain
+│   │   ├── invocation.msc.toml # (a fixture may target multiple compilers)
+│   │   ├── HELLO.C             # the source(s); DOS 8.3 uppercase names
+│   │   └── expected/           # captured goldens, one subdir per compiler
+│   │       ├── bcc/            #   stdout, stderr, manifest.toml, HELLO.ASM, HELLO.OBJ
+│   │       └── msc/
+│   ├── 002-.../
+│   ├── bitfields/              # curated/hand-authored fixtures: grouped by category
+│   │   ├── 4145-sum4-subword-obj/
+│   │   └── 4146-sum4-trailbyte-obj/
+│   ├── symbol-ordering/        # extern / BSS / _DATA emission-order discriminators
+│   └── register-allocation/    # reg-pool discriminators
+└── cpp/                        # (future) C++ fixtures — e.g. cpp/vtables/...
 ```
+
+Conventions:
+- **Language dir** (`c/`, `cpp/`, …) is the top level. Wildly different
+  languages get their own subtree.
+- The **bulk corpus** (oracle-derived, captured in sequence) stays flat
+  directly under its language dir (`c/001-…`, `c/4144-…`).
+- **Curated fixtures** — hand-authored discriminators that pin a specific
+  rule — go in a **category subdir**. They keep a sequential number (the
+  global namespace continues across bulk + curated, e.g. `4145`) AND a
+  descriptive name, so the category groups them while the number stays a
+  short stable reference. Code comments cite the number, e.g. "fixture 4148".
+- New oracle-captured fixtures continue the flat numbering under their
+  language; new curated ones continue the number and pick (or add) a category.
 
 - **Source files** live at the fixture root, named as the tool will see
   them inside the DOS work directory. DOS is 8.3 and case-insensitive, so

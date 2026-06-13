@@ -1,0 +1,4 @@
+description = "`x += K` with K != 1, on a register-resident int. Pins whether BCC uses `add <reg>, K` directly or the AX round-trip."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

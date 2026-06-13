@@ -1,4 +1,0 @@
-description = "Auto-derived from 1366-char-arr-fill-const-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

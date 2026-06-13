@@ -1,4 +1,0 @@
-description = "Post-increment as the return value. The C semantics return the OLD value — pins how BCC sequences the load and the increment to preserve the original."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

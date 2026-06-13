@@ -1,4 +1,0 @@
-description = "`continue` inside a `while` loop. Pins the label that `continue` targets — likely the loop's check label."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

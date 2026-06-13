@@ -1,0 +1,5 @@
+description = "`int a[2][3]; a[i][j]` — multi-dim array indexed with non-constant indices on both axes. Tests the address-computation path (row-stride × outer + col-stride × inner) when constant folding doesn't apply."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

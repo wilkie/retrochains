@@ -1,0 +1,5 @@
+description = "Pointer to local, assign through ptr. -c parallel of 081. Exercises lea + mov [si],imm."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]
