@@ -2372,6 +2372,112 @@ fn i8_disp(target: usize, disp_pos: usize) -> Option<u8> {
 /// <cmp>
 /// <jcc>     jcc back to step start
 /// ```
+/// Match a for-loop body that is a single `if (D) S;` (no else) where `S` always
+/// returns — the shape MSC fuses into a conditional loop back-edge. Returns the
+/// if-condition and the then-branch. Fixture 1256.
+fn for_body_single_if_return<'a>(body: &'a Stmt, locals: &Locals<'_>) -> Option<(&'a Cond, &'a Stmt)> {
+    let if_stmt = match body {
+        Stmt::If { .. } => body,
+        Stmt::Block(ss) if ss.len() == 1 => &ss[0],
+        _ => return None,
+    };
+    if let Stmt::If { cond, then_branch, else_branch: None } = if_stmt
+        && stmt_always_returns(then_branch, locals)
+    {
+        Some((cond, then_branch.as_ref()))
+    } else {
+        None
+    }
+}
+/// Emit the fused-if for-loop (see [`for_body_single_if_return`]):
+/// ```text
+///   init
+///   jmp COND
+///   STEP: <step>
+///   COND: <C>; j!C AFTER        ; guard — exit the loop when C is false
+///         <D>; j!D STEP         ; back-edge — loop when D is false
+///         <S>                   ; D true: run then-branch (returns)
+///   AFTER: <rest of function>
+/// ```
+/// Returns false (emitting nothing) if C/D aren't simple `Cmp` conds.
+fn emit_for_fused_if(
+    init: &Stmt,
+    cond_c: &Cond,
+    step: &Stmt,
+    cond_d: &Cond,
+    then_s: &Stmt,
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> bool {
+    use crate::codegen::cond::emit_cond_cmp;
+    let (Cond::Cmp { op: cop, .. }, Cond::Cmp { op: dop, .. }) = (cond_c, cond_d) else {
+        return false;
+    };
+    let jcc_false = |op: RelOp, c: &Cond| {
+        let j = inverted_jcc(op);
+        if cmp_is_unsigned(c, locals) { to_unsigned_jcc(j) } else { j }
+    };
+    let jcc_c = jcc_false(*cop, cond_c);
+    let jcc_d = jcc_false(*dop, cond_d);
+    // Pre-build step / C / D / S so we can size the displacements. NOTE: nothing
+    // is written to `out` until every displacement is validated, so a `false`
+    // return leaves `out` untouched and the caller's normal path takes over.
+    let mut step_buf = Vec::new();
+    let mut step_fx: Vec<Fixup> = Vec::new();
+    emit_stmt(step, locals, frame, return_int, return_long, &mut step_buf, &mut step_fx);
+    let mut c_buf = Vec::new();
+    let mut c_fx: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond_c, locals, &mut c_buf, &mut c_fx);
+    let mut d_buf = Vec::new();
+    let mut d_fx: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond_d, locals, &mut d_buf, &mut d_fx);
+    let mut s_buf = Vec::new();
+    let mut s_fx: Vec<Fixup> = Vec::new();
+    emit_stmt(then_s, locals, frame, return_int, return_long, &mut s_buf, &mut s_fx);
+    // Validate the position-independent displacements up front (the back-edge and
+    // the guard's forward jump). The back-edge magnitude bounds step+C+D too, so
+    // the small initial-jmp disp can't overflow once these pass.
+    let back_mag = step_buf.len() + c_buf.len() + d_buf.len() + 4;
+    if i8::try_from(back_mag).is_err() { return false; }
+    if i8::try_from(d_buf.len() + 2 + s_buf.len()).is_err() { return false; }
+    // init runs straight-line.
+    emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
+    // Initial `jmp COND`: align so the byte after the 2-byte jmp is even (MSC's
+    // loop-top alignment), padding with a NOP and bumping the disp if needed.
+    let needs_pad = (out.len() + 2) % 2 != 0;
+    let pad = usize::from(needs_pad);
+    let jmp_disp = i8::try_from(step_buf.len() + pad).expect("fused-for jmp disp fits");
+    out.push(0xEB);
+    out.push(jmp_disp as u8);
+    if needs_pad { out.push(0x90); }
+    // STEP.
+    let step_base = out.len();
+    out.extend_from_slice(&step_buf);
+    for mut f in step_fx { f.body_offset += step_base; fixups.push(f); }
+    // COND: guard C, then a forward jcc past the D-section and S to AFTER.
+    let c_base = out.len();
+    out.extend_from_slice(&c_buf);
+    for mut f in c_fx { f.body_offset += c_base; fixups.push(f); }
+    let c_fwd = i8::try_from(d_buf.len() + 2 + s_buf.len()).expect("fused-for guard disp fits");
+    out.push(jcc_c);
+    out.push(c_fwd as u8);
+    // Back-edge: D, then a backward jcc to STEP when D is false.
+    let d_base = out.len();
+    out.extend_from_slice(&d_buf);
+    for mut f in d_fx { f.body_offset += d_base; fixups.push(f); }
+    out.push(jcc_d);
+    let back_disp = i8::try_from(step_base as i32 - (out.len() as i32 + 1)).expect("fused-for back disp fits");
+    out.push(back_disp as u8);
+    // S (the then-branch) falls through here when D is true; it returns.
+    let s_base = out.len();
+    out.extend_from_slice(&s_buf);
+    for mut f in s_fx { f.body_offset += s_base; fixups.push(f); }
+    true
+}
 pub(crate) fn emit_for(
     init: &Stmt,
     cond: &Cond,
@@ -2415,6 +2521,19 @@ pub(crate) fn emit_for(
     } else {
         cond
     };
+    // `for(init; C; step) if(D) S;` where C and D are simple comparisons and the
+    // then-branch S always returns: MSC fuses the if-condition into the loop's
+    // conditional back-edge ("jne-back trick"), emitting the cond between step and
+    // body. Fixture 1256. (A `break` then-branch is the leading-break case below.)
+    // This emitter writes its own init, so it sits BEFORE the init emission.
+    if let Some((cond_d, then_s)) = for_body_single_if_return(body_stmt, locals)
+        && matches!(cond, Cond::Cmp { .. })
+        && matches!(cond_d, Cond::Cmp { .. })
+        && emit_for_fused_if(init, cond, step, cond_d, then_s,
+            locals, frame, return_int, return_long, out, fixups)
+    {
+        return;
+    }
     emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
     // Infinite for-loop with no step and a trailing `if (c) break;` →
     // `do { prefix } while (!c)` after the init (same fold as while(1)).
