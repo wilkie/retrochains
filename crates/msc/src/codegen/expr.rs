@@ -80,6 +80,23 @@ pub(crate) fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fix
             crate::codegen::assign::emit_postmutate_local(*step, 2, disp, out);
             out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
         }
+        // `arr[i++]` — a POST-increment word index loads the OLD value straight
+        // into BX, THEN mutates in place (`mov bx,[i]; inc [i]`). Fixture 2499.
+        Expr::PostMutateParam { param_idx, step }
+            if !locals.is_char_param(*param_idx) && locals.param_pointee_size(*param_idx) == 0 =>
+        {
+            let disp = param_disp(*param_idx);
+            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+            crate::codegen::assign::emit_postmutate_local(*step, 2, disp, out);
+        }
+        Expr::PostMutateLocal { local_idx, step }
+            if locals.size(*local_idx) == 2 && !locals.is_long_local(*local_idx)
+                && locals.local_pointee_size(*local_idx) == 0 =>
+        {
+            let disp = locals.disp(*local_idx);
+            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+            crate::codegen::assign::emit_postmutate_local(*step, 2, disp, out);
+        }
         _ => { emit_expr_to_ax(e, locals, out, fixups); out.extend_from_slice(&[0x8B, 0xD8]); } // mov bx,ax
     }
 }

@@ -744,6 +744,17 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             } else {
                 prop_expr(value, cp);
             }
+            // A runtime-indexed store whose index carries a side effect
+            // (`a[i++] = v`) mutates the index variable — propagate the index
+            // so the `i++` registers as a mutation and a later `return i`
+            // does not fold to i's stale init. Fixture 2499.
+            match target {
+                AssignTarget::IndexedGlobalVar { index, .. }
+                | AssignTarget::IndexedGlobalByteVar { index, .. }
+                | AssignTarget::IndexedLocalVar { index, .. }
+                | AssignTarget::IndexedLocalByteVar { index, .. } => prop_expr(index, cp),
+                _ => {}
+            }
             // Mark the assign target as mutated so the emit-time fold
             // view ignores its `spec.init` (fixture 1029, 1154).
             match target {
