@@ -3079,7 +3079,7 @@ fn callptr_target_si_safe(target: &Expr, inits: &[Option<i32>]) -> bool {
 /// parameter, or `<param> ± K`.
 fn arg_buildable_in_cx(e: &Expr) -> bool {
     match e {
-        Expr::IntLit(_) | Expr::StrLit(_) | Expr::Param(_) | Expr::FuncAddr(_) => true,
+        Expr::IntLit(_) | Expr::StrLit(_) | Expr::Param(_) | Expr::FuncAddr(_) | Expr::AddrOfGlobal(_) => true,
         Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right } =>
             matches!(left.as_ref(), Expr::Param(_)) && matches!(right.as_ref(), Expr::IntLit(_)),
         _ => false,
@@ -3104,6 +3104,13 @@ fn emit_arg_to_cx(e: &Expr, _locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
         }
         Expr::Param(i) => { let d = param_disp(*i); out.push(0x8B); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); }
+        // `&global` / decayed global array → `mov cx, OFFSET g` (placeholder +
+        // GlobalAddr fixup), mirroring the AX arg builder. Fixture 2266.
+        Expr::AddrOfGlobal(idx) => {
+            let bo = out.len();
+            out.extend_from_slice(&[0xB9, 0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *idx } });
+        }
         Expr::BinOp { op, left, right } => {
             emit_arg_to_cx(left, _locals, out, fixups);
             let Expr::IntLit(k) = right.as_ref() else { unreachable!() };
