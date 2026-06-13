@@ -2147,9 +2147,13 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
             Expr::Global(g) => locals.is_char_global(*g),
             Expr::Param(p) => locals.is_char_param(*p),
             Expr::Local(l) => is_char_local(*l),
+            // char struct-field of a global (`h.c`). Fixture 2338.
+            Expr::GlobalField { size: 1, .. } => true,
             _ => false,
         };
         let is_int_leaf = |e: &Expr| match e {
+            // word struct-field of a global (`h.x`). Fixture 2338.
+            Expr::GlobalField { size: 2, .. } => true,
             Expr::Global(g) => !locals.is_char_global(*g) && !locals.is_long_global(*g),
             Expr::Param(p) => !locals.is_char_param(*p) && !locals.is_long_param(*p)
                 && !locals.is_float_param(*p),
