@@ -2133,26 +2133,55 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         emit_imm_op(op, *k, out);
         return;
     }
-    // Int `+` chain over plain globals where exactly one is a `char`: MSC hoists
-    // the char load to the front (`mov al,[c]; cbw`) and folds the int terms in
-    // source order (`add ax,[a]; add ax,[b]`), rather than reading the char as a
-    // word in place. Fixture 131 (`a + b + c`, `c` a char global). Only int
-    // (non-char, non-long) globals join the chain.
+    // Int `+` chain over scalar globals/params/locals that mixes in 1–2 `char`
+    // operands: MSC evaluates the chars FIRST in REVERSE source order (the last
+    // char loads to AX then parks in CX, an earlier one loads and `add ax,cx`),
+    // then folds the int terms in source order. A char read in place would be
+    // wrong (it loads a word, no `cbw`), so this shape was always miscompiled.
+    // Fixtures 131 (`a+b+c`, one char global) and 2005 (`a+b+c+d`, two char
+    // params → `mov al,[d];cbw;mov cx,ax; mov al,[b];cbw;add ax,cx; add ax,[a];
+    // add ax,[c]`).
     if matches!(op, BinOp::Add) {
-        let mut leaves: Vec<usize> = Vec::new();
-        if collect_global_add_chain(left, &mut leaves)
-            && collect_global_add_chain(right, &mut leaves)
-            && leaves.len() >= 2
-            && leaves.iter().filter(|&&g| locals.is_char_global(g)).count() == 1
-            && leaves.iter().all(|&g| locals.is_char_global(g)
-                || (!locals.is_char_global(g) && !locals.is_long_global(g)))
+        let is_char_local = |l: usize| locals.size(l) == 1 && !locals.is_array_local(l);
+        let is_char_leaf = |e: &Expr| match e {
+            Expr::Global(g) => locals.is_char_global(*g),
+            Expr::Param(p) => locals.is_char_param(*p),
+            Expr::Local(l) => is_char_local(*l),
+            _ => false,
+        };
+        let is_int_leaf = |e: &Expr| match e {
+            Expr::Global(g) => !locals.is_char_global(*g) && !locals.is_long_global(*g),
+            Expr::Param(p) => !locals.is_char_param(*p) && !locals.is_long_param(*p)
+                && !locals.is_float_param(*p),
+            Expr::Local(l) => !is_char_local(*l) && !locals.is_long_local(*l)
+                && !locals.is_array_local(*l) && !locals.is_float_local(*l)
+                && locals.reg_for_local(*l).is_none(),
+            _ => false,
+        };
+        let mut leaves: Vec<&Expr> = Vec::new();
+        if collect_scalar_add_chain(left, &mut leaves)
+            && collect_scalar_add_chain(right, &mut leaves)
+            && leaves.iter().all(|e| is_char_leaf(e) || is_int_leaf(e))
         {
-            let cg = leaves.iter().copied().find(|&g| locals.is_char_global(g)).unwrap();
-            emit_expr_to_ax(&Expr::Global(cg), locals, out, fixups); // mov al,[c]; cbw
-            for &g in leaves.iter().filter(|&&g| g != cg) {
-                emit_binop_right(BinOp::Add, &Expr::Global(g), locals, out, fixups);
+            let mut chars: Vec<&Expr> = leaves.iter().copied().filter(|e| is_char_leaf(e)).collect();
+            let ints: Vec<&Expr> = leaves.iter().copied().filter(|e| is_int_leaf(e)).collect();
+            // Only when ≥2 int terms anchor the chain: with 0–1 ints MSC parks the
+            // char in CX / strength-reduces (`x+x`→`shl`) — shapes this arm would
+            // miscompile (fixtures 3344/2690/1991). With ≥2 ints the chars combine
+            // into AX and the ints add in source order (131/2005).
+            if (1..=2).contains(&chars.len()) && ints.len() >= 2 {
+                chars.reverse(); // last char in source order is evaluated first
+                emit_expr_to_ax(chars[0], locals, out, fixups); // mov al,[c]; cbw
+                if chars.len() == 2 {
+                    out.extend_from_slice(&[0x8B, 0xC8]); // mov cx,ax
+                    emit_expr_to_ax(chars[1], locals, out, fixups); // mov al,[c2]; cbw
+                    out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
+                }
+                for e in &ints {
+                    emit_binop_right(BinOp::Add, e, locals, out, fixups);
+                }
+                return;
             }
-            return;
         }
     }
     // `make().a OP make().b` — two by-value struct-return field reads. Eval both
@@ -2677,16 +2706,15 @@ pub(crate) fn bf_load_word_cx(base: BitBase, byte_off: u16, locals: &Locals<'_>,
         BitBase::DerefParam(_) => false,
     }
 }
-/// Flatten a left-assoc `+` chain whose leaves are all `Expr::Global` into the
-/// source-ordered global indices. Returns false (leaving `out` partially filled)
-/// the moment a non-Global, non-Add leaf is hit.
-fn collect_global_add_chain(e: &Expr, out: &mut Vec<usize>) -> bool {
+/// Flatten a left-assoc `+` chain into its leaves in source order, descending
+/// only through `Add` nodes. Every non-Add node (global/param/local or anything
+/// else) becomes a leaf; the caller decides whether the leaf set is acceptable.
+fn collect_scalar_add_chain<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
     match e {
-        Expr::Global(i) => { out.push(*i); true }
         Expr::BinOp { op: BinOp::Add, left, right } => {
-            collect_global_add_chain(left, out) && collect_global_add_chain(right, out)
+            collect_scalar_add_chain(left, out) && collect_scalar_add_chain(right, out)
         }
-        _ => false,
+        _ => { out.push(e); true }
     }
 }
 /// Flatten a left-assoc `+` chain whose leaves are all `Expr::BitField` into a
