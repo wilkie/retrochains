@@ -2419,6 +2419,7 @@ fn emit_for_fused_if(
     cond_d: &Cond,
     then_s: &Stmt,
     is_return: bool,
+    back_when_true: bool,
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
@@ -2435,7 +2436,15 @@ fn emit_for_fused_if(
         if cmp_is_unsigned(c, locals) { to_unsigned_jcc(j) } else { j }
     };
     let jcc_c = jcc_false(*cop, cond_c);
-    let jcc_d = jcc_false(*dop, cond_d);
+    // The middle cond's back-edge: loop when it is FALSE for a fused if-body
+    // (`if(D) S` continues the loop when D is false), but loop when it is TRUE
+    // for a `&&` for-cond's second conjunct (`A && B` continues while B is true).
+    let jcc_d = if back_when_true {
+        let j = loop_back_jcc(*dop);
+        if cmp_is_unsigned(cond_d, locals) { to_unsigned_jcc(j) } else { j }
+    } else {
+        jcc_false(*dop, cond_d)
+    };
     // Pre-build step / C / D / S so we can size the displacements. NOTE: nothing
     // is written to `out` until every displacement is validated, so a `false`
     // return leaves `out` untouched and the caller's normal path takes over.
@@ -2453,10 +2462,11 @@ fn emit_for_fused_if(
     if is_return {
         emit_stmt(then_s, locals, frame, return_int, return_long, &mut s_buf, &mut s_fx);
     } else {
-        // Break case: emit the then-branch WITHOUT its trailing `break` — the
-        // break is an implicit fall-through to the after-loop code. Fixture 4048.
+        // Break / empty case: no inline then-code survives — a trailing `break`
+        // (4048) or an empty `&&` for-cond body (3331) is an implicit fall-through
+        // to the after-loop code, so S emits nothing but its leading statements.
         match then_s {
-            Stmt::Break => {}
+            Stmt::Break | Stmt::Empty => {}
             Stmt::Block(ss) => {
                 for s in &ss[..ss.len().saturating_sub(1)] {
                     emit_stmt(s, locals, frame, return_int, return_long, &mut s_buf, &mut s_fx);
@@ -2563,7 +2573,19 @@ pub(crate) fn emit_for(
     if let Some((cond_d, then_s, is_return)) = for_body_single_if_exit(body_stmt, locals)
         && matches!(cond, Cond::Cmp { .. })
         && matches!(cond_d, Cond::Cmp { .. })
-        && emit_for_fused_if(init, cond, step, cond_d, then_s, is_return,
+        && emit_for_fused_if(init, cond, step, cond_d, then_s, is_return, false,
+            locals, frame, return_int, return_long, out, fixups)
+    {
+        return;
+    }
+    // `for(init; A && B; step) ;` (empty body): MSC decomposes the `&&` into the
+    // same cond-in-middle layout — A is the exit guard, B the conditional
+    // back-edge (loop while B is TRUE). Fixture 3331 (`i < n && p[i] != 0`).
+    if matches!(body_stmt, Stmt::Empty)
+        && let Cond::And(a, b) = cond
+        && matches!(a.as_ref(), Cond::Cmp { .. })
+        && matches!(b.as_ref(), Cond::Cmp { .. })
+        && emit_for_fused_if(init, a, step, b, &Stmt::Empty, false, true,
             locals, frame, return_int, return_long, out, fixups)
     {
         return;

@@ -899,6 +899,7 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         && !locals.is_long_param(*param)
         && locals.param_pointee_size(*param) == 2
         && match right {
+            Expr::IntLit(_) => true,
             Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i),
             Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i),
             Expr::Global(g) => !locals.is_char_global(*g) && !locals.is_long_global(*g),
@@ -909,8 +910,19 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         out.extend_from_slice(&[0xD1, 0xE3]);                           // shl bx,1
         let pd = param_disp(*param);
         out.push(0x8B); out.push(bp_modrm(0x76, pd)); push_bp_disp(out, pd); // mov si,[bp+arr]
-        emit_expr_to_ax(right, locals, out, fixups);                   // mov ax,<rhs>
-        out.extend_from_slice(&[0x39, 0x00]);                          // cmp [bx+si],ax
+        if let Expr::IntLit(k) = right {
+            // `cmp word [bx+si], imm` — /7 with modrm 0x38 ([bx+si]); imm8sx
+            // (83) when it fits, else imm16 (81).
+            if let Ok(k8) = i8::try_from(*k) {
+                out.extend_from_slice(&[0x83, 0x38, k8 as u8]);
+            } else {
+                out.push(0x81); out.push(0x38);
+                out.extend_from_slice(&((*k as u32 & 0xFFFF) as u16).to_le_bytes());
+            }
+        } else {
+            emit_expr_to_ax(right, locals, out, fixups);              // mov ax,<rhs>
+            out.extend_from_slice(&[0x39, 0x00]);                     // cmp [bx+si],ax
+        }
         return;
     }
     match cond {
