@@ -202,6 +202,12 @@ pub(crate) fn body_needs_di_si(stmts: &[Stmt], inits: &[Option<i32>]) -> bool {
         match e {
             Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right }
                 if crate::codegen::expr::is_three_call_binop(left, right, inits) => true,
+            // `A + B*C` (all no-arg calls) parks A in SI and C in DI. Fixture 2050.
+            Expr::BinOp { op: BinOp::Add, left, right }
+                if matches!(left.as_ref(), Expr::Call { args, .. } if args.is_empty())
+                    && matches!(right.as_ref(), Expr::BinOp { op: BinOp::Mul, left: b, right: c }
+                        if matches!(b.as_ref(), Expr::Call { args, .. } if args.is_empty())
+                            && matches!(c.as_ref(), Expr::Call { args, .. } if args.is_empty())) => true,
             // A char-array-element add chain of ≥6 terms parks into DI (the 5th
             // pool slot), needing both DI and SI pushed. Fixture 2097.
             Expr::BinOp { op: BinOp::Add, .. }

@@ -3558,6 +3558,24 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     // the running AX survives. Each non-rightmost call's (single, simple) arg is
     // built in CX. Then it folds left-to-right: `ax OP <reg>` reading the parked
     // results. Fixtures 1277/1536 (2 calls), 2305/2343 (3 calls).
+    // `A + B*C` where A, B, C are all no-arg calls (`zero() + one()*neg_one()`):
+    // MSC parks A in SI, the product's RIGHT factor C in DI (via CX), computes B
+    // in AX and `imul di`, then `add ax,si`. Fixture 2050.
+    if matches!(op, BinOp::Add)
+        && matches!(left, Expr::Call { args, .. } if args.is_empty())
+        && let Expr::BinOp { op: BinOp::Mul, left: b, right: c } = right
+        && matches!(b.as_ref(), Expr::Call { args, .. } if args.is_empty())
+        && matches!(c.as_ref(), Expr::Call { args, .. } if args.is_empty())
+    {
+        emit_expr_to_ax(left, locals, out, fixups);        // A → ax
+        out.extend_from_slice(&[0x8B, 0xF0]);              // mov si,ax
+        emit_expr_to_ax(c, locals, out, fixups);           // C → ax
+        out.extend_from_slice(&[0x8B, 0xC8, 0x8B, 0xF9]);  // mov cx,ax; mov di,cx
+        emit_expr_to_ax(b, locals, out, fixups);           // B → ax
+        out.extend_from_slice(&[0xF7, 0xEF]);              // imul di (ax = B*C)
+        out.extend_from_slice(&[0x03, 0xC6]);              // add ax,si
+        return;
+    }
     if let Some((calls, ops)) = call_chain(op, left, right, locals.inits) {
         let n = calls.len();
         // Park index 0/1 use SI/DI; index ≥2 spills to frame temps one slot below
