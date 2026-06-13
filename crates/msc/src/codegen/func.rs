@@ -92,6 +92,10 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     || stmt_si(then_branch, inits)
                     || else_branch.as_ref().is_some_and(|e| stmt_si(e, inits))
             }
+            // `while(*p){accum+=*p; p++;}` caches *p in SI across cond+body.
+            // Fixture 1849.
+            Stmt::While { cond, body }
+                if crate::codegen::statements::while_si_accum(cond, body).is_some() => true,
             Stmt::While { cond, body } => cond_si(cond, inits) || stmt_si(body, inits),
             Stmt::DoWhile { body, cond } => stmt_si(body, inits) || cond_si(cond, inits),
             Stmt::For { init, cond, step, body } => {

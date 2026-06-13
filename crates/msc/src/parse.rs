@@ -1950,6 +1950,13 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // prepended to the body.
     let mut locals: Vec<LocalSpec> = Vec::new();
     let mut prelude: Vec<Stmt> = Vec::new();
+    // True once a declaration's init has been emitted as a prelude (body)
+    // statement — a COMPUTED init like `int *p = a`. MSC emits all declaration
+    // inits in source order, so a later LITERAL init (`int sum = 0`) that would
+    // normally hoist to the prologue must instead stay in the prelude (its source
+    // position). Otherwise the hoisted literal would jump ahead of the computed
+    // init. Fixture 1849 (`int *p = a; int sum = 0;`).
+    let mut seen_computed_init = false;
     loop {
         // A function-local `static` declaration is really a TU-private global:
         // route it through parse_global_decl, which appends it to p.globals
@@ -2565,7 +2572,21 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         // (`(int)(5+3)`) still folds. Fixtures 2219 (var) vs 1614 (const).
                         || (init_via_type_cast && init_expr.fold(&[]).is_none());
                     let fold_k = if skip_fold { None } else { init_expr.fold(&init_view) };
-                    if let Some(k) = fold_k {
+                    // Declaration-order preservation: if a COMPUTED init already
+                    // went to the prelude, a later literal init also stays in the
+                    // prelude (its source position) rather than hoisting to the
+                    // prologue. Only plain (non-cast) literals — cast inits use a
+                    // distinct prologue byte form. Fixture 1849.
+                    if let Some(_k) = fold_k
+                        && seen_computed_init
+                        && !init_via_cast
+                        && !init_via_type_cast
+                    {
+                        prelude.push(Stmt::Assign {
+                            target: AssignTarget::Local(local_idx),
+                            value: init_expr,
+                        });
+                    } else if let Some(k) = fold_k {
                         locals[local_idx].init = Some(k);
                         // Mirror into the parser's snapshot so later
                         // stmt-level lookups (a[i] with i known) see
@@ -2603,6 +2624,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                             target: AssignTarget::Local(local_idx),
                             value: init_expr,
                         });
+                        seen_computed_init = true;
                     }
                 }
             }

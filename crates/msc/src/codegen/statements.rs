@@ -1948,6 +1948,56 @@ pub(crate) fn emit_return(
 /// <cmp>               cond comparison
 /// <jcc> <-back>       jne/je back to body start
 /// ```
+/// Match `while (*p) { accum = accum + *p; p = p + 1; }` — a word-deref
+/// accumulate loop. `*p` is a `DerefWord` (so the pointee is int/word, no Locals
+/// lookup needed), accum and p are locals. Returns `(accum_local, ptr_local)`.
+/// Used by both the dedicated SI-caching emitter and `body_needs_si`. Fixture 1849.
+pub(crate) fn while_si_accum(cond: &Cond, body: &Stmt) -> Option<(usize, usize)> {
+    let Cond::Truthy(Expr::DerefWord { ptr }) = cond else { return None };
+    let Expr::Local(p) = ptr.as_ref() else { return None };
+    let Stmt::Block(stmts) = body else { return None };
+    if stmts.len() != 2 { return None; }
+    // stmt 0: accum = accum + *p
+    let Stmt::Assign { target: AssignTarget::Local(a), value } = &stmts[0] else { return None };
+    let Expr::BinOp { op: BinOp::Add, left, right } = value else { return None };
+    if !matches!(left.as_ref(), Expr::Local(la) if la == a) { return None; }
+    if !matches!(right.as_ref(),
+        Expr::DerefWord { ptr: rp } if matches!(rp.as_ref(), Expr::Local(rpi) if rpi == p)) {
+        return None;
+    }
+    // stmt 1: p = p + 1
+    let Stmt::Assign { target: AssignTarget::Local(p2), value: pv } = &stmts[1] else { return None };
+    if p2 != p { return None; }
+    let Expr::BinOp { op: BinOp::Add, left: pl, right: pr } = pv else { return None };
+    if !matches!(pl.as_ref(), Expr::Local(pli) if pli == p) { return None; }
+    if !matches!(pr.as_ref(), Expr::IntLit(1)) { return None; }
+    Some((*a, *p))
+}
+/// Emit the SI-caching word-deref accumulate loop (see [`while_si_accum`]):
+/// `jmp COND; [nop]; BODY: add [accum],si; add [p],stride; COND: mov bx,[p];
+/// mov si,[bx]; or si,si; jne BODY`. The body starts on an even offset.
+fn emit_while_si_accum(accum: usize, p: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let ad = locals.disp(accum);
+    let pd = locals.disp(p);
+    let stride = locals.local_pointee_size(p).max(1) as u8;
+    let jmp_pos = out.len();
+    let needs_nop = (jmp_pos + 2) % 2 == 1; // BODY must land on an even offset
+    out.push(0xEB);
+    let disp_pos = out.len();
+    out.push(0x00);
+    if needs_nop { out.push(0x90); }
+    let body_pos = out.len();
+    out.push(0x01); out.push(bp_modrm(0x76, ad)); push_bp_disp(out, ad);          // add [bp+accum],si
+    out.push(0x83); out.push(bp_modrm(0x46, pd)); push_bp_disp(out, pd); out.push(stride); // add word [bp+p],stride
+    let cond_pos = out.len();
+    out.push(0x8B); out.push(bp_modrm(0x5E, pd)); push_bp_disp(out, pd);          // mov bx,[bp+p]
+    out.extend_from_slice(&[0x8B, 0x37, 0x0B, 0xF6]);                             // mov si,[bx]; or si,si
+    out.push(0x75);                                                               // jne BODY
+    let back = body_pos as i64 - (out.len() as i64 + 1);
+    out.push(i8::try_from(back).expect("si-accum back jmp fits rel8") as u8);
+    let fwd = cond_pos as i64 - (disp_pos as i64 + 1);
+    out[disp_pos] = i8::try_from(fwd).expect("si-accum fwd jmp fits rel8") as u8;
+}
 pub(crate) fn emit_while(
     cond: &Cond,
     body_stmt: &Stmt,
@@ -1958,6 +2008,15 @@ pub(crate) fn emit_while(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // `while (*p) { accum = accum + *p; p = p + 1; }` (int* p, int accum): MSC
+    // caches `*p` in SI across the condition and body (`mov si,[bx]` in the
+    // condition, `add [accum],si` in the body). A dedicated emitter — the body is
+    // emitted before the condition in the while form, so it can't tail-scan for
+    // the value. Fixture 1849.
+    if let Some((accum, p)) = while_si_accum(cond, body_stmt) {
+        emit_while_si_accum(accum, p, locals, out);
+        return;
+    }
     // Infinite loop with a trailing `if (c) break;`: MSC folds the break into the
     // back edge — `while (1) { prefix; if (c) break; }` becomes
     // `do { prefix } while (!c)`, looping back on the inverted condition.
