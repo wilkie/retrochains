@@ -29,12 +29,19 @@ fn is_ident_byte(b: u8, first: bool) -> bool {
     b == b'_' || b.is_ascii_alphabetic() || (!first && b.is_ascii_digit())
 }
 
-pub(crate) fn preprocess(source: &str) -> Result<String, EmitError> {
+/// Returns the expanded source plus a flag set when an active `#include`
+/// directive was seen. MSC's EXTDEF ordering for an implicitly-declared
+/// function depends on whether the TU pulled in a header: with a `#include`
+/// the implicit extern leads and `__chkstk` trails (fixture 4103); without
+/// one the layout matches a no-user-extern TU — `__chkstk` early, implicit
+/// extern trailing (fixture 108).
+pub(crate) fn preprocess(source: &str) -> Result<(String, bool), EmitError> {
     // Splice line continuations (`\` immediately before a newline).
     let joined = source.replace("\\\r\n", "").replace("\\\n", "");
     let mut macros: HashMap<String, Macro> = HashMap::new();
     let mut stack: Vec<Frame> = Vec::new();
     let mut out = String::new();
+    let mut had_include = false;
     let all_active = |s: &[Frame]| s.iter().all(|f| f.active);
 
     for line in joined.lines() {
@@ -74,8 +81,9 @@ pub(crate) fn preprocess(source: &str) -> Result<String, EmitError> {
                     f.taken = true;
                 }
                 "endif" => { stack.pop().ok_or_else(|| err("#endif without #if"))?; }
+                "include" if all_active(&stack) => { had_include = true; }
                 // define/undef in an inactive branch, or any other directive
-                // (#include/#pragma/#error/#line/…) — ignore.
+                // (#pragma/#error/#line/…) — ignore.
                 _ => {}
             }
             continue;
@@ -85,7 +93,7 @@ pub(crate) fn preprocess(source: &str) -> Result<String, EmitError> {
             out.push('\n');
         }
     }
-    Ok(out)
+    Ok((out, had_include))
 }
 
 fn err(msg: &str) -> EmitError {

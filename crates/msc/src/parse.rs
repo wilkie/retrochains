@@ -5,7 +5,7 @@ use crate::*;
 /// is `int` or `void`; bodies follow the existing per-statement
 /// grammar.
 pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
-    let preprocessed = crate::preproc::preprocess(source)?;
+    let (preprocessed, had_include) = crate::preproc::preprocess(source)?;
     let mut toks = tokenize(&preprocessed)?;
     rewrite_void_pointers(&mut toks);
     apply_enum_substitutions(&mut toks);
@@ -253,7 +253,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     }
     // A function-less translation unit (only global declarations) is valid —
     // MSC emits an OBJ with just the data segments. Fixtures 3657/3659/3660/3680.
-    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns, proto_char_returns, fn_appearance, variadic_fns })
+    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns, proto_char_returns, fn_appearance, variadic_fns, had_include })
 }
 /// Parse a file-scope `struct <Name> <var> [= { ... }];` declaration.
 /// Stores the struct global as if it were a `char` array sized to

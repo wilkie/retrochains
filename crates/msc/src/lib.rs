@@ -104,6 +104,13 @@ pub struct Unit {
     /// prototype, since the prototype gives no type for those positions.
     /// Fixtures 2197/3983 (`printf("%ld", n)`).
     pub variadic_fns: std::collections::HashSet<String>,
+    /// True when the source contained an active `#include` directive. Together
+    /// with `prototyped_fns` this disambiguates the EXTDEF layout for an
+    /// implicitly-declared function: a call with a header (`#include`) leads the
+    /// implicit extern and trails `__chkstk` (fixture 4103); a call with no
+    /// header at all matches the no-user-extern layout — `__chkstk` early, the
+    /// implicit extern trailing (fixture 108).
+    pub had_include: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2610,7 +2617,18 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             // given an explicit source prototype (`int f(int);` — fixture 1734);
             // an implicitly-declared extern (called with only a swallowed
             // `#include`, no prototype — fixture 4103) keeps `__chkstk` LAST.
-            let chkstk_early = user_extern_order.iter().all(|n| unit.prototyped_fns.contains(n));
+            // An all-implicit extern set with NO `#include` follows the
+            // no-user-extern layout: `__chkstk` early and the implicit extern
+            // appended AFTER the defined functions (fixture 108
+            // `printf("%d",42)` with no header → [__acrtused, __chkstk, _main,
+            // _printf]). With a `#include` the implicit extern leads and
+            // `__chkstk` trails (fixture 4103).
+            let all_implicit = !user_extern_order.is_empty()
+                && user_extern_order.iter().all(|n| !unit.prototyped_fns.contains(n));
+            let implicit_trailing = all_implicit && !unit.had_include;
+            let chkstk_early =
+                user_extern_order.iter().all(|n| unit.prototyped_fns.contains(n))
+                || implicit_trailing;
             let mut entries: Vec<(String, u8, bool)> = Vec::new();
             for (m, ty) in fp_extern_block(uses_float) {
                 entries.push(((*m).to_owned(), *ty, false));
@@ -2640,9 +2658,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let has_appearance =
                     |name: &str| unit.fn_appearance.iter().any(|c| symbol_name(c) == name);
-                for name in &user_extern_order {
-                    if !has_appearance(name) && emitted.insert(name.clone()) {
-                        entries.push((name.clone(), 0x00, false));
+                if !implicit_trailing {
+                    for name in &user_extern_order {
+                        if !has_appearance(name) && emitted.insert(name.clone()) {
+                            entries.push((name.clone(), 0x00, false));
+                        }
                     }
                 }
                 for cname in &unit.fn_appearance {
