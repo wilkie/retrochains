@@ -379,11 +379,19 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
         }
         Expr::IntLit(k) => {
             let imm = (*k as u32 & 0xFFFF) as u16;
-            // Consecutive identical constant args (args push RTL) reuse the live
-            // AX: if the previous push was `mov ax,K; push ax` for the same K, emit
-            // a bare `push ax`. Fixture 1260 (`isEq(3, 3)`).
-            let prev = [0xB8, (imm & 0xFF) as u8, (imm >> 8) as u8, 0x50];
-            if out.ends_with(&prev) {
+            // A run of identical constant args (args push RTL) all reuse the live
+            // AX: AX still holds K iff the only thing emitted since `mov ax,K` was
+            // a run of `push ax` (0x50). Scan back over that run; if `B8 lo hi`
+            // precedes it, emit a bare `push ax`. Fixtures 1260 (2 args), 2327
+            // (a longer run of equal args).
+            let mut p = out.len();
+            while p > 0 && out[p - 1] == 0x50 { p -= 1; }
+            let holds_k = p < out.len()
+                && p >= 3
+                && out[p - 3] == 0xB8
+                && out[p - 2] == (imm & 0xFF) as u8
+                && out[p - 1] == (imm >> 8) as u8;
+            if holds_k {
                 out.push(0x50); // push ax
             } else {
                 out.push(0xB8);
