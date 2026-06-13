@@ -37,6 +37,67 @@ fn stmt_is_float_elem_store(stmt: &Stmt, locals: &Locals<'_>) -> bool {
         Stmt::Assign { target: AssignTarget::IndexedLocal { local, .. }, value: Expr::FloatLit(..) }
             if locals.is_float_local(*local))
 }
+/// `if (a[i] OP b[i]) { x = a[i] - b[i]; REST }` where a,b are char local arrays
+/// at the same runtime index and x is an int local: emit the in-place byte
+/// compare, then on the taken path reuse the loaded `b[i]` (in AL) and index (in
+/// SI) for the subtraction. Returns false (emitting nothing) if the shape doesn't
+/// match. Fixture 2488 (strcmp-style `if(a[i]!=b[i]) diff=a[i]-b[i]`).
+fn try_emit_array_cmp_sub_if(
+    cond: &Cond,
+    then_branch: &Stmt,
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> bool {
+    use crate::codegen::assign::{emit_index_to_si, simple_index_eq};
+    // Condition: a[i] OP b[i] (char local arrays, same runtime index).
+    let Cond::Cmp { op, left: Expr::LocalIndexByte { local: a, index: ai },
+                    right: Expr::LocalIndexByte { local: b, index: bi } } = cond else { return false; };
+    if ai.fold(locals.inits).is_some() || !simple_index_eq(ai, bi) { return false; }
+    // Then-body: `x = a[i] - b[i]; REST...`.
+    let stmts: &[Stmt] = match then_branch {
+        Stmt::Block(ss) => ss,
+        single => std::slice::from_ref(single),
+    };
+    let Some((Stmt::Assign { target: AssignTarget::Local(x),
+        value: Expr::BinOp { op: BinOp::Sub,
+            left: sl, right: sr } }, rest)) = stmts.split_first() else { return false; };
+    let (Expr::LocalIndexByte { local: sa, index: si1 }, Expr::LocalIndexByte { local: sb, index: si2 }) =
+        (sl.as_ref(), sr.as_ref()) else { return false; };
+    if *sa != *a || *sb != *b || !simple_index_eq(si1, ai) || !simple_index_eq(si2, ai) { return false; }
+    if locals.size(*x) != 2 || locals.is_long_local(*x) { return false; }
+    // Build the taken-path body so the skip jcc can be sized.
+    let mut body = Vec::new();
+    let mut body_fx: Vec<Fixup> = Vec::new();
+    let a_disp = locals.disp(*a);
+    body.push(0x98);                                                       // cbw  (b[i] → AX)
+    body.extend_from_slice(&[0x8B, 0xC8]);                                 // mov cx,ax
+    body.push(0x8A); body.push(bp_modrm(0x42, a_disp)); push_bp_disp(&mut body, a_disp); // mov al,a[i]
+    body.push(0x98);                                                       // cbw  (a[i] → AX)
+    body.extend_from_slice(&[0x2B, 0xC1]);                                 // sub ax,cx
+    let xd = locals.disp(*x);
+    body.push(0x89); body.push(bp_modrm(0x46, xd)); push_bp_disp(&mut body, xd); // mov [x],ax
+    for s in rest { emit_stmt(s, locals, frame, return_int, return_long, &mut body, &mut body_fx); }
+    let Ok(skip) = i8::try_from(body.len()) else { return false; };
+    // Condition: `mov si,i; mov al,b[i]; cmp a[i],al; jcc-skip`.
+    emit_index_to_si(ai, locals, out, fixups);
+    let b_disp = locals.disp(*b);
+    out.push(0x8A); out.push(bp_modrm(0x42, b_disp)); push_bp_disp(out, b_disp); // mov al,b[i]
+    out.push(0x38); out.push(bp_modrm(0x42, a_disp)); push_bp_disp(out, a_disp); // cmp a[i],al
+    let jcc = {
+        let j = inverted_jcc(*op);
+        if cmp_is_unsigned(cond, locals) { to_unsigned_jcc(j) } else { j }
+    };
+    out.push(jcc);
+    out.push(skip as u8);
+    let base = out.len();
+    out.extend_from_slice(&body);
+    for mut f in body_fx { f.body_offset += base; fixups.push(f); }
+    true
+}
 /// Emit a run of consecutive `arr[idx].field = v` stores (`LocalStructArrayField`
 /// targets) that share the same array, runtime index, and stride: compute the row
 /// base `si = bp + idx*stride` ONCE, then store each field at `[si + base +
@@ -289,6 +350,15 @@ pub(crate) fn emit_stmt(
             emit_for(init, cond, step, body, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::If { cond, then_branch, else_branch } => {
+            // `if (a[i] != b[i]) { x = a[i] - b[i]; REST }` (char local arrays,
+            // same runtime index): MSC fuses the compare and the subtraction so
+            // the body reuses the `b[i]` value (in AL) and the index (in SI) the
+            // condition's in-place byte compare already established. Fixture 2488.
+            if else_branch.is_none()
+                && try_emit_array_cmp_sub_if(cond, then_branch, locals, frame, return_int, return_long, out, fixups)
+            {
+                return;
+            }
             // `if (pure-cond) ;` — empty then-body, no else, side-effect-free
             // condition: MSC emits nothing at all (no compare, no branch).
             // Fixture 3048 (`if (x > 0) ;`).

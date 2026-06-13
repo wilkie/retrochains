@@ -925,6 +925,34 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         }
         return;
     }
+    // `a[i] OP b[i]` — two CHAR-LOCAL-array elements at the same runtime index:
+    // load the index into SI once, byte-load b[i] into AL, and compare a[i] in
+    // place (`mov si,i; mov al,[bp+si+b]; cmp [bp+si+a],al`). Fixture 2488
+    // (`a[i] != b[i]`).
+    if let Cond::Cmp { left: Expr::LocalIndexByte { local: la, index: li },
+                       right: Expr::LocalIndexByte { local: ra, index: ri }, .. } = cond
+        && li.fold(locals.inits).is_none()
+        && crate::codegen::assign::simple_index_eq(li, ri)
+    {
+        crate::codegen::assign::emit_index_to_si(li, locals, out, fixups); // mov si,i
+        let rd = locals.disp(*ra);
+        out.push(0x8A); out.push(bp_modrm(0x42, rd)); push_bp_disp(out, rd); // mov al,[bp+si+b]
+        let ld = locals.disp(*la);
+        out.push(0x38); out.push(bp_modrm(0x42, ld)); push_bp_disp(out, ld); // cmp [bp+si+a],al
+        return;
+    }
+    // `a[i] OP <imm>` — a CHAR-LOCAL-array element at a runtime index vs a
+    // constant: `mov si,i; cmp byte [bp+si+a], imm` in place. Fixture 2488
+    // (the loop cond `a[i] != 0`).
+    if let Cond::Cmp { left: Expr::LocalIndexByte { local, index }, right: Expr::IntLit(k), .. } = cond
+        && index.fold(locals.inits).is_none()
+    {
+        crate::codegen::assign::emit_index_to_si(index, locals, out, fixups); // mov si,i
+        let d = locals.disp(*local);
+        out.push(0x80); out.push(bp_modrm(0x7A, d)); push_bp_disp(out, d);    // cmp byte [bp+si+a], imm
+        out.push((*k as u32 & 0xFF) as u8);
+        return;
+    }
     match cond {
         Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, locals, 0, out),
         Cond::Truthy(Expr::Param(idx)) => {
