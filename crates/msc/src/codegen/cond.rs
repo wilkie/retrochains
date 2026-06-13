@@ -855,6 +855,12 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
                 emit_cmp_global_imm(*idx, 0, out, fixups);
             }
         }
+        // A struct-global field as a truthiness operand (e.g. `s.x && s.y`) tests
+        // it in place with `cmp word/byte [g+off],0`, not a load-then-`or`.
+        // Fixture 3586.
+        Cond::Truthy(Expr::GlobalField { global, byte_off, size }) => {
+            emit_cmp_global_off_imm(*global, *byte_off, 0, *size == 1, out, fixups);
+        }
         // `<register local> OP const` → `cmp si,K` (83 /7 FE for imm8sx, else
         // 81 /7 FE imm16). Fixture 2245 (`i <= 10`).
         Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
