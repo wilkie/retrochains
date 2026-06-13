@@ -3263,11 +3263,22 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             && fields[1..fields.len() - 1].iter().all(|f| !(f.3 == 8 && f.2 % 8 == 0))
         {
             let n = fields.len();
-            // Last source operand → AX (handles byte widen / high-field shift+reuse).
-            let last = fields[n - 1];
-            emit_expr_to_ax(&Expr::BitField { base: last.0, byte_off: last.1, bit_off: last.2, bit_width: last.3 }, locals, out, fixups);
+            // The AX operand and the DX order depend on whether the LAST source
+            // field is a byte field (a `:8` high/low byte, bit_off%8==0). When it
+            // is, MSC parks it in AX (only AX widens a byte cheaply) and reads the
+            // middle fields into DX in REVERSE order — `f_{n-1}, f_{n-2}.., f0`
+            // (fixtures 1691/1879/2104). When every field is sub-word, MSC instead
+            // LEFT-ROTATES — `f1, f2, .., f_{n-1}, f0`: AX gets f1, DX gets f2..f_{n-1}
+            // in source order, CX gets f0 (fixtures 1694/2106/1880).
+            let last_is_byte = fields[n - 1].3 == 8 && fields[n - 1].2 % 8 == 0;
+            let (ax_field, dx_fields): (_, Vec<_>) = if last_is_byte {
+                (fields[n - 1], fields[1..n - 1].iter().rev().copied().collect())
+            } else {
+                (fields[1], fields[2..n].iter().copied().collect())
+            };
+            emit_expr_to_ax(&Expr::BitField { base: ax_field.0, byte_off: ax_field.1, bit_off: ax_field.2, bit_width: ax_field.3 }, locals, out, fixups);
             // Middle operands → DX, add into AX.
-            for f in fields[1..n - 1].iter().rev() {
+            for f in dx_fields {
                 bf_read_into_dx(f.0, f.1, f.2, f.3, locals, out, fixups);
                 out.extend_from_slice(&[0x03, 0xC2]); // add ax,dx
             }
