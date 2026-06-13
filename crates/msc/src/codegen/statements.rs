@@ -1746,6 +1746,24 @@ pub(crate) fn emit_return(
             emit_return(arm, locals, frame, return_int, return_long, out, fixups);
             return;
         } else if let Expr::Ternary { cond, then_arm, else_arm } = expr
+            && matches!(then_arm.as_ref(), Expr::IntLit(1))
+            && matches!(else_arm.as_ref(), Expr::IntLit(0))
+            && let Some(disp) = match cond.as_ref() {
+                Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i)
+                    && !locals.is_float_param(*i) => Some(param_disp(*i)),
+                Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i)
+                    && !locals.is_float_local(*i) => Some(locals.disp(*i)),
+                _ => None,
+            }
+        {
+            // `return x ? 1 : 0` (x a word param/local, truthy → boolean): the same
+            // carry trick as `return x != 0` — `cmp word [x],1; sbb ax,ax; inc ax`
+            // — not the two-epilogue ternary structure. Fixture 1944.
+            out.push(0x83); out.push(bp_modrm(0x7E, disp)); push_bp_disp(out, disp); out.push(0x01); // cmp word [bp+d],1
+            out.extend_from_slice(&[0x1B, 0xC0, 0x40]); // sbb ax,ax; inc ax
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
+            return;
+        } else if let Expr::Ternary { cond, then_arm, else_arm } = expr
             && cond.fold(locals.inits).is_none()
             && !is_ternary_select_operand(cond, then_arm, else_arm, locals)
         {

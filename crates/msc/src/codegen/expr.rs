@@ -2133,6 +2133,23 @@ fn simple_word_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     }
 }
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // A comparison in VALUE context (arg/return/assignment) whose operands both
+    // fold to constants materializes the 0/1 result directly — `mov ax,1` /
+    // `sub ax,ax` — unlike an if-condition, which keeps a runtime compare (that
+    // path is emit_cond_*, not this one). Fixture 1944 (`print(a == c)`, a==c==5).
+    if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+        && let (Some(l), Some(r)) = (left.fold(locals.inits), right.fold(locals.inits))
+    {
+        let k = match op {
+            BinOp::Eq => l == r, BinOp::Ne => l != r,
+            BinOp::Lt => l < r, BinOp::Le => l <= r,
+            BinOp::Gt => l > r, BinOp::Ge => l >= r,
+            _ => unreachable!(),
+        };
+        if k { out.extend_from_slice(&[0xB8, 0x01, 0x00]); } // mov ax,1
+        else { out.extend_from_slice(&[0x2B, 0xC0]); }       // sub ax,ax
+        return;
+    }
     // `e & 0xFFFF` is the identity in this int (AX) context — AX already holds a
     // 16-bit value, so MSC drops the mask (e.g. `(int)(y & 0xFFFF)` for a long
     // `y` is just its low word). Fixture 1946.
