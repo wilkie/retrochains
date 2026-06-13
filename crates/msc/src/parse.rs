@@ -5280,6 +5280,12 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     Ok(Expr::PreMutateIndexedGlobal { array, index, step: 1, is_byte: true }),
                 Expr::GlobalField { global, byte_off, size } =>
                     Ok(Expr::PreMutateGlobalField { global, byte_off, size, step: 1 }),
+                // `++a[K]` on a global array at a constant index — same in-place
+                // `inc word/byte [a+off]; mov ax,[a+off]` shape as a struct field.
+                Expr::Index { array, index } if matches!(index.as_ref(), Expr::IntLit(_)) =>
+                    Ok(Expr::PreMutateGlobalField { global: array, byte_off: (index.fold(&[]).unwrap() * 2) as u16, size: 2, step: 1 }),
+                Expr::IndexByte { array, index } if matches!(index.as_ref(), Expr::IntLit(_)) =>
+                    Ok(Expr::PreMutateGlobalField { global: array, byte_off: index.fold(&[]).unwrap() as u16, size: 1, step: 1 }),
                 other => Ok(Expr::BinOp {
                     op: BinOp::Add,
                     left: Box::new(other),
@@ -5299,6 +5305,10 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 Expr::DerefByte { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: true }),
                 Expr::GlobalField { global, byte_off, size } =>
                     Ok(Expr::PreMutateGlobalField { global, byte_off, size, step: -1 }),
+                Expr::Index { array, index } if matches!(index.as_ref(), Expr::IntLit(_)) =>
+                    Ok(Expr::PreMutateGlobalField { global: array, byte_off: (index.fold(&[]).unwrap() * 2) as u16, size: 2, step: -1 }),
+                Expr::IndexByte { array, index } if matches!(index.as_ref(), Expr::IntLit(_)) =>
+                    Ok(Expr::PreMutateGlobalField { global: array, byte_off: index.fold(&[]).unwrap() as u16, size: 1, step: -1 }),
                 other => Ok(Expr::BinOp {
                     op: BinOp::Sub,
                     left: Box::new(other),
