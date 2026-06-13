@@ -2246,6 +2246,29 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         }
         return;
     }
+    // `q->a + q->b` — two word struct-fields through the SAME pointer (local or
+    // param): load the pointer into BX once, then `mov ax,[bx+b]; add ax,[bx+a]`
+    // (right field into AX, left added in place). Reuse a live AX that already
+    // holds the pointer (right after `q = get()`). Fixture 2335.
+    if matches!(op, BinOp::Add)
+        && let Some((ll, li, lo)) = deref_field_ptr(left)
+        && let Some((rl, ri, ro)) = deref_field_ptr(right)
+        && ll == rl && li == ri
+    {
+        let qdisp = if ll { locals.disp(li) } else { param_disp(li) };
+        let mut load = vec![0x8B, bp_modrm(0x46, qdisp)]; push_bp_disp(&mut load, qdisp);  // mov ax,[q]
+        let mut store = vec![0x89, bp_modrm(0x46, qdisp)]; push_bp_disp(&mut store, qdisp); // mov [q],ax
+        if ax_holds_word_operand(out, &load, &store, locals.last_branch_barrier.get()) {
+            out.extend_from_slice(&[0x8B, 0xD8]); // mov bx,ax
+        } else {
+            out.push(0x8B); out.push(bp_modrm(0x5E, qdisp)); push_bp_disp(out, qdisp); // mov bx,[q]
+        }
+        if ro == 0 { out.extend_from_slice(&[0x8B, 0x07]); }            // mov ax,[bx]
+        else { out.extend_from_slice(&[0x8B, 0x47, ro as u8]); }        // mov ax,[bx+b]
+        if lo == 0 { out.extend_from_slice(&[0x03, 0x07]); }            // add ax,[bx]
+        else { out.extend_from_slice(&[0x03, 0x47, lo as u8]); }        // add ax,[bx+a]
+        return;
+    }
     // `<simple memory operand> + <pointer/field deref>` (e.g. `n + s[0]`, or
     // `n1.v + n1.next->v`): MSC always computes the DEREF operand into AX first —
     // a deref clobbers AX and can't be an `add ax,[mem]` source — then folds the
@@ -2829,6 +2852,15 @@ pub(crate) fn bf_load_word_cx(base: BitBase, byte_off: u16, locals: &Locals<'_>,
             true
         }
         BitBase::DerefParam(_) => false,
+    }
+}
+/// `(is_local, idx, byte_off)` for a WORD struct-field deref through a pointer
+/// local/param (`q->f`). Used to detect `q->a + q->b` over one shared pointer.
+fn deref_field_ptr(e: &Expr) -> Option<(bool, usize, u16)> {
+    match e {
+        Expr::DerefLocalField { ptr_local, byte_off, size: 2 } => Some((true, *ptr_local, *byte_off)),
+        Expr::DerefParamField { ptr_param, byte_off, size: 2 } => Some((false, *ptr_param, *byte_off)),
+        _ => None,
     }
 }
 /// A word-sized memory operand that `emit_binop_right` can fold as a single
