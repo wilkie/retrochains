@@ -66,6 +66,10 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     // deref of another param — the source deref uses SI.
                     || matches!(target, AssignTarget::DerefParam(d)
                         if deref_param_src_is_param(value, *d))
+                    // `*a OP= *b` (in-place op through a pointer param whose RHS
+                    // derefs another param): the source deref uses SI. Fixture 3638.
+                    || matches!(target, AssignTarget::DerefParam(d)
+                        if deref_param_inplace_src_is_param(value, *d))
                     // `*d++ = *s++` reads the source through SI so dst (BX) survives.
                     || matches!(target, AssignTarget::DerefPostMutateParam { .. }
                         if matches!(value, Expr::PostIncDeref { .. }))
@@ -203,6 +207,26 @@ pub(crate) fn body_needs_di_si(stmts: &[Stmt], inits: &[Option<i32>]) -> bool {
 /// `*Param(s) ± K` with `s != dst`? Used by body_needs_si (no pointee-width
 /// info available here; the corpus never mixes widths so the structural test
 /// agrees with the codegen path).
+/// `*dst OP= *src` where the RHS is a deref of a DIFFERENT pointer param
+/// (op ∈ add/sub/and/or/xor). Mirrors the emit arm in `emit_assign_deref_param`
+/// that lowers it to `mov bx,[dst]; mov si,[src]; mov ax,[si]; OP [bx],ax`.
+fn deref_param_inplace_src_is_param(value: &Expr, dst: usize) -> bool {
+    let Expr::BinOp { op, left, right } = value else { return false };
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
+        return false;
+    }
+    let left_is_dst = matches!(left.as_ref(),
+        Expr::DerefWord { ptr } | Expr::DerefByte { ptr }
+            if matches!(ptr.as_ref(), Expr::Param(i) if *i == dst));
+    let right_src = match right.as_ref() {
+        Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => match ptr.as_ref() {
+            Expr::Param(s) => Some(*s),
+            _ => None,
+        },
+        _ => None,
+    };
+    left_is_dst && matches!(right_src, Some(s) if s != dst)
+}
 fn deref_param_src_is_param(value: &Expr, dst: usize) -> bool {
     fn src_of(e: &Expr) -> Option<usize> {
         match e {

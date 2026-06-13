@@ -1418,6 +1418,41 @@ pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &L
         }
         return;
     }
+    // `*a OP= *b` (in-place add/sub/bitop through pointer params whose RHS is a
+    // deref of ANOTHER pointer param): MSC loads the target pointer into BX, the
+    // source pointer into SI, reads `*b` into AX, then applies the op in place:
+    // `mov bx,[a]; mov si,[b]; mov ax,[si]; OP [bx],ax`. Requires a push-SI
+    // frame (body_needs_si recognizes the same shape). Fixture 3638 (xor-swap).
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left.as_ref(),
+            Expr::DerefWord { ptr } | Expr::DerefByte { ptr }
+                if matches!(ptr.as_ref(), Expr::Param(i) if *i == param_idx))
+        && let (Expr::DerefWord { ptr: rptr } | Expr::DerefByte { ptr: rptr }) = right.as_ref()
+        && let Expr::Param(src) = rptr.as_ref()
+        && *src != param_idx
+        && (locals.param_pointee_size(*src) == 1) == is_byte
+    {
+        let sdisp = param_disp(*src);
+        out.extend_from_slice(&[0x8B, 0x5E, pdisp as u8]);                       // mov bx,[bp+a]
+        out.push(0x8B); out.push(bp_modrm(0x76, sdisp)); push_bp_disp(out, sdisp); // mov si,[bp+b]
+        if is_byte {
+            out.extend_from_slice(&[0x8A, 0x04]); // mov al,[si]
+            let opc = match op {
+                BinOp::Add => 0x00u8, BinOp::Sub => 0x28, BinOp::BitAnd => 0x20,
+                BinOp::BitOr => 0x08, BinOp::BitXor => 0x30, _ => unreachable!(),
+            };
+            out.extend_from_slice(&[opc, 0x07]); // OP byte [bx],al
+        } else {
+            out.extend_from_slice(&[0x8B, 0x04]); // mov ax,[si]
+            let opc = match op {
+                BinOp::Add => 0x01u8, BinOp::Sub => 0x29, BinOp::BitAnd => 0x21,
+                BinOp::BitOr => 0x09, BinOp::BitXor => 0x31, _ => unreachable!(),
+            };
+            out.extend_from_slice(&[opc, 0x07]); // OP word [bx],ax
+        }
+        return;
+    }
     // `*dst = *src` / `*dst = *src ± K` (copy through one pointer param from a
     // deref of ANOTHER pointer param): dst stays in BX for the store, so the
     // source deref uses SI. `mov bx,[dst]; mov si,[src]; mov ax,[si]; [op];
