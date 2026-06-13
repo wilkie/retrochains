@@ -526,6 +526,33 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             return;
         }
     }
+    // `<ptr local/param> OP <&arr +/- K>` (loop bound vs an address expr):
+    // compute the address into AX (`lea ax,[bp+a+K]`), then `cmp [p],ax` (a
+    // cmp mem,reg) — not parking the address in BX and reloading p. Only fires
+    // when the RHS is an address-of expression, so other comparisons are
+    // untouched. Stack-resident pointer only (an enregistered one falls through
+    // to the register paths below). Fixture 1814 (`p < a + 5`).
+    if let Cond::Cmp { left, right, .. } = cond {
+        let is_addr = |e: &Expr| match e {
+            Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_) | Expr::AddrOfIndexedGlobal { .. } => true,
+            Expr::BinOp { op: BinOp::Add | BinOp::Sub, left: l, right: r } =>
+                matches!(l.as_ref(), Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_))
+                    && matches!(r.as_ref(), Expr::IntLit(_)),
+            _ => false,
+        };
+        let pdisp = match left {
+            Expr::Local(i) if locals.reg_for_local(*i).is_none() => Some(locals.disp(*i)),
+            Expr::Param(i) => Some(param_disp(*i)),
+            _ => None,
+        };
+        if let Some(disp) = pdisp
+            && is_addr(right)
+        {
+            emit_expr_to_ax(right, locals, out, fixups);   // lea ax,[bp+a+K]
+            out.push(0x39); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // cmp [bp+p],ax
+            return;
+        }
+    }
     // Arithmetic result compared against zero — MSC reuses the ALU flags
     // rather than a separate compare:
     //   `(x - y) == 0` / `!= 0` → rewrite to `Cmp(op, x, y)`; the `cmp`
