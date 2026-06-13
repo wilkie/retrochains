@@ -416,6 +416,45 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             }
             return;
         }
+        AssignTarget::StructLocalFromGlobalCopy { dst, src, bytes } => {
+            let dd = locals.disp(dst);
+            let g_moffs = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, opcode: u8, g: usize| {
+                let bo = out.len();
+                out.push(opcode);
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+            };
+            if bytes > 4 {
+                // movsw from the DGROUP global into the stack local: di=dst,
+                // si=OFFSET src, es=ss. Fixture 416.
+                out.push(0x8D); out.push(bp_modrm(0x7E, dd)); push_bp_disp(out, dd); // lea di,[bp+dst]
+                g_moffs(out, fixups, 0xBE, src); // mov si, OFFSET src
+                out.extend_from_slice(&[0x16, 0x07]); // push ss; pop es
+                let words = bytes / 2;
+                if words <= 4 {
+                    for _ in 0..words { out.push(0xA5); } // movsw
+                } else {
+                    out.push(0xB9); out.extend_from_slice(&words.to_le_bytes()); // mov cx,words
+                    out.extend_from_slice(&[0xF3, 0xA5]); // rep movsw
+                }
+                return;
+            }
+            // ≤4 bytes: load the global words via AX/DX moffs, store to local.
+            // Fixture 415.
+            g_moffs(out, fixups, 0xA1, src); // mov ax,[src]
+            if bytes > 2 {
+                out.extend_from_slice(&[0x8B, 0x16]); // mov dx,[src+2]
+                let bo = out.len();
+                out.extend_from_slice(&2u16.to_le_bytes());
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: src } });
+            }
+            out.push(0x89); out.push(bp_modrm(0x46, dd)); push_bp_disp(out, dd); // mov [dst],ax
+            if bytes > 2 {
+                let h = dd + 2;
+                out.push(0x89); out.push(bp_modrm(0x56, h)); push_bp_disp(out, h); // mov [dst+2],dx
+            }
+            return;
+        }
         AssignTarget::PtrIndexByte { ptr, disp } => {
             return emit_assign_ptr_index_byte(ptr, disp, value, locals, out, fixups);
         }

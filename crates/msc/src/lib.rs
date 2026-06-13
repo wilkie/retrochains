@@ -946,6 +946,11 @@ pub enum AssignTarget {
     /// (≤4 bytes). Loads the source into AX (≤2) / DX:AX (3-4) and stores both
     /// words into the destination. The Assign's `value` field is unused.
     StructLocalCopy { dst: usize, src: usize, bytes: u16 },
+    /// `<struct-local> = <struct-global>;` — whole-struct copy from a global
+    /// into a stack local. `dst` is the local idx, `src` the global idx. ≤4
+    /// bytes loads the global via AX/DX moffs and stores into the local;
+    /// larger copies via `movsw` with `es=ss` (dst on stack). Fixtures 415/416.
+    StructLocalFromGlobalCopy { dst: usize, src: usize, bytes: u16 },
     /// `<int-global>[i] = <expr>;` — runtime index into an int-array global.
     /// Codegen: `mov bx,[i]; shl bx,1; <value>; mov [bx+&a], ax` (BX-based).
     IndexedGlobalVar { array: usize, index: Box<Expr> },

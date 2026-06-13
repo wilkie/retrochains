@@ -3772,6 +3772,20 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     value: Expr::IntLit(0),
                 });
             }
+            // Whole-struct copy `a = g;` (struct local from a struct global).
+            if let AssignTarget::Local(dst) = target
+                && let Expr::Global(src) = value
+                && let Some(sidx) = p.local_specs[dst].struct_idx
+                && p.globals[src].struct_idx == Some(sidx)
+            {
+                let padded = p.structs[sidx].total_bytes.div_ceil(2) * 2;
+                let bytes = u16::try_from(padded).expect("struct size fits");
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign {
+                    target: AssignTarget::StructLocalFromGlobalCopy { dst, src, bytes },
+                    value: Expr::IntLit(0),
+                });
+            }
             // `b = a++;` — post-inc/dec on the assigned value. The
             // RHS captures a's pre-update value; then a is updated.
             // We expand to `b = a; a = a ± 1;`. Fixtures 1244, 1154.

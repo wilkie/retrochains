@@ -439,7 +439,10 @@ pub(crate) fn emit_function(
     // A whole-struct copy `g1 = g2;` of >4 bytes lowers to `rep movsw`, needing
     // DI+SI saved. Fixture 3612.
     let copies_big_struct = body.iter().any(|s| matches!(s,
-        Stmt::Assign { target: AssignTarget::StructGlobalCopy { bytes, .. } | AssignTarget::StructLocalCopy { bytes, .. }, .. }
+        Stmt::Assign { target:
+            AssignTarget::StructGlobalCopy { bytes, .. }
+            | AssignTarget::StructLocalCopy { bytes, .. }
+            | AssignTarget::StructLocalFromGlobalCopy { bytes, .. }, .. }
             if *bytes > 4));
     let returns_big_struct = func.return_struct_bytes > 4 || receives_big_struct || copies_big_struct;
     // `register int` locals are accessed via SI (1st) / DI (2nd), saved across
