@@ -336,7 +336,8 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
                     if is_byte { out.push((v as u32 & 0xFF) as u8); }
                     else { out.extend_from_slice(&((v as u32 & 0xFFFF) as u16).to_le_bytes()); }
                 } else {
-                    emit_expr_to_ax(&value, locals, out, fixups);
+                    if is_byte { emit_byte_rhs_to_al(&value, locals, out, fixups); }
+                    else { emit_expr_to_ax(&value, locals, out, fixups); }
                     out.push(st); out.push(bx_modrm(off)); push_off(out, off);
                 }
             } else {
@@ -350,7 +351,8 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
                     if is_byte { out.push((v as u32 & 0xFF) as u8); }
                     else { out.extend_from_slice(&((v as u32 & 0xFFFF) as u16).to_le_bytes()); }
                 } else {
-                    emit_expr_to_ax(&value, locals, out, fixups);
+                    if is_byte { emit_byte_rhs_to_al(&value, locals, out, fixups); }
+                    else { emit_expr_to_ax(&value, locals, out, fixups); }
                     out.push(st); out.push(0x00); // [bx+si]
                 }
             }
