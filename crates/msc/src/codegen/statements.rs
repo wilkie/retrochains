@@ -2589,6 +2589,119 @@ fn emit_for_continue_break(
     out.push(break_disp as u8);
     true
 }
+/// Match a for-loop body `{ PREFIX...; while(W) WBODY }` whose LAST statement is a
+/// while-loop (and PREFIX has no return/loop-control, WBODY no break/continue).
+/// MSC fuses the inner while's exit into the OUTER step. Returns the prefix
+/// statements, the inner condition, and the inner body. Fixture 1382.
+fn for_body_prefix_while<'a>(body: &'a Stmt, locals: &Locals<'_>) -> Option<(Vec<&'a Stmt>, &'a Cond, &'a Stmt)> {
+    let Stmt::Block(ss) = body else { return None; };
+    if ss.len() < 2 { return None; }
+    let Stmt::While { cond: w, body: wbody } = ss.last().unwrap() else { return None; };
+    let prefix: Vec<&Stmt> = ss[..ss.len() - 1].iter().collect();
+    if prefix.iter().any(|s| stmt_has_loop_break(s) || stmt_always_returns(s, locals)) {
+        return None;
+    }
+    if stmt_has_loop_break(wbody) || stmt_always_returns(wbody, locals) {
+        return None;
+    }
+    Some((prefix, w, wbody.as_ref()))
+}
+/// Emit `for(init; C; step) { PREFIX; while(W) WBODY }` in MSC's fused form, where
+/// the inner while's exit jumps straight to the OUTER step (C, W simple `Cmp`):
+/// ```text
+///   init; jmp COND
+///   STEP: <step>
+///   COND: C   j!C EXIT          ; outer guard
+///         <PREFIX>
+///   INNER: W  j!W STEP          ; inner exit IS the outer back-edge
+///         <WBODY>; jmp INNER
+///   EXIT:
+/// ```
+/// Returns false (emitting nothing) on any displacement overflow. Fixture 1382.
+fn emit_for_trailing_while(
+    init: &Stmt,
+    cond_c: &Cond,
+    step: &Stmt,
+    prefix: &[&Stmt],
+    cond_w: &Cond,
+    wbody: &Stmt,
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> bool {
+    use crate::codegen::cond::emit_cond_cmp;
+    let (Cond::Cmp { op: cop, .. }, Cond::Cmp { op: wop, .. }) = (cond_c, cond_w) else { return false; };
+    let unsign = |j: u8, c: &Cond| if cmp_is_unsigned(c, locals) { to_unsigned_jcc(j) } else { j };
+    let jcc_c = unsign(inverted_jcc(*cop), cond_c);   // exit when C false
+    let jcc_w = unsign(inverted_jcc(*wop), cond_w);   // inner exit (→ STEP) when W false
+    // Pre-build every segment; nothing reaches `out` until displacements check out.
+    let mut step_buf = Vec::new();
+    let mut step_fx: Vec<Fixup> = Vec::new();
+    emit_stmt(step, locals, frame, return_int, return_long, &mut step_buf, &mut step_fx);
+    let mut c_buf = Vec::new();
+    let mut c_fx: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond_c, locals, &mut c_buf, &mut c_fx);
+    let mut prefix_buf = Vec::new();
+    let mut prefix_fx: Vec<Fixup> = Vec::new();
+    for s in prefix { emit_stmt(s, locals, frame, return_int, return_long, &mut prefix_buf, &mut prefix_fx); }
+    let mut w_buf = Vec::new();
+    let mut w_fx: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond_w, locals, &mut w_buf, &mut w_fx);
+    let mut wbody_buf = Vec::new();
+    let mut wbody_fx: Vec<Fixup> = Vec::new();
+    emit_stmt(wbody, locals, frame, return_int, return_long, &mut wbody_buf, &mut wbody_fx);
+    // STEP is even-aligned (the jmp pad guarantees it), so all parities below are
+    // relative to STEP=0. Pad after the inner `jmp INNER` so EXIT is even.
+    let inner_rel = step_buf.len() + c_buf.len() + 2 + prefix_buf.len();
+    let after_jmp_inner_rel = inner_rel + w_buf.len() + 2 + wbody_buf.len() + 2;
+    let exit_pad = after_jmp_inner_rel % 2;
+    // Back-edges (position-independent) and the guard forward jump — validate up front.
+    let w_back = step_buf.len() + c_buf.len() + 2 + prefix_buf.len() + w_buf.len() + 2; // STEP ← after j!W
+    let jmp_inner_back = w_buf.len() + 2 + wbody_buf.len() + 2;                          // INNER ← after jmp
+    let guard_fwd = prefix_buf.len() + w_buf.len() + 2 + wbody_buf.len() + 2 + exit_pad;
+    if i8::try_from(w_back).is_err() || i8::try_from(jmp_inner_back).is_err()
+        || i8::try_from(guard_fwd).is_err() { return false; }
+    emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
+    let needs_pad = (out.len() + 2) % 2 != 0;
+    let jmp_pad = usize::from(needs_pad);
+    let jmp_disp = i8::try_from(step_buf.len() + jmp_pad).expect("trailing-while jmp fits");
+    out.push(0xEB);
+    out.push(jmp_disp as u8);
+    if needs_pad { out.push(0x90); }
+    let step_base = out.len();
+    out.extend_from_slice(&step_buf);
+    for mut f in step_fx { f.body_offset += step_base; fixups.push(f); }
+    // COND: guard + forward exit jcc.
+    let c_base = out.len();
+    out.extend_from_slice(&c_buf);
+    for mut f in c_fx { f.body_offset += c_base; fixups.push(f); }
+    out.push(jcc_c);
+    out.push(guard_fwd as u8);
+    // PREFIX.
+    let prefix_base = out.len();
+    out.extend_from_slice(&prefix_buf);
+    for mut f in prefix_fx { f.body_offset += prefix_base; fixups.push(f); }
+    // INNER cond + exit jcc to STEP (backward).
+    let inner_base = out.len();
+    let w_base = out.len();
+    out.extend_from_slice(&w_buf);
+    for mut f in w_fx { f.body_offset += w_base; fixups.push(f); }
+    out.push(jcc_w);
+    let w_disp = i8::try_from(step_base as i32 - (out.len() as i32 + 1)).expect("trailing-while inner exit fits");
+    out.push(w_disp as u8);
+    // WBODY, then jmp back to INNER (backward).
+    let wbody_base = out.len();
+    out.extend_from_slice(&wbody_buf);
+    for mut f in wbody_fx { f.body_offset += wbody_base; fixups.push(f); }
+    out.push(0xEB);
+    let inner_disp = i8::try_from(inner_base as i32 - (out.len() as i32 + 1)).expect("trailing-while loop-back fits");
+    out.push(inner_disp as u8);
+    if exit_pad == 1 { out.push(0x90); }
+    true
+}
 /// Emit the fused-if for-loop (see [`for_body_single_if_return`]):
 /// ```text
 ///   init
@@ -2785,6 +2898,17 @@ pub(crate) fn emit_for(
         && matches!(c1, Cond::Cmp { .. })
         && matches!(c2, Cond::Cmp { .. })
         && emit_for_continue_break(init, cond, step, c1, c2, &rest,
+            locals, frame, return_int, return_long, out, fixups)
+    {
+        return;
+    }
+    // `for(init; C; step) { PREFIX; while(W) WBODY }`: MSC emits the outer loop in
+    // the cond-in-middle form and fuses the inner while's exit into the outer step.
+    // Fixture 1382.
+    if matches!(cond, Cond::Cmp { .. })
+        && let Some((prefix, w, wbody)) = for_body_prefix_while(body_stmt, locals)
+        && matches!(w, Cond::Cmp { .. })
+        && emit_for_trailing_while(init, cond, step, &prefix, w, wbody,
             locals, frame, return_int, return_long, out, fixups)
     {
         return;
