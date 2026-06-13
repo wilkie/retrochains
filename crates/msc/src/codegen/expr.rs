@@ -2214,6 +2214,37 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         }
         return;
     }
+    // `<int-scalar> + <char deref>` (e.g. `n + s[0]` for a global `char *s`):
+    // MSC evaluates the CHAR operand first — a byte read clobbers AL and needs a
+    // cbw, so doing it first avoids reloading the int — then folds the int in
+    // place: `mov bx,[s]; mov al,[bx]; cbw; add ax,[n]`. Applies in either source
+    // order (add commutes, neither operand has side effects). Fixture 2565.
+    if matches!(op, BinOp::Add) {
+        let is_int_scalar = |e: &Expr| match e {
+            Expr::Global(g) => !locals.is_char_global(*g) && !locals.is_long_global(*g),
+            Expr::Local(l) => locals.size(*l) == 2 && !locals.is_long_local(*l)
+                && !locals.is_array_local(*l) && !locals.is_float_local(*l)
+                && locals.reg_for_local(*l).is_none(),
+            Expr::Param(p) => !locals.is_char_param(*p) && !locals.is_long_param(*p)
+                && !locals.is_float_param(*p),
+            _ => false,
+        };
+        let is_char_deref = |e: &Expr| match e {
+            Expr::DerefByte { .. } => true,
+            // `p[K]` on a char-element global pointer reads a byte + cbw.
+            Expr::PtrIndexByte { ptr, index } =>
+                locals.global_elem_size(*ptr) == 1 && index.fold(locals.inits).is_some(),
+            _ => false,
+        };
+        let pair = if is_char_deref(left) && is_int_scalar(right) { Some((left, right)) }
+            else if is_char_deref(right) && is_int_scalar(left) { Some((right, left)) }
+            else { None };
+        if let Some((ch, int_op)) = pair {
+            emit_expr_to_ax(ch, locals, out, fixups);            // mov bx,[s]; mov al,[bx]; cbw
+            emit_binop_right(BinOp::Add, int_op, locals, out, fixups); // add ax,[n]
+            return;
+        }
+    }
     // `make().a OP make().b` — two by-value struct-return field reads. Eval both
     // calls left-to-right (each spilling DX:AX to its temp), then combine: left's
     // field is reloaded from its temp (AX was clobbered by the 2nd call), right's
