@@ -1973,6 +1973,120 @@ pub(crate) fn func_has_float_arg_call(func: &Function) -> bool {
     !v.is_empty()
 }
 
+/// The order in which MSC assigns CONST string-pool labels: the order each
+/// string literal is FIRST REFERENCED by the emitted code, not lexical order.
+/// The only place this diverges from lexical order is call arguments, which
+/// cdecl pushes (and so loads their `OFFSET $SG` immediates) right-to-left — so
+/// `strcmp("abc","abd")` numbers `"abd"` (arg 2, pushed first) before `"abc"`.
+/// Fixtures 3973, 2196. The walk mirrors codegen's evaluation order; any string
+/// it doesn't reach is appended in lexical order so the permutation is total.
+fn string_reference_order(unit: &Unit) -> Vec<usize> {
+    fn mark(idx: usize, order: &mut Vec<usize>, seen: &mut [bool]) {
+        if idx < seen.len() && !seen[idx] {
+            seen[idx] = true;
+            order.push(idx);
+        }
+    }
+    fn walk_expr(e: &Expr, order: &mut Vec<usize>, seen: &mut [bool]) {
+        match e {
+            Expr::StrLit(i) => mark(*i, order, seen),
+            Expr::StrLitByte { string_idx, .. } => mark(*string_idx, order, seen),
+            // cdecl args load their OFFSET immediates right-to-left.
+            Expr::Call { args, .. } | Expr::CallStructField { args, .. } => {
+                for a in args.iter().rev() { walk_expr(a, order, seen); }
+            }
+            Expr::CallPtr { target, args } => {
+                for a in args.iter().rev() { walk_expr(a, order, seen); }
+                walk_expr(target, order, seen);
+            }
+            Expr::BinOp { left, right, .. } => {
+                walk_expr(left, order, seen);
+                walk_expr(right, order, seen);
+            }
+            Expr::Ternary { cond, then_arm, else_arm } => {
+                walk_expr(cond, order, seen);
+                walk_expr(then_arm, order, seen);
+                walk_expr(else_arm, order, seen);
+            }
+            Expr::Seq { sides, value } => {
+                for s in sides { walk_stmt(s, order, seen); }
+                walk_expr(value, order, seen);
+            }
+            Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
+                walk_expr(ptr, order, seen);
+            }
+            Expr::Index { index, .. } | Expr::IndexByte { index, .. }
+            | Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. }
+            | Expr::ParamIndex { index, .. } | Expr::PtrIndexByte { index, .. } => {
+                walk_expr(index, order, seen);
+            }
+            Expr::Index2D { row, col, .. } => {
+                walk_expr(row, order, seen);
+                walk_expr(col, order, seen);
+            }
+            Expr::AssignExpr { value, .. } => walk_expr(value, order, seen),
+            Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => walk_expr(value, order, seen),
+            _ => {}
+        }
+    }
+    fn walk_cond(c: &Cond, order: &mut Vec<usize>, seen: &mut [bool]) {
+        match c {
+            Cond::Truthy(e) => walk_expr(e, order, seen),
+            Cond::Cmp { left, right, .. } => { walk_expr(left, order, seen); walk_expr(right, order, seen); }
+            Cond::And(a, b) | Cond::Or(a, b) => { walk_cond(a, order, seen); walk_cond(b, order, seen); }
+        }
+    }
+    fn walk_stmt(s: &Stmt, order: &mut Vec<usize>, seen: &mut [bool]) {
+        match s {
+            Stmt::Return(e) | Stmt::ExprStmt(e) => walk_expr(e, order, seen),
+            Stmt::Assign { value, .. } => walk_expr(value, order, seen),
+            Stmt::If { cond, then_branch, else_branch } => {
+                walk_cond(cond, order, seen);
+                walk_stmt(then_branch, order, seen);
+                if let Some(e) = else_branch { walk_stmt(e, order, seen); }
+            }
+            Stmt::While { cond, body } => { walk_cond(cond, order, seen); walk_stmt(body, order, seen); }
+            Stmt::DoWhile { body, cond } => { walk_stmt(body, order, seen); walk_cond(cond, order, seen); }
+            Stmt::For { init, cond, step, body } => {
+                walk_stmt(init, order, seen);
+                walk_cond(cond, order, seen);
+                walk_stmt(step, order, seen);
+                walk_stmt(body, order, seen);
+            }
+            Stmt::Block(ss) => for s in ss { walk_stmt(s, order, seen); },
+            Stmt::Switch { scrutinee, cases } => {
+                walk_expr(scrutinee, order, seen);
+                for arm in cases { for s in &arm.body { walk_stmt(s, order, seen); } }
+            }
+            _ => {}
+        }
+    }
+    let mut order: Vec<usize> = Vec::new();
+    let mut seen = vec![false; unit.strings.len()];
+    // Walk top-level declarations in source order: a file-scope string
+    // initializer (`char *s = "lit";`) is referenced before the function code.
+    for d in &unit.decl_order {
+        match d {
+            TopDecl::Global(gi) => {
+                if let Some(init) = &unit.globals[*gi].init {
+                    for v in init {
+                        if let GlobalInit::StrAddr(i) = v { mark(*i, &mut order, &mut seen); }
+                    }
+                }
+            }
+            TopDecl::Function(fi) => {
+                for s in &unit.functions[*fi].body { walk_stmt(s, &mut order, &mut seen); }
+            }
+            TopDecl::ExternProto(_) => {}
+        }
+    }
+    // Any string the walk didn't reach (unusual shapes) keeps lexical order.
+    for i in 0..unit.strings.len() {
+        mark(i, &mut order, &mut seen);
+    }
+    order
+}
+
 /// Produce the OBJ bytes for `cl /c /AS <source>` compiling the
 /// translation unit `unit`. `source_filename` goes into THEADR
 /// uppercased the same way CL does it on the command line.
@@ -2194,11 +2308,15 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             const_global_offsets.push(None);
         }
     }
-    let mut string_offsets: Vec<usize> = Vec::with_capacity(unit.strings.len());
-    for (i, s) in unit.strings.iter().enumerate() {
-        string_offsets.push(const_cursor);
-        const_cursor += s.len();
-        if i + 1 < unit.strings.len() && const_cursor % 2 != 0 {
+    // Strings are laid out (and labelled) in first-reference order, not lexical
+    // order — see `string_reference_order`. `string_offsets` stays indexed by
+    // string index; the CONST data LEDATA below also walks `str_order`.
+    let str_order = string_reference_order(unit);
+    let mut string_offsets: Vec<usize> = vec![0; unit.strings.len()];
+    for (pos, &idx) in str_order.iter().enumerate() {
+        string_offsets[idx] = const_cursor;
+        const_cursor += unit.strings[idx].len();
+        if pos + 1 < str_order.len() && const_cursor % 2 != 0 {
             const_cursor += 1;
         }
     }
@@ -3041,17 +3159,18 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // Fixtures: 4110 (1 string), 4128 (2 even-length → 1 LEDATA),
     // 4113 (2 odd-length → 2 LEDATAs with a gap), 4132 (mixed).
     if !unit.strings.is_empty() {
-        let mut current_start = string_offsets[0];
+        let mut current_start = string_offsets[str_order[0]];
         let mut current_bytes: Vec<u8> = Vec::new();
-        for (i, s) in unit.strings.iter().enumerate() {
+        for (pos, &idx) in str_order.iter().enumerate() {
+            let s = &unit.strings[idx];
             current_bytes.extend_from_slice(s);
-            let next_aligned = i + 1 < unit.strings.len()
-                && (string_offsets[i] + s.len()) != string_offsets[i + 1];
+            let next_aligned = pos + 1 < str_order.len()
+                && (string_offsets[idx] + s.len()) != string_offsets[str_order[pos + 1]];
             if next_aligned {
                 let off = u16::try_from(current_start).expect("CONST offset fits");
                 b.write_ledata16(3, off, &current_bytes);
                 current_bytes.clear();
-                current_start = string_offsets[i + 1];
+                current_start = string_offsets[str_order[pos + 1]];
             }
         }
         if !current_bytes.is_empty() {
