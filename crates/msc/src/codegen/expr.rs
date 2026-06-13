@@ -3406,7 +3406,9 @@ pub(crate) fn call_chain<'a>(op: BinOp, left: &'a Expr, right: &'a Expr, inits: 
     if !collect_call_chain(left, &mut calls, &mut ops) { return None; }
     ops.push(op);
     calls.push(right);
-    if !(2..=3).contains(&calls.len()) { return None; }
+    // 2-3 calls park in SI/DI; 4-6 also spill to frame temps (SI, DI, then up to
+    // 3 word slots below the locals). Fixture 1954 (5 calls).
+    if !(2..=6).contains(&calls.len()) { return None; }
     if !calls[..calls.len() - 1].iter().all(|c| eligible_left_call(c, inits)) { return None; }
     Some((calls, ops))
 }
@@ -3558,11 +3560,12 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     // results. Fixtures 1277/1536 (2 calls), 2305/2343 (3 calls).
     if let Some((calls, ops)) = call_chain(op, left, right, locals.inits) {
         let n = calls.len();
+        // Park index 0/1 use SI/DI; index ≥2 spills to frame temps one slot below
+        // the locals (shallowest first), reserved by the prologue. Fixture 1954
+        // (5 calls → SI, DI, [bp-2], [bp-4]).
+        let temp_disp = |k: usize| locals.deepest_local_disp() - 2 - 2 * (k as i16 - 2);
         // Rightmost call → AX (full call: args pushed, call, cleanup).
         emit_expr_to_ax(calls[n - 1], locals, out, fixups);
-        // mov si,ax / mov di,ax park opcodes; add/sub ax,si / ax,di modrm.
-        let park_mov = [0xF0u8, 0xF8]; // mov si,ax ; mov di,ax
-        let combine_modrm = [0xC6u8, 0xC7]; // op ax,si ; op ax,di
         for k in 0..n - 1 {
             let call = calls[n - 2 - k];
             let (largs, name, target): (&[Expr], Option<&str>, Option<&Expr>) = match call {
@@ -3576,7 +3579,12 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
                 emit_arg_to_cx(arg, locals, out, fixups);
                 out.push(0x51); // push cx
             }
-            out.extend_from_slice(&[0x8B, park_mov[k]]); // park the running result
+            // Park the running result: SI (k=0), DI (k=1), else a frame temp.
+            match k {
+                0 => out.extend_from_slice(&[0x8B, 0xF0]), // mov si,ax
+                1 => out.extend_from_slice(&[0x8B, 0xF8]), // mov di,ax
+                _ => { let d = temp_disp(k); out.push(0x89); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); } // mov [temp],ax
+            }
             let char_ret = if let Some(nm) = name {
                 let sym = callee_symbol_full(nm, locals.pascal_fns.contains(nm), locals.static_fns.contains(nm));
                 let bo = out.len();
@@ -3592,11 +3600,16 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             }
             if char_ret { out.push(0x98); } // cbw
         }
-        // Combine: AX holds calls[0]; fold each op in source order with the reg
-        // that parked the corresponding operand (op[j] ↔ park index n-2-j).
+        // Combine: AX holds calls[0]; fold each op in source order with the reg /
+        // temp that parked the corresponding operand (op[j] ↔ park index n-2-j).
         for j in 0..n - 1 {
             let base = if matches!(ops[j], BinOp::Add) { 0x03u8 } else { 0x2B };
-            out.extend_from_slice(&[base, combine_modrm[n - 2 - j]]);
+            let idx = n - 2 - j;
+            match idx {
+                0 => out.extend_from_slice(&[base, 0xC6]), // op ax,si
+                1 => out.extend_from_slice(&[base, 0xC7]), // op ax,di
+                _ => { let d = temp_disp(idx); out.push(base); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); } // op ax,[temp]
+            }
         }
         return;
     }

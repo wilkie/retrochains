@@ -225,6 +225,32 @@ pub(crate) fn body_needs_di_si(stmts: &[Stmt], inits: &[Option<i32>]) -> bool {
     }
     stmts.iter().any(|s| stmt_has(s, inits))
 }
+/// Number of stack temp WORDS the body's longest call chain needs beyond SI/DI:
+/// a chain of N calls parks N-1 results (SI, DI, then temps), so `max(0, N-3)`.
+/// The frame reserves this many 2-byte slots below the locals. Fixture 1954.
+pub(crate) fn max_call_chain_temps(stmts: &[Stmt], inits: &[Option<i32>]) -> usize {
+    fn expr_max(e: &Expr, inits: &[Option<i32>]) -> usize {
+        match e {
+            Expr::BinOp { op, left, right } => {
+                let here = crate::codegen::expr::call_chain(*op, left, right, inits)
+                    .map_or(0, |(c, _)| c.len().saturating_sub(3));
+                here.max(expr_max(left, inits)).max(expr_max(right, inits))
+            }
+            _ => 0,
+        }
+    }
+    fn stmt_max(s: &Stmt, inits: &[Option<i32>]) -> usize {
+        match s {
+            Stmt::Return(e) | Stmt::ExprStmt(e) => expr_max(e, inits),
+            Stmt::Assign { value, .. } => expr_max(value, inits),
+            Stmt::Block(v) => v.iter().map(|s| stmt_max(s, inits)).max().unwrap_or(0),
+            Stmt::If { then_branch, else_branch, .. } =>
+                stmt_max(then_branch, inits).max(else_branch.as_ref().map_or(0, |e| stmt_max(e, inits))),
+            _ => 0,
+        }
+    }
+    stmts.iter().map(|s| stmt_max(s, inits)).max().unwrap_or(0)
+}
 /// Structural check matching `deref_param_source`: is `value` a `*Param(s)` or
 /// `*Param(s) ± K` with `s != dst`? Used by body_needs_si (no pointee-width
 /// info available here; the corpus never mixes widths so the structural test
@@ -514,7 +540,12 @@ pub(crate) fn emit_function(
         .filter(|(_, l)| l.is_register).map(|(i, _)| i).collect();
     let si_local = reg_locals.first().copied();
     let di_local = reg_locals.get(1).copied();
-    let frame = if reg_locals.len() >= 2 {
+    // A call chain of ≥4 calls spills results to frame temps (below the locals),
+    // so it needs a real BP frame with DI+SI saved. Fixture 1954.
+    let call_chain_temps = max_call_chain_temps(&body, &local_inits);
+    let frame = if call_chain_temps > 0 {
+        Frame::WithSlideDiSi
+    } else if reg_locals.len() >= 2 {
         Frame::WithSlideDiSi
     } else if reg_locals.len() == 1 {
         Frame::WithSlideSi
@@ -616,7 +647,8 @@ pub(crate) fn emit_function(
         + 4 * func.struct_field_temp_count as usize
         + if has_float_arg_call { 2 } else { 0 }
         + if returns_float_call { 8 } else { 0 }
-        + if has_char_accum_temp { 2 } else { 0 };
+        + if has_char_accum_temp { 2 } else { 0 }
+        + 2 * call_chain_temps; // call-chain result spill slots (fixture 1954)
     // The float-call-return temp is the deepest 8-byte slot.
     let float_call_temp_disp: i16 = if returns_float_call {
         -i16::try_from(frame_bytes).expect("frame fits")
