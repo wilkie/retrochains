@@ -896,7 +896,47 @@ pub(crate) fn emit_long_const_to_dx_ax(k: i32, out: &mut Vec<u8>) {
         out.push(0xBA); out.extend_from_slice(&hi.to_le_bytes()); // mov dx, hi
     }
 }
+/// `((long)A << 16) | (long)B` — assemble a 32-bit value from two 16-bit ints,
+/// `A` the high word and `B` the low word. Returns `(A, B)` (the inner int
+/// operands). Matches either OR order. Fixture 1946 (`make_long`).
+pub(crate) fn long_from_two_ints(value: &Expr) -> Option<(&Expr, &Expr)> {
+    fn hi_of(e: &Expr) -> Option<&Expr> {
+        if let Expr::BinOp { op: BinOp::Shl, left: l, right: r } = e
+            && matches!(r.as_ref(), Expr::IntLit(16))
+            && let Expr::CastLong { value: inner, .. } = l.as_ref()
+        { Some(inner.as_ref()) } else { None }
+    }
+    fn lo_of(e: &Expr) -> Option<&Expr> {
+        if let Expr::CastLong { value: inner, .. } = e { Some(inner.as_ref()) } else { None }
+    }
+    let Expr::BinOp { op: BinOp::BitOr, left, right } = value else { return None };
+    if let (Some(hi), Some(lo)) = (hi_of(left), lo_of(right)) { return Some((hi, lo)); }
+    if let (Some(hi), Some(lo)) = (hi_of(right), lo_of(left)) { return Some((hi, lo)); }
+    None
+}
+/// `mov <reg>,[bp+disp]` for a word int Param/Local operand; None otherwise.
+/// `reg` is the modrm reg field (ax=0 → 0x46, bx=3 → 0x5E).
+fn int_operand_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
+    match e {
+        Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i)
+            && !locals.is_float_param(*i) => Some(param_disp(*i)),
+        Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i)
+            && !locals.is_float_local(*i) && !locals.is_array_local(*i) => Some(locals.disp(*i)),
+        _ => None,
+    }
+}
 pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `((long)hi << 16) | (long)lo` builds a long with hi in the high word and lo
+    // in the low word. MSC loads lo into AX, hi into BX, then `mov dx,bx` (the
+    // `<<16` realized as a low→high register move). Fixture 1946.
+    if let Some((hi, lo)) = long_from_two_ints(value)
+        && let (Some(hd), Some(ld)) = (int_operand_disp(hi, locals), int_operand_disp(lo, locals))
+    {
+        out.push(0x8B); out.push(bp_modrm(0x46, ld)); push_bp_disp(out, ld); // mov ax,[lo]
+        out.push(0x8B); out.push(bp_modrm(0x5E, hd)); push_bp_disp(out, hd); // mov bx,[hi]
+        out.extend_from_slice(&[0x8B, 0xD3]);                                // mov dx,bx
+        return;
+    }
     match value {
         // Expression-context long mul/div/mod: push both operands as longs
         // (RHS then LHS, each high-then-low), call the runtime helper, result

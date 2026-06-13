@@ -1231,7 +1231,10 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             // emit_long_to_dx_ax lowers to a two-word add/adc. Fixtures 350/357.
             || matches!(value, Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right }
                 if long_operand(left, locals) && !long_operand(right, locals)
-                    && right.fold(locals.inits).is_some()))
+                    && right.fold(locals.inits).is_some())
+            // `((long)hi << 16) | (long)lo` — assemble a long from two ints.
+            // Fixture 1946.
+            || crate::codegen::calls::long_from_two_ints(value).is_some())
     {
         // Long-local = long RHS (`b = a`, `g + 5`, `g + h`): load both words
         // into DX:AX and store both halves — `mov ax,[lo]; mov dx,[hi]; mov

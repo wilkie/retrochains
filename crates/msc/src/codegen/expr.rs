@@ -1664,6 +1664,19 @@ pub(crate) fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>
 /// byte-pattern heuristic (same approach as the `return <local>` reload
 /// elision); it only fires when the defining op is literally the last thing
 /// emitted, i.e. straight-line within a basic block.
+/// AX still holds the LOW word of a long local stored by the two-word sequence
+/// `mov [bp+low],ax; mov [bp+low+2],dx` (the `mov [..],dx` preserves AX). disp8
+/// frames only. Used to reuse AX for `(int)(y & 0xFFFF)` right after `long y=…`.
+/// Fixture 1946.
+fn ax_holds_long_low(out: &[u8], low_disp: i16, barrier: usize) -> bool {
+    if !(-128..=127).contains(&low_disp) || !(-128..=127).contains(&(low_disp + 2)) {
+        return false;
+    }
+    let pat = [0x89, 0x46, low_disp as u8, 0x89, 0x56, (low_disp + 2) as u8];
+    out.len() >= pat.len()
+        && out[out.len() - pat.len()..] == pat
+        && out.len() - pat.len() >= barrier
+}
 pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], barrier: usize) -> bool {
     let ends = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
     // The instruction that established AX's value must be STRAIGHT-LINE (at or past
@@ -2120,6 +2133,21 @@ fn simple_word_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     }
 }
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `e & 0xFFFF` is the identity in this int (AX) context — AX already holds a
+    // 16-bit value, so MSC drops the mask (e.g. `(int)(y & 0xFFFF)` for a long
+    // `y` is just its low word). Fixture 1946.
+    if matches!(op, BinOp::BitAnd) && right.fold(locals.inits) == Some(0xFFFF) {
+        // If `left` is a long local whose low word is still live in AX (just
+        // stored by `long y = …; mov [y],ax; mov [y+2],dx`), reuse it. Fixture 1946.
+        if let Expr::Local(li) = left
+            && locals.is_long_local(*li)
+            && ax_holds_long_low(out, locals.disp(*li), locals.last_branch_barrier.get())
+        {
+            return;
+        }
+        emit_expr_to_ax(left, locals, out, fixups);
+        return;
+    }
     // `x++ + K` / `++x + K` (and `- K`): a pre/post-increment leaves its value in
     // AX, so MSC adds the trailing constant directly (`inc ax` / `add ax,K`)
     // rather than parking K in BX first. Fixtures 970 (`g++ + 1`), 973 (`++g + 1`).
