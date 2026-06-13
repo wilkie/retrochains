@@ -169,6 +169,13 @@ impl Global {
     }
 }
 
+/// Whether an initialized `_DATA` global requires word (even) alignment.
+/// Word-sized data (int, pointer, long, float) aligns to 2; char scalars
+/// and char arrays stay byte-aligned. Fixtures 3911/3912.
+fn data_needs_word_align(g: &Global) -> bool {
+    g.is_pointer || g.is_long || g.is_float || g.element_size >= 2
+}
+
 #[derive(Debug, Clone)]
 pub enum GlobalInit {
     /// Plain int literal — stored as 16-bit LE in `_DATA`.
@@ -2306,6 +2313,13 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     for g in &unit.globals {
         // const globals go in CONST (handled above), not _DATA.
         if !g.is_const && let Some(values) = &g.init {
+            // Word-sized data (int, pointer, long, float) is word-aligned:
+            // a preceding odd-length char leaves a 1-byte hole. Char scalars
+            // and char arrays stay byte-aligned. Fixtures 3911/3912
+            // (`char g; char *p = &g;` → p at offset 2, not 1).
+            if data_needs_word_align(g) && data_cursor % 2 != 0 {
+                data_cursor += 1;
+            }
             data_offsets.push(Some(data_cursor));
             let bytes: usize = values.iter().map(|v| v.size_bytes()).sum();
             data_cursor += bytes;
@@ -3032,111 +3046,109 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
     }
     if data_cursor > 0 {
-        let mut data_bytes: Vec<u8> = Vec::with_capacity(data_cursor);
-        for g in &unit.globals {
-            if !g.is_const && let Some(values) = &g.init {
-                for v in values {
-                    match v {
-                        GlobalInit::Int(k) => {
-                            let v16 = (*k as u32 & 0xFFFF) as u16;
-                            data_bytes.extend_from_slice(&v16.to_le_bytes());
-                        }
-                        GlobalInit::Byte(b) => {
-                            data_bytes.push(*b);
-                        }
-                        GlobalInit::FloatBits(bits, width) => {
-                            if *width == 4 {
-                                data_bytes.extend_from_slice(
-                                    &(f64::from_bits(*bits) as f32).to_bits().to_le_bytes());
-                            } else {
-                                data_bytes.extend_from_slice(&bits.to_le_bytes());
-                            }
-                        }
-                        GlobalInit::StrAddr(si) => {
-                            // Placeholder = the string's CONST offset.
-                            // FIXUP uses P=1 (no displacement), so the
-                            // linker reads this slot and adds the
-                            // CONST segment base.
-                            let off = u16::try_from(string_offsets[*si])
-                                .expect("string offset fits");
-                            data_bytes.extend_from_slice(&off.to_le_bytes());
-                        }
-                        GlobalInit::GlobalAddr(gi, elem_off) => {
-                            // Placeholder = _DATA offset of the target if
-                            // it's initialized (PUBDEF path), else 0 — for
-                            // a COMDEF target the linker substitutes the
-                            // address via the EXTDEF FIXUP. `elem_off` adds the
-                            // `&arr[K]` element byte offset.
-                            let off = match data_offsets[*gi] {
-                                Some(o) => u16::try_from(o).expect("global offset fits"),
-                                None => 0,
-                            }.wrapping_add(*elem_off);
-                            data_bytes.extend_from_slice(&off.to_le_bytes());
-                        }
-                        GlobalInit::FuncAddr(_) => {
-                            // `_op DW _f` — placeholder 0; the linker substitutes
-                            // the function offset via the EXTDEF FIXUP.
-                            data_bytes.extend_from_slice(&[0x00, 0x00]);
-                        }
-                    }
-                }
-            }
-        }
-        b.write_ledata16(2, 0, &data_bytes);
         // Collect per FIXUP'd slot. Variants:
         //   StrAddr      → `c4 off 9c`    (DGROUP frame + CONST thread)
         //   GlobalAddr → PUBDEF target → `c4 off 9d` (DGROUP + _DATA thread)
         //                COMDEF target → `c4 off 56 idx` (target's frame
         //                via EXTDEF, fixture 4116)
         enum DataFx { Thread(u8), Ext(u8) }
-        let mut data_slot_fixups: Vec<(u8, DataFx)> = Vec::new();
-        let mut off: usize = 0;
-        for g in &unit.globals {
-            if let Some(values) = &g.init {
+        // Build each initialized non-const global's (offset, bytes, fixups).
+        // A word-aligned global preceded by an odd char leaves a hole; MSC
+        // does NOT zero-fill it — it starts a fresh LEDATA at the aligned
+        // offset. So group adjacent globals into runs and emit one LEDATA
+        // (plus its own trailing FIXUPP) per run. Contiguous data (the
+        // common case) is a single run → identical to the old single-LEDATA
+        // output. Fixtures 3911/3912 (hole) vs 131 (contiguous).
+        struct DataGlobal { offset: usize, bytes: Vec<u8>, fixups: Vec<(usize, DataFx)> }
+        let mut dgs: Vec<DataGlobal> = Vec::new();
+        for (gi, g) in unit.globals.iter().enumerate() {
+            if !g.is_const && let Some(values) = &g.init {
+                let Some(offset) = data_offsets[gi] else { continue };
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut fixups: Vec<(usize, DataFx)> = Vec::new();
                 for v in values {
-                    let slot_off = u8::try_from(off).expect("data fixup offset fits");
+                    let rel = bytes.len();
                     match v {
-                        GlobalInit::StrAddr(_) => {
-                            data_slot_fixups.push((slot_off, DataFx::Thread(0x9C)));
+                        GlobalInit::Int(k) => {
+                            let v16 = (*k as u32 & 0xFFFF) as u16;
+                            bytes.extend_from_slice(&v16.to_le_bytes());
                         }
-                        GlobalInit::GlobalAddr(gi, _) => {
-                            if unit.globals[*gi].init.is_some() {
-                                data_slot_fixups.push((slot_off, DataFx::Thread(0x9D)));
+                        GlobalInit::Byte(b) => bytes.push(*b),
+                        GlobalInit::FloatBits(bits, width) => {
+                            if *width == 4 {
+                                bytes.extend_from_slice(
+                                    &(f64::from_bits(*bits) as f32).to_bits().to_le_bytes());
                             } else {
-                                let sym = symbol_name(&unit.globals[*gi].name);
+                                bytes.extend_from_slice(&bits.to_le_bytes());
+                            }
+                        }
+                        GlobalInit::StrAddr(si) => {
+                            let off = u16::try_from(string_offsets[*si])
+                                .expect("string offset fits");
+                            bytes.extend_from_slice(&off.to_le_bytes());
+                            fixups.push((rel, DataFx::Thread(0x9C)));
+                        }
+                        GlobalInit::GlobalAddr(tgi, elem_off) => {
+                            // Placeholder = _DATA offset of the target if it's
+                            // initialized (PUBDEF path), else 0 (COMDEF — the
+                            // linker substitutes via the EXTDEF FIXUP).
+                            let off = match data_offsets[*tgi] {
+                                Some(o) => u16::try_from(o).expect("global offset fits"),
+                                None => 0,
+                            }.wrapping_add(*elem_off);
+                            bytes.extend_from_slice(&off.to_le_bytes());
+                            if unit.globals[*tgi].init.is_some() {
+                                fixups.push((rel, DataFx::Thread(0x9D)));
+                            } else {
+                                let sym = symbol_name(&unit.globals[*tgi].name);
                                 let idx = *extdef_idx_of.get(&sym).unwrap_or_else(|| {
                                     panic!("EXTDEF index missing for COMDEF `{sym}`")
                                 });
-                                data_slot_fixups.push((slot_off, DataFx::Ext(idx)));
+                                fixups.push((rel, DataFx::Ext(idx)));
                             }
                         }
                         GlobalInit::FuncAddr(sym) => {
+                            bytes.extend_from_slice(&[0x00, 0x00]);
                             let idx = *extdef_idx_of.get(sym).unwrap_or_else(|| {
                                 panic!("EXTDEF index missing for function `{sym}`")
                             });
-                            data_slot_fixups.push((slot_off, DataFx::Ext(idx)));
+                            fixups.push((rel, DataFx::Ext(idx)));
                         }
-                        GlobalInit::Int(_) | GlobalInit::Byte(_) | GlobalInit::FloatBits(..) => {}
                     }
-                    off += v.size_bytes();
                 }
+                dgs.push(DataGlobal { offset, bytes, fixups });
             }
         }
-        // MSC sorts FIXUPs within a record by descending offset.
-        data_slot_fixups.sort_by(|a, b| b.0.cmp(&a.0));
-        let mut data_fixups: Vec<u8> = Vec::new();
-        for (off, fx) in &data_slot_fixups {
-            match fx {
-                DataFx::Thread(byte) => {
-                    data_fixups.extend_from_slice(&[0xC4, *off, *byte]);
+        // Group into runs of adjacent globals (no hole between them).
+        let mut i = 0;
+        while i < dgs.len() {
+            let run_start = dgs[i].offset;
+            let mut run_bytes: Vec<u8> = Vec::new();
+            let mut run_fixups: Vec<(usize, &DataFx)> = Vec::new();
+            let mut j = i;
+            while j < dgs.len() && dgs[j].offset == run_start + run_bytes.len() {
+                let base = run_bytes.len();
+                run_bytes.extend_from_slice(&dgs[j].bytes);
+                for (rel, fx) in &dgs[j].fixups {
+                    run_fixups.push((base + *rel, fx));
                 }
-                DataFx::Ext(idx) => {
-                    data_fixups.extend_from_slice(&[0xC4, *off, 0x56, *idx]);
+                j += 1;
+            }
+            b.write_ledata16(2, u16::try_from(run_start).expect("data offset fits"), &run_bytes);
+            // MSC sorts FIXUPs within a record by descending offset.
+            run_fixups.sort_by(|a, b| b.0.cmp(&a.0));
+            let mut data_fixups: Vec<u8> = Vec::new();
+            for (off, fx) in &run_fixups {
+                let off = u8::try_from(*off).expect("data fixup offset fits");
+                match fx {
+                    DataFx::Thread(byte) => data_fixups.extend_from_slice(&[0xC4, off, *byte]),
+                    DataFx::Ext(idx) => data_fixups.extend_from_slice(&[0xC4, off, 0x56, *idx]),
                 }
             }
-        }
-        if !data_fixups.is_empty() {
-            b.write_fixupp(&data_fixups);
+            if !data_fixups.is_empty() {
+                b.write_fixupp(&data_fixups);
+            }
+            i = j;
         }
     }
 
