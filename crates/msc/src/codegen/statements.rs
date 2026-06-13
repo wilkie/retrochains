@@ -636,8 +636,13 @@ pub(crate) fn emit_stmt(
             // A then-branch containing a `goto` suppresses the merge-alignment
             // pad (441 — gold leaves the merge odd).
             let then_has_goto = locals.label_fixups.borrow().len() > lf_start;
+            // MSC aligns an if-merge only at the function level — an if-merge
+            // INSIDE a loop body is left unaligned (only the loop-top is aligned).
+            // Fixture 1415 (`while(x){ if(x&1)c++; x>>=1; }`).
+            let inside_loop = !locals.loop_stack.borrow().is_empty();
             let needs_nop = !merge_is_epilogue
                 && !then_has_goto
+                && !inside_loop
                 && (out.len() + cond_size + then_len + jmp_len) % 2 != 0;
             let nop_pad = usize::from(needs_nop);
             let take_then_disp = i8::try_from(then_len + jmp_len + nop_pad)
