@@ -114,11 +114,6 @@ impl Reg {
     /// clobbered across the body; only DI/CX remain. Fixture 1700
     /// (`a[i][j]` with stride 6 → imul + BX scratch).
     const NON_SI_POOL_NO_DX_NO_BX: [Self; 2] = [Self::Di, Self::Cx];
-    /// Variant when exactly 5 ints are eligible (perfect fit in
-    /// 5 registers, no spill). Empirical from fixtures 1850, 1979.
-    /// The 6+ "spill" case keeps the standard NON_SI_POOL order.
-    const NON_SI_POOL_FIVE_INT: [Self; 4] = [Self::Bx, Self::Di, Self::Cx, Self::Dx];
-
     /// Variant fired by the shift-count SI swap (fixture 2399): the
     /// shift-count int gets DX as its first choice so the body's
     /// `mov cl, dl` is the natural source. Other eligibles fall to
@@ -592,31 +587,10 @@ impl Locals {
                 .map(|item| item.name.as_str())
                 .collect::<HashSet<_>>(),
         );
-        // Exactly-5-eligible case with VARIED use counts: BCC swaps
-        // the secondary order from `[DI, DX, BX, CX]` to `[BX, DI,
-        // CX, DX]`. Fixtures 1850, 1979 (use counts vary, swap
-        // pool). 1505, 046 (5 ints with all-equal use counts) keep
-        // the default order. 4-or-fewer and 6+ keep default
-        // regardless of use-count distribution.
-        // BCC's "swap pool" empirical condition (fixtures 1850,
-        // 1979): exactly 5 eligible ints, all locals (no params
-        // mixed in), and use counts vary. When use counts are
-        // all equal (1505) or there are any params in the
-        // eligible set (046), keep the default pool order.
-        let no_eligible_params = eligible_int.iter().all(|&i| {
-            matches!(declared[i].kind, DeclKind::Local)
-        });
-        let eligible_uses_vary = eligible_int.len() == 5
-            && no_eligible_params
-            && {
-                let first_count = counts
-                    .get(&declared[eligible_int[0]].name)
-                    .copied()
-                    .unwrap_or(0);
-                eligible_int.iter().any(|&i| {
-                    counts.get(&declared[i].name).copied().unwrap_or(0) != first_count
-                })
-            };
+        // (The former "exactly-5-eligible VARIED-use swaps to [BX,DI,CX,DX]"
+        // special case was a misreading — it is just the use-count-descending
+        // assignment over the standard [DI,DX,BX,CX] pool, now applied
+        // uniformly below. Validated by zz01/zz02/zz04 + 1850/1979/1505.)
         // 2D array indexing (or any access that needs an `imul` to
         // scale the outer stride) uses BX as scratch for the address
         // computation. When that happens, ints in BX have to be
@@ -631,8 +605,6 @@ impl Locals {
             &Reg::NON_SI_POOL_NO_DX_NO_BX
         } else if function_has_imul_now {
             &Reg::NON_SI_POOL_NO_DX
-        } else if eligible_uses_vary {
-            &Reg::NON_SI_POOL_FIVE_INT
         } else if shift_count_si_swap.is_some() {
             // Companion to the shift-count SI swap: the shift-count
             // int (which lost the SI fight) lands in DX so the
@@ -653,27 +625,21 @@ impl Locals {
         // count), 1551 / 3321 (loop-deref pointer wins SI; the
         // remaining int locals pick DI / DX by use count rather
         // than declaration order).
-        let function_has_array_index_any = body_has_array_index(
-            function.body.as_deref().unwrap_or(&[]),
-        );
+        // BCC assigns the non-SI register pool to eligibles by use count
+        // DESCENDING (ties keep source order), ALWAYS — not only when the pool
+        // is restricted. This is the single rule behind what earlier looked
+        // like separate "standard source-order" and "five-int swap" cases:
+        // when use-count order coincides with source order (the common case)
+        // the output is indistinguishable, and the apparent `[BX,DI,CX,DX]`
+        // "swap" for 1850/1979 is just the use-count order over the standard
+        // `[DI,DX,BX,CX]` pool. Validated against oracle-captured probes
+        // zz01-zz04 (4/5/6 ints, varied use distributions) plus 1850/1979/1505.
         let mut ordered_eligibles: Vec<usize> = eligible_int.to_vec();
-        if function_makes_call
-            || function_has_imul_now
-            || function_has_2d_array_index
-            || function_has_array_index_any
-            || loop_pointer_si.is_some()
-        {
-            // Stable sort by use count descending (ties keep source
-            // order). Extending the sort to any-array-index
-            // functions matches BCC's behaviour in fixture 3003
-            // (`s = s + a[i]`: `s` (4 uses) takes DI ahead of `n`
-            // (2 uses, param) even though `n` is declared earlier).
-            ordered_eligibles.sort_by(|&a, &b| {
-                let ca = counts.get(&declared[a].name).copied().unwrap_or(0);
-                let cb = counts.get(&declared[b].name).copied().unwrap_or(0);
-                cb.cmp(&ca)
-            });
-        }
+        ordered_eligibles.sort_by(|&a, &b| {
+            let ca = counts.get(&declared[a].name).copied().unwrap_or(0);
+            let cb = counts.get(&declared[b].name).copied().unwrap_or(0);
+            cb.cmp(&ca)
+        });
         // 8086 only allows BX/BP/SI/DI as base registers in indirect
         // memory operands — DX and CX can't carry a pointer that the
         // body will dereference. BCC further caps pointer
