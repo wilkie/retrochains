@@ -1407,19 +1407,34 @@ fn write_tail(
     out.extend_from_slice(b"_DATA\tends\r\n");
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     out.extend_from_slice(b"_TEXT\tends\r\n");
-    // Extern declarations come between the final `_TEXT ends` and
-    // the `public` list. BCC orders by NAME LENGTH ASCENDING, then
-    // reverse-alphabetical within each length bucket. Empirical from
-    // 2894 (`_no,_yes` len 3/4 → no first); 2956, 3361, 3585
-    // (`_f,_g` same len → g, f reverse-alpha); 3012 (`_setup,
-    // _cleanup` len 6/8 → setup first). Source-order works only
-    // when it happens to coincide (3012).
-    let mut ordered_externs: Vec<String> = externs.clone();
-    ordered_externs.sort_by(|a, b| {
-        a.len()
-            .cmp(&b.len())
-            .then_with(|| b.cmp(a))
-    });
+    // Extern (function EXTDEF) declarations come between the final
+    // `_TEXT ends` and the `public` list. BCC orders them by its
+    // symbol-table hash — the SAME 1024-bucket hash as the publics
+    // (see `pubs_hash` below): collisions chain in first-reference
+    // order (FIFO, as `collect_extern_calls` returns them), emission
+    // walks buckets HIGH→LOW and each chain LAST→FIRST. The hash is on
+    // the bare name (no leading underscore).
+    //
+    // The earlier rule (name length ASC, reverse-alpha within ties)
+    // was a coincidental approximation: it agreed with the hash on all
+    // 9 prior multi-extern fixtures but is WRONG in general. Pinned by
+    // oracle-captured 9101 (`cd`,`foo` → foo,cd, not cd,foo), 9102
+    // (`ab`,`cd` → ab,cd, not cd,ab), 9103 (`ab`,`cd`,`foo` →
+    // foo,ab,cd). Also explains the long-standing fopen/fclose anomaly
+    // (fclose before fopen) the length rule could not.
+    let mut ext_chain: Vec<Option<Vec<String>>> = vec![None; 0x400];
+    for name in &externs {
+        let h = pubs_hash(name);
+        ext_chain[h].get_or_insert_with(Vec::new).push(name.clone());
+    }
+    let mut ordered_externs: Vec<String> = Vec::new();
+    for bucket in ext_chain.into_iter().rev() {
+        if let Some(names) = bucket {
+            for n in names.into_iter().rev() {
+                ordered_externs.push(n);
+            }
+        }
+    }
     for name in &ordered_externs {
         let _ = write!(out, "\textrn\t_{name}:{extern_dist}\r\n");
     }
