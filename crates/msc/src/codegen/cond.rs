@@ -459,6 +459,25 @@ fn emit_addr_to_reg(e: &Expr, to_cx: bool, locals: &Locals<'_>, out: &mut Vec<u8
     }
 }
 pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `(c = <char rvalue>) != 0` / `== 0` — a comma-assign whose value is the
+    // same char local just stored. The byte store leaves the value in AL, so
+    // MSC reuses AL with `or al,al` instead of reloading the slot + widening
+    // (`mov al,[c]; cbw; or ax,ax`). The caller's jne/je reads ZF the same way.
+    // Fixture 3653 (`while ((c = arr[i++]) != 0) s += c`).
+    if let Cond::Cmp { op: RelOp::Ne | RelOp::Eq, left, right } = cond
+        && matches!(right, Expr::IntLit(0))
+        && let Expr::Seq { sides, value } = left
+        && let Expr::Local(v) = value.as_ref()
+        && locals.size(*v) == 1
+        && let Some(Stmt::Assign { target: AssignTarget::Local(t), .. }) = sides.last()
+        && *t == *v
+    {
+        for s in sides {
+            emit_stmt(s, locals, Frame::BpOnly, true, false, out, fixups);
+        }
+        out.extend_from_slice(&[0x0A, 0xC0]); // or al,al
+        return;
+    }
     // `while (--n > 0)` — a pre-mutation on the LEFT of a comparison: do the
     // in-place inc/dec first, then compare the slot directly (`dec [n]; cmp
     // [n],0`). Rewrite the operand to the plain slot read and re-enter so the
