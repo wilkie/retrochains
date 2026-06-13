@@ -131,7 +131,10 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             // decayed global array uses BX only. add_deref_uses_si peels the
             // add-tree the same way emit_offset_deref does. Fixture 3468.
             Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => {
-                if let Expr::BinOp { op: BinOp::Add, left, right } = ptr.as_ref() {
+                // `*((*pp)++)` reads the old `*pp` into SI. Fixture 3662.
+                if matches!(ptr.as_ref(), Expr::PostMutateDeref { .. }) {
+                    true
+                } else if let Expr::BinOp { op: BinOp::Add, left, right } = ptr.as_ref() {
                     add_deref_uses_si(ptr, inits)
                         || expr_si(left, inits) || expr_si(right, inits)
                 } else {

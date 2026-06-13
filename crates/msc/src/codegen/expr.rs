@@ -999,6 +999,23 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             // a global int-pointer source pick up the BX-from-global
             // load shape.
             match ptr.as_ref() {
+                // `*((*pp)++)` — pp is `T **`: load old `*pp` into SI, advance `*pp`
+                // by the ELEMENT stride (sizeof(T) = 2 for a word deref), then deref
+                // SI. The advance is a true pointer increment, so step is scaled by
+                // the element size (the AST's `step` is in elements). Requires a
+                // push-SI frame. Fixture 3662 (`return *(*pp)++`).
+                Expr::PostMutateDeref { ptr: inner, step, .. } => {
+                    emit_load_bx(inner, locals, out, fixups);          // mov bx,[pp]
+                    out.extend_from_slice(&[0x8B, 0x37]);              // mov si,[bx]  (old *pp)
+                    let stride = *step * 2;                            // word element → ×2
+                    if let Ok(k8) = i8::try_from(stride) {
+                        out.extend_from_slice(&[0x83, 0x07, k8 as u8]); // add word [bx],k8
+                    } else {
+                        out.push(0x81); out.push(0x07);
+                        out.extend_from_slice(&((stride as u32 & 0xFFFF) as u16).to_le_bytes());
+                    }
+                    out.extend_from_slice(&[0x8B, 0x04]);              // mov ax,[si]
+                }
                 // `*p++` — load old ptr into BX, advance ptr, read from old location.
                 Expr::PostMutateLocal { local_idx, step } => {
                     let disp = locals.disp(*local_idx);
