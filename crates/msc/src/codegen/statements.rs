@@ -37,6 +37,69 @@ fn stmt_is_float_elem_store(stmt: &Stmt, locals: &Locals<'_>) -> bool {
         Stmt::Assign { target: AssignTarget::IndexedLocal { local, .. }, value: Expr::FloatLit(..) }
             if locals.is_float_local(*local))
 }
+/// Emit a run of consecutive `arr[idx].field = v` stores (`LocalStructArrayField`
+/// targets) that share the same array, runtime index, and stride: compute the row
+/// base `si = bp + idx*stride` ONCE, then store each field at `[si + base +
+/// field_off]`. Returns the number of statements consumed, or `None` if `stmts`
+/// doesn't begin with at least two such same-row stores. Fixture 1914.
+fn try_emit_struct_array_field_run(
+    stmts: &[Stmt],
+    locals: &Locals<'_>,
+    _frame: Frame,
+    _return_int: bool,
+    _return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> Option<usize> {
+    use crate::codegen::assign::simple_index_eq;
+    fn field_store(s: &Stmt) -> Option<(usize, &Expr, u16, u16, u8, &Expr)> {
+        if let Stmt::Assign {
+            target: AssignTarget::LocalStructArrayField { local, index, stride, field_off, size },
+            value,
+        } = s {
+            Some((*local, index.as_ref(), *stride, *field_off, *size, value))
+        } else {
+            None
+        }
+    }
+    let (local, index, stride, _, _, _) = field_store(&stmts[0])?;
+    let mut run = 1;
+    while run < stmts.len() {
+        match field_store(&stmts[run]) {
+            Some((l, idx, s, _, _, _)) if l == local && s == stride && simple_index_eq(idx, index) => {
+                run += 1;
+            }
+            _ => break,
+        }
+    }
+    if run < 2 {
+        return None;
+    }
+    // Row base once. The stride-6 scale leaves the index value in CX, so a stored
+    // value that IS the index can reuse `mov ax,cx` for the FIRST field only.
+    crate::codegen::expr::emit_local_struct_row_si(index, stride, locals, out, fixups);
+    for (k, s) in stmts[..run].iter().enumerate() {
+        let (local, _, _, field_off, size, value) = field_store(s).expect("run entry");
+        let disp = locals.disp(local) + field_off as i16;
+        if k == 0 && stride == 6 && size == 2 && simple_index_eq(value, index) {
+            out.extend_from_slice(&[0x8B, 0xC1]); // mov ax,cx
+        } else {
+            crate::codegen::expr::emit_expr_to_ax(value, locals, out, fixups);
+        }
+        if size == 1 {
+            if out.last() == Some(&0x98) { out.pop(); } // storing AL — strip cbw
+            out.push(0x88);
+        } else {
+            out.push(0x89);
+        }
+        if let Ok(d8) = i8::try_from(disp) {
+            out.push(0x44); out.push(d8 as u8);
+        } else {
+            out.push(0x84); out.extend_from_slice(&disp.to_le_bytes());
+        }
+    }
+    Some(run)
+}
 pub(crate) fn emit_stmt(
     stmt: &Stmt,
     locals: &Locals<'_>,
@@ -196,12 +259,24 @@ pub(crate) fn emit_stmt(
             // emit inline. Const-prop's already been applied at the
             // function level before we got here.
             let mut reachable = true;
-            for s in stmts {
+            let mut i = 0;
+            while i < stmts.len() {
                 if !reachable { break; }
-                emit_stmt(s, locals, frame, return_int, return_long, out, fixups);
-                if stmt_always_returns(s, locals) {
+                // A run of consecutive `arr[idx].field = v` stores sharing the
+                // same array, index, and stride computes the row base (SI) ONCE
+                // and stores each field off it, rather than recomputing per store.
+                // Fixture 1914.
+                if let Some(consumed) = try_emit_struct_array_field_run(
+                    &stmts[i..], locals, frame, return_int, return_long, out, fixups)
+                {
+                    i += consumed;
+                    continue;
+                }
+                emit_stmt(&stmts[i], locals, frame, return_int, return_long, out, fixups);
+                if stmt_always_returns(&stmts[i], locals) {
                     reachable = false;
                 }
+                i += 1;
             }
         }
         Stmt::While { cond, body } => {

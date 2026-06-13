@@ -515,7 +515,15 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             // set up (SI survives the value eval for simple RHS).
             crate::codegen::expr::emit_local_struct_row_si(&index, stride, locals, out, fixups);
             let disp = locals.disp(local) + field_off as i16;
-            emit_expr_to_ax(&value, locals, out, fixups);
+            // The stride-6 row scale leaves the index value in CX (`mov ax,i; mov
+            // cx,ax; ...`). If the stored value IS the index, reuse it via `mov
+            // ax,cx` instead of reloading from the slot. Fixture 1914
+            // (`arr[i].a = i`). Other strides clobber CX, so they reload.
+            if stride == 6 && size == 2 && simple_index_eq(&value, &index) {
+                out.extend_from_slice(&[0x8B, 0xC1]); // mov ax,cx
+            } else {
+                emit_expr_to_ax(&value, locals, out, fixups);
+            }
             if size == 1 {
                 if out.last() == Some(&0x98) { out.pop(); } // storing AL — strip cbw
                 out.push(0x88);
