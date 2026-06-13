@@ -35,7 +35,7 @@ cargo build --workspace --bins
 target/debug/xfix verify-all --toolchain ours
 ```
 
-The current baseline is **4078 pass, 2 fail** out of 4080 fixtures. The two
+The current baseline is **4082 pass, 2 fail** out of 4084 fixtures. The two
 failures (`891-int-global-pointer-subscript-cmp-const-obj` and
 `893-int-global-pointer-subscript-as-call-arg-obj`) are pre-existing on
 `main`. Any refactor — especially pure code moves — must reproduce this

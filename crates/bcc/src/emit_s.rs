@@ -520,39 +520,53 @@ fn write_init_globals(
     out.extend_from_slice(b"_DATA\tends\r\n");
 }
 
+/// BCC's reverse-engineered symbol-table hash (1024 buckets). Computed on the
+/// bare C identifier WITHOUT a leading underscore (`_main` hashes as `main`).
+/// Drives the publics order (HIGH→LOW buckets, LAST→FIRST chain), the function-
+/// extern order (same direction), and the `_BSS` global order (the REVERSE walk:
+/// LOW→HIGH buckets, FIRST→FIRST chain). Validated against the full corpus plus
+/// the 91xx/92xx discriminator fixtures.
+pub(crate) fn pubs_hash(name_no_under: &str) -> usize {
+    let b = name_no_under.as_bytes();
+    let count = b.len() + 1;
+    if count > 2 {
+        let first_word = u32::from(b[0]) | (u32::from(b[1]) << 8);
+        let last_word = u32::from(b[count - 3]) | (u32::from(b[count - 2]) << 8);
+        let h = ((count as u32) << 6).wrapping_add(first_word).wrapping_add(last_word << 3);
+        (h & 0x3FF) as usize
+    } else {
+        b[0] as usize
+    }
+}
+
 /// Emit uninitialized globals in `_BSS` at the bottom of the file,
 /// with the function-end `?debug C E9` record placed before
 /// `_BSS ends` (fixture 087).
 fn write_bss_globals_with_debug(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
     out.extend_from_slice(b"_BSS\tsegment word public 'BSS'\r\n");
-    // BCC's _BSS layout: short-named globals (`_<n>` with name
-    // length < 3) first in alphabetical order, then long-named
-    // globals in alphabetical order. The same length-bucket
-    // discriminant the publics ordering uses; this is the *reverse*
-    // of the publics emission order, filtered to BSS members. A
-    // 1-byte filler `db 1 dup (?)` is inserted when the running
-    // offset is odd before a word-aligned global. Pinned by
-    // fixtures 181 (all 2-char names → alpha order `a, c, pad, x`),
-    // 462/234 (all 2-char names → alpha), and 465
-    // (`buf` (4) + `g` (2) → short bucket emits `g` first, then
-    // long bucket emits `buf` — no padding needed).
-    let mut short_bss: Vec<&crate::ast::Global> = Vec::new();
-    let mut long_bss: Vec<&crate::ast::Global> = Vec::new();
+    // BCC's _BSS layout orders globals by the SAME 1024-bucket symbol-table
+    // hash as the publics/externs (`pubs_hash`), but walked in the EXACT
+    // REVERSE of the publics emission: buckets LOW→HIGH and within each bucket
+    // the collision chain FIRST→LAST (source order). The 1-byte filler `db 1
+    // dup (?)` is inserted when the running offset is odd before a word-aligned
+    // global.
+    //
+    // The previous "short bucket (≤1-char) alpha, then long bucket source
+    // order" rule was a coincidental approximation: it agreed with the hash on
+    // every prior fixture (181/462/234 single-char names hash to their ASCII =
+    // ascending; 465 `g`(103)<`buf`(522); 3059 `src`(771)<`dst`(1020); 1401
+    // `s1`(459)<`s2`(715) — all happened to match) but is wrong in general.
+    // Pinned by oracle-captured 9201 (`foo`,`bar` → bar,foo not foo,bar),
+    // 9202 (`cd`,`z` → cd,z — a 2-char name sorts BEFORE a 1-char one, breaking
+    // the short-bucket-first rule), 9203 (`foo`,`bar`,`qux` → bar,qux,foo),
+    // 9204 (`bar`,`baz` collide @362 → bar,baz, FIRST→LAST chain).
+    let mut bss_chain: Vec<Option<Vec<&crate::ast::Global>>> = vec![None; 0x400];
     for g in unit.globals.iter().filter(|g| !g.is_extern && g.init.is_none()) {
-        let sym_len = g.name.len() + 1; // `_<name>` mangling
-        if sym_len < 3 {
-            short_bss.push(g);
-        } else {
-            long_bss.push(g);
-        }
+        let h = pubs_hash(g.name.strip_prefix('_').unwrap_or(&g.name));
+        bss_chain[h].get_or_insert_with(Vec::new).push(g);
     }
-    short_bss.sort_by(|a, b| a.name.cmp(&b.name));
-    // Long bucket: source order. Fixture 3059 (`struct M src;
-    // struct M dst;` → src, dst, contradicting an alpha sort).
-    // 1401 (`struct S s1; struct S s2;`) passes alpha trivially
-    // because source order matches alpha there.
     let bss: Vec<&crate::ast::Global> =
-        short_bss.into_iter().chain(long_bss.into_iter()).collect();
+        bss_chain.into_iter().flatten().flatten().collect();
     let mut offset: u16 = 0;
     for g in bss {
         let align = g.ty.alignment();
@@ -1538,18 +1552,8 @@ fn write_tail(
     //
     // This rule was validated against the full fixture corpus —
     // 1229 out of 1229 multi-public fixtures match byte-exactly.
-    fn pubs_hash(name_no_under: &str) -> usize {
-        let b = name_no_under.as_bytes();
-        let count = b.len() + 1;
-        if count > 2 {
-            let first_word = u32::from(b[0]) | (u32::from(b[1]) << 8);
-            let last_word = u32::from(b[count - 3]) | (u32::from(b[count - 2]) << 8);
-            let h = ((count as u32) << 6).wrapping_add(first_word).wrapping_add(last_word << 3);
-            (h & 0x3FF) as usize
-        } else {
-            b[0] as usize
-        }
-    }
+    // `pubs_hash` is now a module-level fn (shared with the extern and
+    // _BSS orderings).
     const PUBS_TABLE_SIZE: usize = 0x400;
     let mut chain: Vec<Option<Vec<String>>> = vec![None; PUBS_TABLE_SIZE];
     let mut by_sym: std::collections::HashMap<String, String> =
