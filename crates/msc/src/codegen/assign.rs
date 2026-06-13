@@ -3448,6 +3448,17 @@ pub(crate) fn emit_indexed_global_read_via_si(rhs: &Expr, locals: &Locals<'_>, o
 /// Index value) and `arr[i] ± arr[j]` self-compound (right operand a runtime word
 /// Index). Mirrors `emit_indexed_global_read_via_si`'s firing condition.
 pub(crate) fn global_index_rhs_uses_si(target: &AssignTarget, value: &Expr, inits: &[Option<i32>]) -> bool {
+    // Byte copy `dst[i] = src[i]` (same runtime index, char arrays): MSC copies
+    // the LHS index from BX into SI and reads `src[si]` so the dst index in BX
+    // survives the store (`mov bx,[i]; mov si,bx; mov al,_src[si]; mov _dst[bx],al`).
+    // Fixture 1426.
+    if let AssignTarget::IndexedGlobalByteVar { index: tindex, .. } = target
+        && let Expr::IndexByte { index: ridx, .. } = value
+        && ridx.fold(inits).is_none()
+        && simple_index_eq(tindex, ridx)
+    {
+        return true;
+    }
     if !matches!(target, AssignTarget::IndexedGlobalVar { .. }) {
         return false;
     }
@@ -3462,6 +3473,18 @@ pub(crate) fn global_index_rhs_uses_si(target: &AssignTarget, value: &Expr, init
         return true;
     }
     false
+}
+/// Structural equality for the simple index expressions used as array subscripts
+/// (`Local`/`Param`/`Global`/`IntLit`). `Expr` does not derive `PartialEq`, and
+/// the index in a `dst[i] = src[i]` copy is always one of these forms.
+pub(crate) fn simple_index_eq(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::Local(x), Expr::Local(y)) => x == y,
+        (Expr::Param(x), Expr::Param(y)) => x == y,
+        (Expr::Global(x), Expr::Global(y)) => x == y,
+        (Expr::IntLit(x), Expr::IntLit(y)) => x == y,
+        _ => false,
+    }
 }
 pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is_byte: bool, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Runtime-index long array element store `arr[i] = <long>`: scale the index
@@ -3555,7 +3578,22 @@ pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is
         else { out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); }
     } else {
         if is_byte {
-            emit_byte_rhs_to_al(value, locals, out, fixups); // mov al, <rhs byte>
+            // `dst[i] = src[i]` byte copy (same runtime index): BX already holds
+            // the index (loaded above); copy it to SI and read `src[si]` so the
+            // dst index in BX survives. No `cbw` — it is a byte→byte copy.
+            // Fixture 1426.
+            if let Expr::IndexByte { array: src, index: ridx } = value
+                && ridx.fold(locals.inits).is_none()
+                && simple_index_eq(index, ridx.as_ref())
+            {
+                out.extend_from_slice(&[0x8B, 0xF3]); // mov si,bx
+                out.push(0x8A); out.push(0x84);       // mov al,[si+src]
+                let dp = out.len();
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: dp - 1, kind: FixupKind::GlobalAddr { global_idx: *src } });
+            } else {
+                emit_byte_rhs_to_al(value, locals, out, fixups); // mov al, <rhs byte>
+            }
             out.push(0x88);
         } else {
             // `arr[i] = arr[j]` (runtime j): read arr[j] through SI so the LHS
