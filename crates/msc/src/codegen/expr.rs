@@ -2422,16 +2422,18 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
     }
     // Pointer param + integer-variable param: load the INDEX, scale it by the
     // element size, then add the pointer. `p + n` (int*) →
-    // `mov ax,[n]; shl ax,1; add ax,[p]`. Fixture 3380.
+    // `mov ax,[n]; shl ax,1; add ax,[p]` (fixture 3380). A struct pointer with a
+    // stride of 6 uses the `×3 (shl+add) then ×2` decomposition — fixture 2771
+    // (`p + n` for `struct {int;int;char;}*` → `mov ax,[n]; mov cx,ax; shl ax,1;
+    // add ax,cx; shl ax,1; add ax,[p]`).
     if matches!(op, BinOp::Add) {
+        let scalable = |s: usize| s >= 2 && (s.is_power_of_two() || s == 6);
         let pair = match (left, right) {
             (Expr::Param(a), Expr::Param(b))
-                if locals.param_pointee_size(*a) >= 2
-                    && locals.param_pointee_size(*a).is_power_of_two()
+                if scalable(locals.param_pointee_size(*a))
                     && locals.param_pointee_size(*b) == 0 => Some((*a, *b)),
             (Expr::Param(a), Expr::Param(b))
-                if locals.param_pointee_size(*b) >= 2
-                    && locals.param_pointee_size(*b).is_power_of_two()
+                if scalable(locals.param_pointee_size(*b))
                     && locals.param_pointee_size(*a) == 0 => Some((*b, *a)),
             _ => None,
         };
@@ -2440,8 +2442,15 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
             let idisp = param_disp(ip);
             let pdisp = param_disp(pp);
             out.push(0x8B); out.push(bp_modrm(0x46, idisp)); push_bp_disp(out, idisp); // mov ax,[n]
-            for _ in 0..elem.trailing_zeros() {
-                out.extend_from_slice(&[0xD1, 0xE0]); // shl ax, 1
+            if elem == 6 {
+                out.extend_from_slice(&[0x8B, 0xC8]); // mov cx,ax
+                out.extend_from_slice(&[0xD1, 0xE0]); // shl ax,1  (2n)
+                out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx (3n)
+                out.extend_from_slice(&[0xD1, 0xE0]); // shl ax,1  (6n)
+            } else {
+                for _ in 0..elem.trailing_zeros() {
+                    out.extend_from_slice(&[0xD1, 0xE0]); // shl ax, 1
+                }
             }
             out.push(0x03); out.push(bp_modrm(0x46, pdisp)); push_bp_disp(out, pdisp); // add ax,[p]
             return;
