@@ -2714,6 +2714,63 @@ pub(crate) fn emit_loop(
         emit_stmt(seg, &body_locals, frame, return_int, return_long, &mut body_buf, &mut body_fixups);
     }
     let mut loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
+    // `while (A || B) { body }` (A,B simple Cmp/Truthy): MSC puts BOTH conds at
+    // the top — A jumps forward INTO the body when true, B jumps forward to exit
+    // when false (fall into body when true) — then an unconditional `jmp` back to
+    // the top. This is a distinct layout from the cond-at-bottom default, so it's
+    // handled here with an early return. It only fires where the code previously
+    // PANICKED (top-level || in a loop), so it can't regress existing fixtures.
+    // Validated against 4163. (Break-fused loop-backs like 3233 are not yet
+    // covered — the trailing `if(c)break` keeps the generic jmp here.)
+    if let Cond::Or(cond_a, cond_b) = cond {
+        use crate::codegen::cond::{emit_cond_skip, emit_cond_take};
+        // Measure A/B (rel8 jcc is fixed-size, so a dummy disp is fine).
+        let mut a_buf = Vec::new();
+        let mut a_fx: Vec<Fixup> = Vec::new();
+        emit_cond_take(cond_a, 0, &body_locals, &mut a_buf, &mut a_fx);
+        let mut b_buf = Vec::new();
+        let mut b_fx: Vec<Fixup> = Vec::new();
+        emit_cond_skip(cond_b, 0, &body_locals, &mut b_buf, &mut b_fx);
+        let (la, lb) = (a_buf.len(), b_buf.len());
+        let a_start = out.len();
+        let body_len = body_buf.len();
+        // L_exit (after the 2-byte jmp-back) is padded to an even offset.
+        let pad = usize::from((a_start + la + lb + body_len + 2) % 2 != 0);
+        // Re-emit with real disps: A jumps to body (disp = lb), B jumps to exit
+        // (disp = body_len + jmp(2) + pad).
+        a_buf.clear();
+        a_fx.clear();
+        emit_cond_take(cond_a, i8::try_from(lb).expect("|| A disp fits"), &body_locals, &mut a_buf, &mut a_fx);
+        b_buf.clear();
+        b_fx.clear();
+        emit_cond_skip(cond_b, i8::try_from(body_len + 2 + pad).expect("|| B disp fits"), &body_locals, &mut b_buf, &mut b_fx);
+        let base_a = out.len();
+        out.extend_from_slice(&a_buf);
+        for mut f in a_fx { f.body_offset += base_a; fixups.push(f); }
+        let base_b = out.len();
+        out.extend_from_slice(&b_buf);
+        for mut f in b_fx { f.body_offset += base_b; fixups.push(f); }
+        let body_base = out.len();
+        out.extend_from_slice(&body_buf);
+        for mut f in body_fixups { f.body_offset += body_base; fixups.push(f); }
+        rebase_body_labels(body_base);
+        let jmp_pos = out.len();
+        out.push(0xEB);
+        let back = i8::try_from(a_start as i32 - (jmp_pos as i32 + 2)).expect("|| loop-back disp fits");
+        out.push(back as u8);
+        if pad == 1 { out.push(0x90); }
+        let loop_end = out.len();
+        // break → L_exit; continue → L_top (re-evaluate the condition).
+        for &off in &loop_ctx.breaks {
+            let abs = body_base + off;
+            out[abs] = i8::try_from(loop_end as i32 - (abs as i32 + 1)).expect("break disp fits") as u8;
+        }
+        for &off in &loop_ctx.continues {
+            let abs = body_base + off;
+            out[abs] = i8::try_from(a_start as i32 - (abs as i32 + 1)).expect("continue disp fits") as u8;
+        }
+        return;
+    }
     let mut cmp_buf = Vec::new();
     let mut cmp_fixups: Vec<Fixup> = Vec::new();
     // For &&-conditions MSC puts B (right) before the body with a forward
