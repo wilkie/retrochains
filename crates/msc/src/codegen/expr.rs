@@ -2246,6 +2246,34 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         }
         return;
     }
+    // `A + B` where AX already holds BOTH operands' (equal) value — e.g.
+    // `v = --i; return v + i;` leaves i's value in AX (loaded, then stored to v),
+    // and v == i, so the sum is just `add ax,ax`. Distinct word scalars only.
+    // Fixture 2554.
+    if matches!(op, BinOp::Add) {
+        let scalar_ld_st = |e: &Expr| -> Option<(Vec<u8>, Vec<u8>)> {
+            let d = match e {
+                Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i)
+                    && !locals.is_array_local(*i) && !locals.is_float_local(*i)
+                    && locals.reg_for_local(*i).is_none() => locals.disp(*i),
+                Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i)
+                    && !locals.is_float_param(*i) => param_disp(*i),
+                _ => return None,
+            };
+            let mut ld = vec![0x8B, bp_modrm(0x46, d)]; push_bp_disp(&mut ld, d);
+            let mut st = vec![0x89, bp_modrm(0x46, d)]; push_bp_disp(&mut st, d);
+            Some((ld, st))
+        };
+        if let (Some((la, sa)), Some((lb, sb))) = (scalar_ld_st(left), scalar_ld_st(right))
+            && la != lb
+        {
+            let b = locals.last_branch_barrier.get();
+            if ax_holds_word_operand(out, &la, &sa, b) && ax_holds_word_operand(out, &lb, &sb, b) {
+                out.extend_from_slice(&[0x03, 0xC0]); // add ax,ax
+                return;
+            }
+        }
+    }
     // `q->a + q->b` — two word struct-fields through the SAME pointer (local or
     // param): load the pointer into BX once, then `mov ax,[bx+b]; add ax,[bx+a]`
     // (right field into AX, left added in place). Reuse a live AX that already
