@@ -2659,6 +2659,146 @@ fn emit_for_continue_break(
     out.push(break_disp as u8);
     true
 }
+/// Match a for-loop body that is a single `switch (scrut) { case K1: B1 break;
+/// case K2: B2 break; }` — exactly two value-cases (no default), each ending in
+/// `break`, with no other loop control inside. Returns the scrutinee and the two
+/// (value, body-without-break) pairs. Fixture 3402.
+fn for_body_switch_2case<'a>(body: &'a Stmt) -> Option<(&'a Expr, i32, Vec<&'a Stmt>, i32, Vec<&'a Stmt>)> {
+    let sw = match body {
+        Stmt::Switch { .. } => body,
+        Stmt::Block(ss) if ss.len() == 1 => &ss[0],
+        _ => return None,
+    };
+    let Stmt::Switch { scrutinee, cases } = sw else { return None; };
+    if cases.len() != 2 { return None; }
+    let mut out: Vec<(i32, Vec<&Stmt>)> = Vec::new();
+    for arm in cases {
+        let v = arm.value?; // no default allowed
+        let (last, rest) = arm.body.split_last()?;
+        if !matches!(last, Stmt::Break) { return None; }
+        if rest.iter().any(|s| stmt_has_loop_break(s)) { return None; }
+        out.push((v, rest.iter().collect()));
+    }
+    let (k2, b2) = out.pop().unwrap();
+    let (k1, b1) = out.pop().unwrap();
+    Some((scrutinee, k1, b1, k2, b2))
+}
+/// Emit `for(init; C; step) { switch(scrut){ case K1: B1 break; case K2: B2 break; } }`
+/// in MSC's switch-in-loop form (C simple `Cmp`): the FIRST case body is hoisted
+/// above the step (reached by `je`, its break = fall-through to step); the SECOND
+/// is inline after the dispatch with an explicit `jmp step`; a non-match exits to
+/// the step. Fixture 3402.
+/// ```text
+///   init; jmp COND
+///   CASE1: <B1>
+///   STEP: step
+///   COND: C j!C EXIT
+///         <scrut → AX>
+///         cmp AX,K1; je CASE1
+///         cmp AX,K2; jne STEP
+///         <B2>; jmp STEP
+///   EXIT:
+/// ```
+#[allow(clippy::too_many_arguments)]
+fn emit_for_switch_2case(
+    init: &Stmt,
+    cond_c: &Cond,
+    step: &Stmt,
+    scrut: &Expr,
+    k1: i32,
+    b1: &[&Stmt],
+    k2: i32,
+    b2: &[&Stmt],
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> bool {
+    use crate::codegen::cond::emit_cond_cmp;
+    let Cond::Cmp { op: cop, .. } = cond_c else { return false; };
+    let jcc_exit = {
+        let j = inverted_jcc(*cop);
+        if cmp_is_unsigned(cond_c, locals) { to_unsigned_jcc(j) } else { j }
+    };
+    let cmp_ax_k = |k: i32| -> Vec<u8> {
+        if k == 0 { vec![0x0B, 0xC0] } // or ax,ax
+        else { let mut v = vec![0x3D]; v.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); v }
+    };
+    let cmp1 = cmp_ax_k(k1);
+    let cmp2 = cmp_ax_k(k2);
+    // Pre-build segments.
+    let mut b1_buf = Vec::new();
+    let mut b1_fx: Vec<Fixup> = Vec::new();
+    for s in b1 { emit_stmt(s, locals, frame, return_int, return_long, &mut b1_buf, &mut b1_fx); }
+    let mut step_buf = Vec::new();
+    let mut step_fx: Vec<Fixup> = Vec::new();
+    emit_stmt(step, locals, frame, return_int, return_long, &mut step_buf, &mut step_fx);
+    let mut c_buf = Vec::new();
+    let mut c_fx: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond_c, locals, &mut c_buf, &mut c_fx);
+    let mut scrut_buf = Vec::new();
+    let mut scrut_fx: Vec<Fixup> = Vec::new();
+    emit_expr_to_ax(scrut, locals, &mut scrut_buf, &mut scrut_fx);
+    let mut b2_buf = Vec::new();
+    let mut b2_fx: Vec<Fixup> = Vec::new();
+    for s in b2 { emit_stmt(s, locals, frame, return_int, return_long, &mut b2_buf, &mut b2_fx); }
+    // CASE1 (the byte after the aligned jmp) is even; EXIT pad is relative to it,
+    // so the hoisted case-1 body length counts toward the parity.
+    let after_jmp_step_rel = b1_buf.len() + step_buf.len() + c_buf.len() + 2 + scrut_buf.len()
+        + cmp1.len() + 2 + cmp2.len() + 2 + b2_buf.len() + 2;
+    let exit_pad = after_jmp_step_rel % 2;
+    // Back-edges (position-independent) + guard forward — validate up front.
+    let je1_back = b1_buf.len() + step_buf.len() + c_buf.len() + 2 + scrut_buf.len() + cmp1.len() + 2;
+    let jne_back = step_buf.len() + c_buf.len() + 2 + scrut_buf.len() + cmp1.len() + 2 + cmp2.len() + 2;
+    let jmp_back = step_buf.len() + c_buf.len() + 2 + scrut_buf.len() + cmp1.len() + 2 + cmp2.len() + 2 + b2_buf.len() + 2;
+    let guard_fwd = scrut_buf.len() + cmp1.len() + 2 + cmp2.len() + 2 + b2_buf.len() + 2 + exit_pad;
+    if i8::try_from(je1_back).is_err() || i8::try_from(jne_back).is_err()
+        || i8::try_from(jmp_back).is_err() || i8::try_from(guard_fwd).is_err() { return false; }
+    emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
+    let needs_pad = (out.len() + 2) % 2 != 0;
+    let jmp_pad = usize::from(needs_pad);
+    let jmp_disp = i8::try_from(b1_buf.len() + step_buf.len() + jmp_pad).expect("switch-loop jmp fits");
+    out.push(0xEB);
+    out.push(jmp_disp as u8);
+    if needs_pad { out.push(0x90); }
+    let case1_base = out.len();
+    out.extend_from_slice(&b1_buf);
+    for mut f in b1_fx { f.body_offset += case1_base; fixups.push(f); }
+    let step_base = out.len();
+    out.extend_from_slice(&step_buf);
+    for mut f in step_fx { f.body_offset += step_base; fixups.push(f); }
+    // COND: guard.
+    let c_base = out.len();
+    out.extend_from_slice(&c_buf);
+    for mut f in c_fx { f.body_offset += c_base; fixups.push(f); }
+    out.push(jcc_exit);
+    out.push(guard_fwd as u8);
+    // scrutinee.
+    let scrut_base = out.len();
+    out.extend_from_slice(&scrut_buf);
+    for mut f in scrut_fx { f.body_offset += scrut_base; fixups.push(f); }
+    // cmp K1; je CASE1 (backward).
+    out.extend_from_slice(&cmp1);
+    out.push(0x74); // je
+    let d = i8::try_from(case1_base as i32 - (out.len() as i32 + 1)).expect("switch-loop je fits");
+    out.push(d as u8);
+    // cmp K2; jne STEP (backward) — non-match exits to the step.
+    out.extend_from_slice(&cmp2);
+    out.push(0x75); // jne
+    let d = i8::try_from(step_base as i32 - (out.len() as i32 + 1)).expect("switch-loop jne fits");
+    out.push(d as u8);
+    // case 2 body inline, then jmp STEP (its break).
+    let b2_base = out.len();
+    out.extend_from_slice(&b2_buf);
+    for mut f in b2_fx { f.body_offset += b2_base; fixups.push(f); }
+    out.push(0xEB);
+    let d = i8::try_from(step_base as i32 - (out.len() as i32 + 1)).expect("switch-loop jmp-step fits");
+    out.push(d as u8);
+    if exit_pad == 1 { out.push(0x90); }
+    true
+}
 /// Match a for-loop body `{ PREFIX...; while(W) WBODY }` whose LAST statement is a
 /// while-loop (and PREFIX has no return/loop-control, WBODY no break/continue).
 /// MSC fuses the inner while's exit into the OUTER step. Returns the prefix
@@ -2979,6 +3119,16 @@ pub(crate) fn emit_for(
         && let Some((prefix, w, wbody)) = for_body_prefix_while(body_stmt, locals)
         && matches!(w, Cond::Cmp { .. })
         && emit_for_trailing_while(init, cond, step, &prefix, w, wbody,
+            locals, frame, return_int, return_long, out, fixups)
+    {
+        return;
+    }
+    // `for(init; C; step) { switch(scrut){ case K1: B1 break; case K2: B2 break; } }`:
+    // MSC hoists case 1 above the step and inlines case 2 in the cond section.
+    // Fixture 3402.
+    if matches!(cond, Cond::Cmp { .. })
+        && let Some((scrut, k1, b1, k2, b2)) = for_body_switch_2case(body_stmt)
+        && emit_for_switch_2case(init, cond, step, scrut, k1, &b1, k2, &b2,
             locals, frame, return_int, return_long, out, fixups)
     {
         return;

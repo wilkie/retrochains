@@ -91,6 +91,12 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     || stmt_si(step, inits)
                     || stmt_si(body, inits)
             }
+            // A `switch (scrut)` whose scrutinee or any case body needs SI
+            // (e.g. a runtime-indexed `switch(p[i])`) saves SI in the frame.
+            Stmt::Switch { scrutinee, cases } => {
+                expr_si(scrutinee, inits)
+                    || cases.iter().any(|a| a.body.iter().any(|s| stmt_si(s, inits)))
+            }
             _ => false,
         }
     }
