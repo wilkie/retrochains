@@ -3418,6 +3418,23 @@ pub(crate) fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, valu
         out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
         return;
     }
+    // A runtime `imul` RHS (`a[i] = x * y`, both operands runtime) is computed
+    // into AX BEFORE the index is set up — MSC schedules the multiply first, then
+    // loads SI. (Simple RHS like `a[i] = i` / `i + 1` stay index-first; a constant
+    // multiply strength-reduces and isn't an imul.) Only when the index is a plain
+    // Local/Param so its `mov si,[..]` can't clobber the product in AX. Fixture
+    // 1807 (`a[i] = i * i`).
+    if let Expr::BinOp { op: BinOp::Mul, left, right } = value
+        && left.fold(locals.inits).is_none()
+        && right.fold(locals.inits).is_none()
+        && matches!(index, Expr::Local(_) | Expr::Param(_))
+    {
+        emit_expr_to_ax(value, locals, out, fixups);
+        emit_index_to_si(index, locals, out, fixups);
+        out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
+        out.push(0x89); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp);
+        return;
+    }
     emit_index_to_si(index, locals, out, fixups);
     out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
     emit_expr_to_ax(value, locals, out, fixups);
