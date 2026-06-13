@@ -1542,6 +1542,28 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             let right_was_var = !matches!(right.as_ref(), Expr::IntLit(_));
             prop_expr(left, cp);
             prop_expr(right, cp);
+            // Algebraic identities on bit ops with a literal 0 operand:
+            // `x & 0 → 0` (x dropped, so it must be side-effect-free) and
+            // `x | 0 → x` / `0 | x → x`. MSC folds these away — e.g. a
+            // `f.a = (f.a & 0) | (v & 0xF)` bitfield clear-then-set collapses
+            // to `f.a = v & 0xF`. Fixture 3562.
+            match op {
+                BinOp::BitAnd => {
+                    let lz = matches!(left.as_ref(), Expr::IntLit(0));
+                    let rz = matches!(right.as_ref(), Expr::IntLit(0));
+                    if (lz && crate::codegen::statements::expr_is_pure(right))
+                        || (rz && crate::codegen::statements::expr_is_pure(left))
+                    {
+                        *e = Expr::IntLit(0);
+                        return;
+                    }
+                }
+                BinOp::BitOr => {
+                    if matches!(left.as_ref(), Expr::IntLit(0)) { *e = (**right).clone(); return; }
+                    if matches!(right.as_ref(), Expr::IntLit(0)) { *e = (**left).clone(); return; }
+                }
+                _ => {}
+            }
             if matches!(op, BinOp::Add | BinOp::Sub)
                 && right_was_var
                 && let Expr::IntLit(k) = right.as_ref()

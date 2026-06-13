@@ -640,7 +640,8 @@ pub(crate) fn expr_is_pure(e: &Expr) -> bool {
         | Expr::GlobalField { .. }
         | Expr::DerefLocalField { .. }
         | Expr::DerefParamField { .. }
-        | Expr::DerefGlobalField { .. } => true,
+        | Expr::DerefGlobalField { .. }
+        | Expr::BitField { .. } => true,
         Expr::BinOp { left, right, .. } => expr_is_pure(left) && expr_is_pure(right),
         Expr::Ternary { cond, then_arm, else_arm } => {
             expr_is_pure(cond) && expr_is_pure(then_arm) && expr_is_pure(else_arm)

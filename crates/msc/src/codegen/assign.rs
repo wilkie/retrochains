@@ -3595,7 +3595,21 @@ pub(crate) fn emit_assign_bitfield(base: BitBase, byte_off: u16, bit_off: u8, bi
     // unit into CX, clear the field bits, OR together, store. Fixture 3322.
     let Some(k) = value.fold(locals.inits) else {
         emit_expr_to_ax(value, locals, out, fixups);     // v → AX
-        out.push(0x25); out.extend_from_slice(&(maskw as u16).to_le_bytes()); // and ax,maskw
+        // Skip the field-width mask when the value is ALREADY masked to within
+        // the field (`v & 0xF` stored into a 4-bit field) — MSC omits the
+        // redundant `and ax,maskw`. Fixture 3562.
+        let already_masked = match value {
+            Expr::BinOp { op: BinOp::BitAnd, left, right } => {
+                let m = if let Expr::IntLit(m) = right.as_ref() { Some(*m) }
+                    else if let Expr::IntLit(m) = left.as_ref() { Some(*m) }
+                    else { None };
+                m.is_some_and(|m| (m as u32 & !maskw) & 0xFFFF == 0)
+            }
+            _ => false,
+        };
+        if !already_masked {
+            out.push(0x25); out.extend_from_slice(&(maskw as u16).to_le_bytes()); // and ax,maskw
+        }
         for _ in 0..bit_off { out.extend_from_slice(&[0xD1, 0xE0]); } // shl ax,1 (×bit_off)
         // Load the unit into CX and clear the field bits there.
         match base {
