@@ -888,6 +888,31 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         }
         return;
     }
+    // `arr[i] OP var` where `arr[i]` is a runtime-indexed WORD param-array
+    // element and `var` is a simple word lvalue: set up the indexed address
+    // (`mov bx,[i]; shl bx,1; mov si,[arr]`), load the RHS into AX, and compare
+    // in place (`cmp [bx+si],ax`). Matches MSC's loop-cond form rather than the
+    // generic eval-both-into-registers fallback. Fixture 3398 (`p[i] == target`).
+    if let Cond::Cmp { left: Expr::ParamIndex { param, index }, right, .. } = cond
+        && index.fold(locals.inits).is_none()
+        && !locals.is_char_param(*param)
+        && !locals.is_long_param(*param)
+        && locals.param_pointee_size(*param) == 2
+        && match right {
+            Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i),
+            Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i),
+            Expr::Global(g) => !locals.is_char_global(*g) && !locals.is_long_global(*g),
+            _ => false,
+        }
+    {
+        crate::codegen::expr::emit_load_bx(index, locals, out, fixups); // mov bx,[i]
+        out.extend_from_slice(&[0xD1, 0xE3]);                           // shl bx,1
+        let pd = param_disp(*param);
+        out.push(0x8B); out.push(bp_modrm(0x76, pd)); push_bp_disp(out, pd); // mov si,[bp+arr]
+        emit_expr_to_ax(right, locals, out, fixups);                   // mov ax,<rhs>
+        out.extend_from_slice(&[0x39, 0x00]);                          // cmp [bx+si],ax
+        return;
+    }
     match cond {
         Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, locals, 0, out),
         Cond::Truthy(Expr::Param(idx)) => {
