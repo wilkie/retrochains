@@ -553,6 +553,28 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             return;
         }
     }
+    // `*p OP <word var>` (word deref of a simple pointer vs a Param/Local/Global
+    // word): load the pointer into BX, the other operand into AX, then
+    // `cmp [bx],ax` — instead of parking. Fixture 3598 (`*p != v`).
+    if let Cond::Cmp { left, right, .. } = cond
+        && let Expr::DerefWord { ptr } = left
+        && matches!(ptr.as_ref(), Expr::Param(_) | Expr::Local(_))
+        && match right {
+            Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i),
+            Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i),
+            Expr::Global(g) => !locals.is_char_global(*g) && !locals.is_long_global(*g),
+            _ => false,
+        }
+    {
+        match ptr.as_ref() {
+            Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
+            Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
+            _ => unreachable!(),
+        }
+        emit_expr_to_ax(right, locals, out, fixups); // mov ax,<right>
+        out.extend_from_slice(&[0x39, 0x07]); // cmp [bx],ax
+        return;
+    }
     // Arithmetic result compared against zero — MSC reuses the ALU flags
     // rather than a separate compare:
     //   `(x - y) == 0` / `!= 0` → rewrite to `Cmp(op, x, y)`; the `cmp`
