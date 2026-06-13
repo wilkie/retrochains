@@ -704,12 +704,33 @@ pub(crate) fn emit_stmt(
     // themselves (a nested if/loop sets it at its own merge), so a block of
     // straight-line assigns leaves AX reusable — matching MSC's flat view of an
     // elided `if(true){v=...}` (fixture 1986).
-    if !matches!(stmt, Stmt::Assign { .. } | Stmt::Block(_)) {
+    // Exception: `if (simple-cond) <exit>;` (no else, then-branch unconditionally
+    // returns/breaks/continues/gotos) does NOT merge control flow at the
+    // fall-through — the code after it runs only when the condition is FALSE (a
+    // single path), so registers there hold exactly what the condition's eval
+    // left. Keep the barrier so the next statement can reuse that (e.g.
+    // `if(*r==0)return; *r=1;` reuses BX=r). And/Or conditions have multiple
+    // false-paths that DO merge, so they still advance the barrier.
+    let keep_barrier = matches!(stmt,
+        Stmt::If { cond, then_branch, else_branch: None }
+            if matches!(cond, Cond::Cmp { .. } | Cond::Truthy(_))
+                && if_then_exits(then_branch));
+    if !matches!(stmt, Stmt::Assign { .. } | Stmt::Block(_)) && !keep_barrier {
         // A do-while-form loop with no break/continue always runs its body, so
         // AX at the merge is the body's last write — emit_loop leaves a barrier
         // inside the loop instead of at its end (fixture 1411).
         let barrier = locals.merge_barrier.take().unwrap_or(out.len());
         locals.last_branch_barrier.set(barrier);
+    }
+}
+/// True when `stmt` unconditionally transfers control away (return/break/
+/// continue/goto, or a block ending in one) — so an `if (c) stmt;` never falls
+/// through its then-branch into the following code.
+fn if_then_exits(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::Goto(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Block(v) => v.last().is_some_and(if_then_exits),
+        _ => false,
     }
 }
 /// True when `stmt` unconditionally returns — so a following

@@ -1353,6 +1353,14 @@ fn bx_holds_param(out: &[u8], pdisp: i16, barrier: usize) -> bool {
             // alu [bp+d8],ax  /  alu ax,[bp+d8]  (add/or/and/sub/xor, both dirs)
             [op, 0x46, _, ..] if matches!(op, 0x01|0x03|0x09|0x0B|0x21|0x23|0x29|0x2B|0x31|0x33) => Some(3),
             [0x98, ..] => Some(1),                                // cbw
+            // A preceding `if (*p OP imm)` test left BX = p: the deref-compare and
+            // its conditional jump preserve BX. `cmp word/byte [bx],imm8` (83/80
+            // /7 modrm 0x3F), `cmp word [bx],imm16` (81 /7), `cmp [bx],reg` (39 07)
+            // / `cmp reg,[bx]` (3B 07), and a `jcc rel8` (70..7F). Fixture 1566.
+            [0x83, 0x3F, _, ..] | [0x80, 0x3F, _, ..] => Some(3),
+            [0x81, 0x3F, _, _, ..] => Some(4),
+            [0x39, 0x07, ..] | [0x3B, 0x07, ..] => Some(2),
+            [j, _, ..] if (0x70..=0x7F).contains(j) => Some(2), // jcc rel8
             _ => None,
         }
     }
@@ -1545,8 +1553,12 @@ pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &L
         return;
     }
     if let Some(k) = value.fold(locals.inits) {
-        // Constant store: load the pointer then write the immediate.
-        out.extend_from_slice(&mov_bx);
+        // Constant store: load the pointer then write the immediate. Reuse BX if
+        // a preceding straight-line test (`if(*p…)…`) already left p there — e.g.
+        // `if(*r==0)return; *r=1;`. Fixture 1566.
+        if !bx_holds_param(out, pdisp, locals.last_branch_barrier.get()) {
+            out.extend_from_slice(&mov_bx);
+        }
         if is_byte {
             out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]); // mov byte [bx], k
         } else {
