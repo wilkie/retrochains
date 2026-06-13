@@ -2372,22 +2372,34 @@ fn i8_disp(target: usize, disp_pos: usize) -> Option<u8> {
 /// <cmp>
 /// <jcc>     jcc back to step start
 /// ```
-/// Match a for-loop body that is a single `if (D) S;` (no else) where `S` always
-/// returns — the shape MSC fuses into a conditional loop back-edge. Returns the
-/// if-condition and the then-branch. Fixture 1256.
-fn for_body_single_if_return<'a>(body: &'a Stmt, locals: &Locals<'_>) -> Option<(&'a Cond, &'a Stmt)> {
+/// True when `s` is a `break`, or a `Block` whose last statement is a `break`.
+fn stmt_ends_in_break(s: &Stmt) -> bool {
+    match s {
+        Stmt::Break => true,
+        Stmt::Block(ss) => ss.last().is_some_and(stmt_ends_in_break),
+        _ => false,
+    }
+}
+/// Match a for-loop body that is a single `if (D) S;` (no else) where `S` cannot
+/// fall through to the next iteration — it either always returns or ends in a
+/// `break`. The shape MSC fuses into a conditional loop back-edge. Returns the
+/// if-condition, the then-branch, and whether it returns (vs. breaks).
+/// Fixtures 1256 (return), 4048 (break).
+fn for_body_single_if_exit<'a>(body: &'a Stmt, locals: &Locals<'_>) -> Option<(&'a Cond, &'a Stmt, bool)> {
     let if_stmt = match body {
         Stmt::If { .. } => body,
         Stmt::Block(ss) if ss.len() == 1 => &ss[0],
         _ => return None,
     };
-    if let Stmt::If { cond, then_branch, else_branch: None } = if_stmt
-        && stmt_always_returns(then_branch, locals)
-    {
-        Some((cond, then_branch.as_ref()))
-    } else {
-        None
+    if let Stmt::If { cond, then_branch, else_branch: None } = if_stmt {
+        if stmt_always_returns(then_branch, locals) {
+            return Some((cond, then_branch.as_ref(), true));
+        }
+        if stmt_ends_in_break(then_branch) {
+            return Some((cond, then_branch.as_ref(), false));
+        }
     }
+    None
 }
 /// Emit the fused-if for-loop (see [`for_body_single_if_return`]):
 /// ```text
@@ -2406,6 +2418,7 @@ fn emit_for_fused_if(
     step: &Stmt,
     cond_d: &Cond,
     then_s: &Stmt,
+    is_return: bool,
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
@@ -2437,7 +2450,21 @@ fn emit_for_fused_if(
     emit_cond_cmp(cond_d, locals, &mut d_buf, &mut d_fx);
     let mut s_buf = Vec::new();
     let mut s_fx: Vec<Fixup> = Vec::new();
-    emit_stmt(then_s, locals, frame, return_int, return_long, &mut s_buf, &mut s_fx);
+    if is_return {
+        emit_stmt(then_s, locals, frame, return_int, return_long, &mut s_buf, &mut s_fx);
+    } else {
+        // Break case: emit the then-branch WITHOUT its trailing `break` — the
+        // break is an implicit fall-through to the after-loop code. Fixture 4048.
+        match then_s {
+            Stmt::Break => {}
+            Stmt::Block(ss) => {
+                for s in &ss[..ss.len().saturating_sub(1)] {
+                    emit_stmt(s, locals, frame, return_int, return_long, &mut s_buf, &mut s_fx);
+                }
+            }
+            _ => return false,
+        }
+    }
     // Validate the position-independent displacements up front (the back-edge and
     // the guard's forward jump). The back-edge magnitude bounds step+C+D too, so
     // the small initial-jmp disp can't overflow once these pass.
@@ -2462,12 +2489,12 @@ fn emit_for_fused_if(
     let c_base = out.len();
     out.extend_from_slice(&c_buf);
     for mut f in c_fx { f.body_offset += c_base; fixups.push(f); }
-    // MSC pads after the inline then-branch S with a NOP so the after-loop code
-    // (the guard's exit target) lands on an even offset. Compute that pad now —
-    // the end-of-S position is fully determined by the buffer sizes — and fold
-    // it into the guard's forward displacement. Fixture 521 (1256 needs no pad).
+    // A then-branch that RETURNS ends in `ret`, after which MSC pads with a NOP
+    // so the after-loop block (the guard's exit target) is even-aligned. A break
+    // then-branch falls THROUGH to the after-loop code, so it is never padded.
+    // Fixture 521 (return, padded), 1256 (return, already even), 4048 (break).
     let s_end = c_base + c_buf.len() + 2 + d_buf.len() + 2 + s_buf.len();
-    let s_pad = usize::from(s_end % 2 != 0);
+    let s_pad = usize::from(is_return && s_end % 2 != 0);
     let c_fwd = i8::try_from(d_buf.len() + 2 + s_buf.len() + s_pad).expect("fused-for guard disp fits");
     out.push(jcc_c);
     out.push(c_fwd as u8);
@@ -2533,10 +2560,10 @@ pub(crate) fn emit_for(
     // conditional back-edge ("jne-back trick"), emitting the cond between step and
     // body. Fixture 1256. (A `break` then-branch is the leading-break case below.)
     // This emitter writes its own init, so it sits BEFORE the init emission.
-    if let Some((cond_d, then_s)) = for_body_single_if_return(body_stmt, locals)
+    if let Some((cond_d, then_s, is_return)) = for_body_single_if_exit(body_stmt, locals)
         && matches!(cond, Cond::Cmp { .. })
         && matches!(cond_d, Cond::Cmp { .. })
-        && emit_for_fused_if(init, cond, step, cond_d, then_s,
+        && emit_for_fused_if(init, cond, step, cond_d, then_s, is_return,
             locals, frame, return_int, return_long, out, fixups)
     {
         return;
