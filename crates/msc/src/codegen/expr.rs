@@ -2214,36 +2214,21 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         }
         return;
     }
-    // `<int-scalar> + <char deref>` (e.g. `n + s[0]` for a global `char *s`):
-    // MSC evaluates the CHAR operand first — a byte read clobbers AL and needs a
-    // cbw, so doing it first avoids reloading the int — then folds the int in
-    // place: `mov bx,[s]; mov al,[bx]; cbw; add ax,[n]`. Applies in either source
-    // order (add commutes, neither operand has side effects). Fixture 2565.
-    if matches!(op, BinOp::Add) {
-        let is_int_scalar = |e: &Expr| match e {
-            Expr::Global(g) => !locals.is_char_global(*g) && !locals.is_long_global(*g),
-            Expr::Local(l) => locals.size(*l) == 2 && !locals.is_long_local(*l)
-                && !locals.is_array_local(*l) && !locals.is_float_local(*l)
-                && locals.reg_for_local(*l).is_none(),
-            Expr::Param(p) => !locals.is_char_param(*p) && !locals.is_long_param(*p)
-                && !locals.is_float_param(*p),
-            _ => false,
-        };
-        let is_char_deref = |e: &Expr| match e {
-            Expr::DerefByte { .. } => true,
-            // `p[K]` on a char-element global pointer reads a byte + cbw.
-            Expr::PtrIndexByte { ptr, index } =>
-                locals.global_elem_size(*ptr) == 1 && index.fold(locals.inits).is_some(),
-            _ => false,
-        };
-        let pair = if is_char_deref(left) && is_int_scalar(right) { Some((left, right)) }
-            else if is_char_deref(right) && is_int_scalar(left) { Some((right, left)) }
-            else { None };
-        if let Some((ch, int_op)) = pair {
-            emit_expr_to_ax(ch, locals, out, fixups);            // mov bx,[s]; mov al,[bx]; cbw
-            emit_binop_right(BinOp::Add, int_op, locals, out, fixups); // add ax,[n]
-            return;
-        }
+    // `<simple memory operand> + <pointer/field deref>` (e.g. `n + s[0]`, or
+    // `n1.v + n1.next->v`): MSC always computes the DEREF operand into AX first —
+    // a deref clobbers AX and can't be an `add ax,[mem]` source — then folds the
+    // simple operand in place. We otherwise spill the simple operand across the
+    // deref (`push ax; …; mov bx,ax; pop ax; add ax,bx`). The deref reaching AX
+    // via emit_expr_to_ax also gets the correct char widen (cbw / sub ah,ah).
+    // Restricted to genuine derefs on the complex side — a plain char scalar is
+    // handled differently by MSC (parked in CX). Fixtures 2310, 2565.
+    if matches!(op, BinOp::Add)
+        && inplace_addable(left, locals)
+        && is_complex_deref(right, locals)
+    {
+        emit_expr_to_ax(right, locals, out, fixups);
+        emit_binop_right(BinOp::Add, left, locals, out, fixups);
+        return;
     }
     // `make().a OP make().b` — two by-value struct-return field reads. Eval both
     // calls left-to-right (each spilling DX:AX to its temp), then combine: left's
@@ -2765,6 +2750,35 @@ pub(crate) fn bf_load_word_cx(base: BitBase, byte_off: u16, locals: &Locals<'_>,
             true
         }
         BitBase::DerefParam(_) => false,
+    }
+}
+/// A word-sized memory operand that `emit_binop_right` can fold as a single
+/// `add ax,[mem]` (no spill): an int immediate, a word global / global struct
+/// field, or a word local/param scalar. Char/long/float/array operands are
+/// excluded (a word `add` would read the wrong width). Used to decide whether
+/// the simple side of `simple + deref` can be added in place after the deref.
+fn inplace_addable(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::IntLit(_) => true,
+        Expr::Global(g) => !locals.is_long_global(*g) && !locals.is_char_global(*g),
+        Expr::GlobalField { size: 2, .. } => true,
+        Expr::Local(l) => locals.size(*l) == 2 && !locals.is_long_local(*l)
+            && !locals.is_array_local(*l) && !locals.is_float_local(*l)
+            && locals.reg_for_local(*l).is_none(),
+        Expr::Param(p) => !locals.is_char_param(*p) && !locals.is_long_param(*p)
+            && !locals.is_float_param(*p),
+        _ => false,
+    }
+}
+/// A pointer/field deref that must be computed through AX (it can't be an
+/// `add ax,[mem]` source and clobbers AX). The "complex" side of `simple + deref`
+/// — deliberately narrow (NOT plain char scalars, which MSC parks in CX).
+fn is_complex_deref(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::DerefWord { .. } | Expr::DerefByte { .. } | Expr::PtrChainField { .. } => true,
+        // `p[K]` through a global pointer is a deref; a runtime index is too.
+        Expr::PtrIndexByte { index, .. } => index.fold(locals.inits).is_some(),
+        _ => false,
     }
 }
 /// Flatten a left-assoc `+` chain whose leaves are ALL constant-indexed elements
@@ -4359,6 +4373,22 @@ pub(crate) fn emit_binop_right(op: BinOp, right: &Expr, locals: &Locals<'_>, out
             body_offset: body_offset - 1,
             kind: FixupKind::GlobalAddr { global_idx: *idx },
         });
+        return;
+    }
+    // Word struct-field of a global (`g.field`, size 2) → `<op> ax,[g+off]`
+    // (modrm 0x06, off folds into the GlobalAddr fixup). Mirrors the Global arm
+    // with a non-zero displacement. Fixture 2310 (`n1.v + n1.next->v`).
+    if let Expr::GlobalField { global, byte_off, size: 2 } = right {
+        let opcode = match op {
+            BinOp::Add => 0x03u8, BinOp::Sub => 0x2B,
+            BinOp::BitAnd => 0x23, BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33,
+            _ => panic!("{op:?} with global-field rhs not yet supported"),
+        };
+        out.push(opcode);
+        out.push(0x06);
+        let body_offset = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        fixups.push(Fixup { body_offset: body_offset - 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
         return;
     }
     if let Some((array_idx, byte_off)) = const_index_global(right, locals) {
