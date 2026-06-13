@@ -106,10 +106,15 @@ pub struct Unit {
     pub variadic_fns: std::collections::HashSet<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TopDecl {
     Global(usize),
     Function(usize),
+    /// A function prototype (`extern int f(...);`) at file scope — carries the
+    /// mangled symbol name so the EXTDEF emitter can place a CALLED extern in the
+    /// pre- or post-COMDEF group by its source position relative to a tentative
+    /// global. Not a defined function, so it contributes no PUBDEF/_TEXT.
+    ExternProto(String),
 }
 
 /// A file-scope global variable. Phase 1 covers scalar `int g [= K];`
@@ -2707,15 +2712,28 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         for h in &helper_extern_order {
             pre.push((h.clone(), 0x00, false));
         }
+        // A CALLED extern whose prototype was declared BEFORE the COMDEF global
+        // belongs in the pre-COMDEF group (like a function defined before it);
+        // the rest stay post-COMDEF. Fixtures 3602/3989/424 (proto before global)
+        // vs the common case (global first → all externs post). Split by the
+        // ExternProto source position in decl_order.
+        let extern_pos = |name: &str| unit.decl_order.iter().position(|d|
+            matches!(d, TopDecl::ExternProto(n) if n == name));
+        let (pre_externs, post_externs): (Vec<String>, Vec<String>) =
+            user_extern_order.iter().cloned().partition(|name|
+                matches!((extern_pos(name), split_pos), (Some(ep), Some(sp)) if ep < sp));
+        for name in &pre_externs {
+            pre.push((name.clone(), 0x00, false));
+        }
         for &fi in &funcs_before {
             pre.push((fn_symbol(&unit.functions[fi]), 0x00, unit.functions[fi].is_static));
         }
         emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
         // COMDEF: tentative globals
         emit_comdef(&mut b, &mut extdef_idx_of, &mut next_idx);
-        // EXTDEF2: user-fn-externs + [functions after the COMDEF]
+        // EXTDEF2: post-COMDEF user-fn-externs + [functions after the COMDEF]
         let mut post: Vec<(String, u8, bool)> = Vec::new();
-        for name in &user_extern_order {
+        for name in &post_externs {
             post.push((name.clone(), 0x00, false));
         }
         for &fi in &funcs_after {
@@ -2758,11 +2776,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     TopDecl::Function(*fn_iter.next().expect("fn_order covers every Function decl"))
                 }
                 TopDecl::Global(i) => TopDecl::Global(*i),
+                TopDecl::ExternProto(n) => TopDecl::ExternProto(n.clone()),
             })
             .collect()
     };
     for entry in &pub_walk {
         let (grp, seg, sym, off, is_local) = match entry {
+            // A prototype publishes nothing.
+            TopDecl::ExternProto(_) => continue,
             TopDecl::Global(i) => {
                 // `static` globals are TU-private — skip PUBDEF.
                 if unit.globals[*i].is_static { continue; }

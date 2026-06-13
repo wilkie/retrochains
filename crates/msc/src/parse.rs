@@ -200,6 +200,10 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
                         fn_appearance.push(nm.clone());
                     }
                     prototyped_fns.insert(symbol_name(nm));
+                    // Record the prototype's source position so the EXTDEF emitter
+                    // can place a called extern before/after a tentative COMDEF
+                    // global by declaration order. Fixtures 3602/3989/424.
+                    decl_order.push(TopDecl::ExternProto(symbol_name(nm)));
                     // Variadic prototype: the param list ends with `...` (three
                     // `Dot` tokens). A long/float arg in a vararg position is
                     // pushed by natural width. Fixtures 2197/3983.
