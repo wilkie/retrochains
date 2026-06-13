@@ -4152,6 +4152,33 @@ pub(crate) fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, siz
         else { out.extend_from_slice(&[store, 0x47, byte_off as u8]); }
         return;
     }
+    // `p->f1 = p->f2 ± K` (store to one word field from a DIFFERENT word field of
+    // the SAME struct pointer, plus a constant): MSC keeps p in BX (store target)
+    // and copies it to SI to read the source field, so BX survives the read —
+    // `mov bx,[p]; mov si,bx; mov ax,[si+f2]; <±K>; mov [bx+f1],ax`. (Same-field
+    // ±K is the in-place arm above; this is the cross-field case.) Needs a push-SI
+    // frame. Fixture 2656 (`p->x = p->y + 1`).
+    if size == 2
+        && let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+        && let Expr::DerefParamField { ptr_param: sp, byte_off: s_off, size: 2 } = left.as_ref()
+        && *sp == ptr_param && *s_off != byte_off
+        && let Some(k) = right.fold(locals.inits)
+    {
+        out.extend_from_slice(&[0x8B, 0x5E, p_disp as u8]); // mov bx,[bp+p]
+        out.extend_from_slice(&[0x8B, 0xF3]);               // mov si,bx
+        if *s_off == 0 { out.extend_from_slice(&[0x8B, 0x04]); }            // mov ax,[si]
+        else { out.extend_from_slice(&[0x8B, 0x44, *s_off as u8]); }        // mov ax,[si+f2]
+        let is_sub = matches!(op, BinOp::Sub);
+        if k == 1 || k == -1 {
+            out.push(if is_sub ^ (k == -1) { 0x48 } else { 0x40 }); // dec/inc ax
+        } else {
+            out.push(if is_sub { 0x2D } else { 0x05 }); // sub/add ax,imm16
+            out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+        if byte_off == 0 { out.extend_from_slice(&[0x89, 0x07]); }          // mov [bx],ax
+        else { out.extend_from_slice(&[0x89, 0x47, byte_off as u8]); }      // mov [bx+f1],ax
+        return;
+    }
     out.push(0x8B);
     out.push(0x5E);
     out.push(p_disp as u8);

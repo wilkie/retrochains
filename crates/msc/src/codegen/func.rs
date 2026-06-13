@@ -77,6 +77,11 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     // so p (BX) survives the store. Fixture 1401.
                     || (matches!(target, AssignTarget::DerefParamField { .. } | AssignTarget::DerefLocalField { .. })
                         && matches!(value, Expr::DerefParamField { .. } | Expr::DerefLocalField { .. }))
+                    // `p->f1 = p->f2 ± K` (cross-field self-update through one
+                    // struct ptr param) reads f2 via SI so the store ptr (BX)
+                    // survives. Fixture 2656.
+                    || matches!(target, AssignTarget::DerefParamField { ptr_param, byte_off, .. }
+                        if deref_param_field_cross_self(value, *ptr_param, *byte_off))
                     || expr_si(value, inits)
             }
             Stmt::Return(e) => expr_si(e, inits),
@@ -236,6 +241,15 @@ fn deref_param_inplace_src_is_param(value: &Expr, dst: usize) -> bool {
         _ => None,
     };
     left_is_dst && matches!(right_src, Some(s) if s != dst)
+}
+/// `value` is `p->f2 ± K` for the SAME pointer param `p` but a DIFFERENT word
+/// field offset than `dst_off`. Mirrors the cross-field emit arm in
+/// `emit_assign_deref_param_field`. Fixture 2656.
+fn deref_param_field_cross_self(value: &Expr, dst_param: usize, dst_off: u16) -> bool {
+    let Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. } = value else { return false };
+    matches!(left.as_ref(),
+        Expr::DerefParamField { ptr_param, byte_off, size: 2 }
+            if *ptr_param == dst_param && *byte_off != dst_off)
 }
 fn deref_param_src_is_param(value: &Expr, dst: usize) -> bool {
     fn src_of(e: &Expr) -> Option<usize> {
