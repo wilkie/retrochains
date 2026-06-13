@@ -2133,6 +2133,28 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         emit_imm_op(op, *k, out);
         return;
     }
+    // Int `+` chain over plain globals where exactly one is a `char`: MSC hoists
+    // the char load to the front (`mov al,[c]; cbw`) and folds the int terms in
+    // source order (`add ax,[a]; add ax,[b]`), rather than reading the char as a
+    // word in place. Fixture 131 (`a + b + c`, `c` a char global). Only int
+    // (non-char, non-long) globals join the chain.
+    if matches!(op, BinOp::Add) {
+        let mut leaves: Vec<usize> = Vec::new();
+        if collect_global_add_chain(left, &mut leaves)
+            && collect_global_add_chain(right, &mut leaves)
+            && leaves.len() >= 2
+            && leaves.iter().filter(|&&g| locals.is_char_global(g)).count() == 1
+            && leaves.iter().all(|&g| locals.is_char_global(g)
+                || (!locals.is_char_global(g) && !locals.is_long_global(g)))
+        {
+            let cg = leaves.iter().copied().find(|&g| locals.is_char_global(g)).unwrap();
+            emit_expr_to_ax(&Expr::Global(cg), locals, out, fixups); // mov al,[c]; cbw
+            for &g in leaves.iter().filter(|&&g| g != cg) {
+                emit_binop_right(BinOp::Add, &Expr::Global(g), locals, out, fixups);
+            }
+            return;
+        }
+    }
     // `make().a OP make().b` — two by-value struct-return field reads. Eval both
     // calls left-to-right (each spilling DX:AX to its temp), then combine: left's
     // field is reloaded from its temp (AX was clobbered by the 2nd call), right's
@@ -2653,6 +2675,18 @@ pub(crate) fn bf_load_word_cx(base: BitBase, byte_off: u16, locals: &Locals<'_>,
             true
         }
         BitBase::DerefParam(_) => false,
+    }
+}
+/// Flatten a left-assoc `+` chain whose leaves are all `Expr::Global` into the
+/// source-ordered global indices. Returns false (leaving `out` partially filled)
+/// the moment a non-Global, non-Add leaf is hit.
+fn collect_global_add_chain(e: &Expr, out: &mut Vec<usize>) -> bool {
+    match e {
+        Expr::Global(i) => { out.push(*i); true }
+        Expr::BinOp { op: BinOp::Add, left, right } => {
+            collect_global_add_chain(left, out) && collect_global_add_chain(right, out)
+        }
+        _ => false,
     }
 }
 /// Flatten a left-assoc `+` chain whose leaves are all `Expr::BitField` into a
