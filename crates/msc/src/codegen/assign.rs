@@ -1341,7 +1341,7 @@ fn bx_holds_param_after_temp_copy(out: &[u8], pdisp: i16, barrier: usize) -> boo
 /// exactly the end. Conservative — any unrecognized byte fails the candidate, so
 /// a false positive (wrong BX) cannot occur. Generalizes the swap-footprint
 /// check to cross-statement reuse like `s += p->v; p = p->next`. Fixture 3343.
-fn bx_holds_param(out: &[u8], pdisp: i16, barrier: usize) -> bool {
+pub(crate) fn bx_holds_param(out: &[u8], pdisp: i16, barrier: usize) -> bool {
     // Length of a BX-preserving instruction at `s[0..]`, or None if not one.
     fn step(s: &[u8]) -> Option<usize> {
         match s {

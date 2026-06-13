@@ -2413,7 +2413,22 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
     if matches!(op, BinOp::Sub)
         && let Some(shift) = ptr_diff_shift(left, right, locals)
     {
-        emit_binop_inner(BinOp::Sub, left, right, locals, out, fixups);
+        // Reuse BX if it still holds the LEFT pointer — e.g. `while(*p) p++;
+        // return p - s;` leaves p in BX from the loop condition's `mov bx,[p]`,
+        // so the difference is `mov ax,bx; sub ax,[s]` with no reload. Fixture 1931.
+        let left_disp = match left {
+            Expr::Local(i) => Some(locals.disp(*i)),
+            Expr::Param(i) => Some(param_disp(*i)),
+            _ => None,
+        };
+        if let Some(d) = left_disp
+            && crate::codegen::assign::bx_holds_param(out, d, locals.last_branch_barrier.get())
+        {
+            out.extend_from_slice(&[0x8B, 0xC3]);                     // mov ax,bx
+            emit_binop_right(BinOp::Sub, right, locals, out, fixups); // sub ax,[s]
+        } else {
+            emit_binop_inner(BinOp::Sub, left, right, locals, out, fixups);
+        }
         for _ in 0..shift {
             out.extend_from_slice(&[0xD1, 0xF8]); // sar ax,1
         }
