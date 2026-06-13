@@ -2401,6 +2401,119 @@ fn for_body_single_if_exit<'a>(body: &'a Stmt, locals: &Locals<'_>) -> Option<(&
     }
     None
 }
+/// True when `s` is a bare `continue` (optionally wrapped in a single-stmt block).
+fn stmt_is_continue(s: &Stmt) -> bool {
+    matches!(s, Stmt::Continue) || matches!(s, Stmt::Block(b) if b.len() == 1 && matches!(b[0], Stmt::Continue))
+}
+/// True when `s` is a bare `break` (optionally wrapped in a single-stmt block).
+fn stmt_is_break(s: &Stmt) -> bool {
+    matches!(s, Stmt::Break) || matches!(s, Stmt::Block(b) if b.len() == 1 && matches!(b[0], Stmt::Break))
+}
+/// Match a for-loop body `{ if(c1) continue; if(c2) break; REST }` where REST has
+/// no further loop control. MSC hoists both leading ifs into the loop's condition
+/// section. Returns the continue-cond, the break-cond, and the REST statements.
+/// Fixture 2988.
+fn for_body_continue_break<'a>(body: &'a Stmt) -> Option<(&'a Cond, &'a Cond, Vec<&'a Stmt>)> {
+    let Stmt::Block(ss) = body else { return None; };
+    if ss.len() < 2 { return None; }
+    let Stmt::If { cond: c1, then_branch: t1, else_branch: None } = &ss[0] else { return None; };
+    if !stmt_is_continue(t1) { return None; }
+    let Stmt::If { cond: c2, then_branch: t2, else_branch: None } = &ss[1] else { return None; };
+    if !stmt_is_break(t2) { return None; }
+    let rest: Vec<&Stmt> = ss[2..].iter().collect();
+    if rest.iter().any(|s| stmt_has_loop_break(s)) { return None; }
+    Some((c1, c2, rest))
+}
+/// Emit `for(init; C; step) { if(c1) continue; if(c2) break; REST }` in MSC's
+/// hoisted form (all of C/c1/c2 simple `Cmp`):
+/// ```text
+///   init; jmp COND
+///   BODY: <REST>
+///   STEP: <step>
+///   COND: C   j!C  EXIT     ; guard
+///         c1  j c1 STEP     ; continue when c1 is true
+///         c2  j!c2 BODY     ; loop when c2 is false (c2 true falls through = break)
+///   EXIT:
+/// ```
+/// Returns false (emitting nothing) on any displacement overflow. Fixture 2988.
+fn emit_for_continue_break(
+    init: &Stmt,
+    cond_c: &Cond,
+    step: &Stmt,
+    cond_c1: &Cond,
+    cond_c2: &Cond,
+    rest: &[&Stmt],
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> bool {
+    use crate::codegen::cond::emit_cond_cmp;
+    let (Cond::Cmp { op: cop, .. }, Cond::Cmp { op: c1op, .. }, Cond::Cmp { op: c2op, .. }) =
+        (cond_c, cond_c1, cond_c2) else { return false; };
+    let unsign = |j: u8, c: &Cond| if cmp_is_unsigned(c, locals) { to_unsigned_jcc(j) } else { j };
+    let jcc_guard = unsign(inverted_jcc(*cop), cond_c);   // exit when C false
+    let jcc_cont = unsign(loop_back_jcc(*c1op), cond_c1);  // to STEP when c1 true
+    let jcc_break = unsign(inverted_jcc(*c2op), cond_c2);  // to BODY when c2 false
+    // Pre-build every segment; nothing reaches `out` until displacements check out.
+    let mut rest_buf = Vec::new();
+    let mut rest_fx: Vec<Fixup> = Vec::new();
+    for s in rest { emit_stmt(s, locals, frame, return_int, return_long, &mut rest_buf, &mut rest_fx); }
+    let mut step_buf = Vec::new();
+    let mut step_fx: Vec<Fixup> = Vec::new();
+    emit_stmt(step, locals, frame, return_int, return_long, &mut step_buf, &mut step_fx);
+    let mut c_buf = Vec::new();
+    let mut c_fx: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond_c, locals, &mut c_buf, &mut c_fx);
+    let mut c1_buf = Vec::new();
+    let mut c1_fx: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond_c1, locals, &mut c1_buf, &mut c1_fx);
+    let mut c2_buf = Vec::new();
+    let mut c2_fx: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond_c2, locals, &mut c2_buf, &mut c2_fx);
+    // Back-edge magnitudes are position-independent — validate them up front.
+    let cont_back = step_buf.len() + c_buf.len() + 2 + c1_buf.len() + 2; // STEP ← after c1-jcc
+    let break_back = rest_buf.len() + step_buf.len() + c_buf.len() + 2 + c1_buf.len() + 2 + c2_buf.len() + 2;
+    if i8::try_from(cont_back).is_err() || i8::try_from(break_back).is_err() { return false; }
+    if i8::try_from(c1_buf.len() + 2 + c2_buf.len() + 2).is_err() { return false; }
+    emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
+    let needs_pad = (out.len() + 2) % 2 != 0;
+    let pad = usize::from(needs_pad);
+    let jmp_disp = i8::try_from(rest_buf.len() + step_buf.len() + pad).expect("cont/break for jmp fits");
+    out.push(0xEB);
+    out.push(jmp_disp as u8);
+    if needs_pad { out.push(0x90); }
+    let body_base = out.len();
+    out.extend_from_slice(&rest_buf);
+    for mut f in rest_fx { f.body_offset += body_base; fixups.push(f); }
+    let step_base = out.len();
+    out.extend_from_slice(&step_buf);
+    for mut f in step_fx { f.body_offset += step_base; fixups.push(f); }
+    // COND: guard + forward exit jcc.
+    let c_base = out.len();
+    out.extend_from_slice(&c_buf);
+    for mut f in c_fx { f.body_offset += c_base; fixups.push(f); }
+    let g_fwd = i8::try_from(c1_buf.len() + 2 + c2_buf.len() + 2).expect("cont/break guard fits");
+    out.push(jcc_guard);
+    out.push(g_fwd as u8);
+    // continue test: jump to STEP when c1 is true.
+    let c1_base = out.len();
+    out.extend_from_slice(&c1_buf);
+    for mut f in c1_fx { f.body_offset += c1_base; fixups.push(f); }
+    out.push(jcc_cont);
+    let cont_disp = i8::try_from(step_base as i32 - (out.len() as i32 + 1)).expect("cont/break cont disp fits");
+    out.push(cont_disp as u8);
+    // break test: loop back to BODY when c2 is false (c2 true falls through = break).
+    let c2_base = out.len();
+    out.extend_from_slice(&c2_buf);
+    for mut f in c2_fx { f.body_offset += c2_base; fixups.push(f); }
+    out.push(jcc_break);
+    let break_disp = i8::try_from(body_base as i32 - (out.len() as i32 + 1)).expect("cont/break break disp fits");
+    out.push(break_disp as u8);
+    true
+}
 /// Emit the fused-if for-loop (see [`for_body_single_if_return`]):
 /// ```text
 ///   init
@@ -2586,6 +2699,17 @@ pub(crate) fn emit_for(
         && matches!(a.as_ref(), Cond::Cmp { .. })
         && matches!(b.as_ref(), Cond::Cmp { .. })
         && emit_for_fused_if(init, a, step, b, &Stmt::Empty, false, true,
+            locals, frame, return_int, return_long, out, fixups)
+    {
+        return;
+    }
+    // `for(init; C; step) { if(c1) continue; if(c2) break; REST }`: MSC hoists the
+    // leading continue/break ifs into the condition section. Fixture 2988.
+    if matches!(cond, Cond::Cmp { .. })
+        && let Some((c1, c2, rest)) = for_body_continue_break(body_stmt)
+        && matches!(c1, Cond::Cmp { .. })
+        && matches!(c2, Cond::Cmp { .. })
+        && emit_for_continue_break(init, cond, step, c1, c2, &rest,
             locals, frame, return_int, return_long, out, fixups)
     {
         return;
