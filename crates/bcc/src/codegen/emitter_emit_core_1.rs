@@ -2699,6 +2699,33 @@ impl<'a> super::FunctionEmitter<'a> {
                     self.helpers.insert("N_SPUSH@".to_string());
                 }
                 total_bytes += size;
+            } else if let ExprKind::ArrayIndex { array, index } = &arg.kind
+                && let ExprKind::Ident(pname) = &array.kind
+                && let Some(idx) = try_const_eval(index)
+                && let Some(pointee) = self.near_ptr_ident_pointee(pname)
+                && pointee.is_int_like()
+                && !pointee.is_char_like()
+                && !arg_ty.is_char_like()
+                && !arg_ty.is_long_like()
+            {
+                // `f(p[K])` for a near pointer p and constant K — load the
+                // pointer into BX and push the pointee word directly
+                // (`mov bx,<p>; push word ptr [bx+off]`), folding K*stride
+                // into the displacement, instead of `mov ax,[bx+off]; push
+                // ax`. Fixture 893 (`f(p[1])` for a global `int *p`).
+                // Mirrors the memory-direct pointer-subscript compare.
+                let stride = i32::from(pointee.size_bytes());
+                let off = (idx as i32).wrapping_mul(stride);
+                self.emit_load_near_ptr_to_bx(pname);
+                let bx_disp = if off == 0 {
+                    "[bx]".to_owned()
+                } else if off > 0 {
+                    format!("[bx+{off}]")
+                } else {
+                    format!("[bx-{}]", -off)
+                };
+                let _ = write!(self.out, "\tpush\tword ptr {bx_disp}\r\n");
+                total_bytes += 2;
             } else if let Some(push_form) = self.try_direct_arg_push(arg, &arg_ty) {
                 // Memory-operand peephole: when the arg is a simple
                 // load (stack-local int/ptr, global int/ptr, or a

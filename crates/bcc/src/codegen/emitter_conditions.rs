@@ -637,6 +637,41 @@ impl<'a> super::FunctionEmitter<'a> {
     /// - Anything else: treat as boolean. Emit `cmp <expr>, 0` (or
     ///   `or <reg>, <reg>` peephole for register locals); the cond is
     ///   non-zero ⇔ true, so the mnemonic pair is `("jne", "je")`.
+    /// Pointee type of `name` when it is a NEAR pointer (`Pointer` /
+    /// `NearPointer`) — global or local. Returns `None` for non-pointers
+    /// and for far/seg pointers (which need `les`/segment-override loads,
+    /// not a bare `mov bx`). Used by the memory-direct pointer-subscript
+    /// compare in [`emit_cond_test`].
+    pub(crate) fn near_ptr_ident_pointee(&self, name: &str) -> Option<Type> {
+        let ty = if let Some(gty) = self.globals.type_of(name) {
+            gty
+        } else if self.locals.has(name) {
+            self.locals.type_of(name)
+        } else {
+            return None;
+        };
+        match ty {
+            Type::Pointer(inner) | Type::NearPointer(inner) => Some((**inner).clone()),
+            _ => None,
+        }
+    }
+    /// Load a near pointer `name` into BX (`mov bx, <ptr>`). Global →
+    /// `DGROUP:_name`; stack local → `[bp+off]`; register local → the
+    /// register. Mirrors how `emit_global_pointer_index_to_ax` loads BX.
+    pub(crate) fn emit_load_near_ptr_to_bx(&mut self, name: &str) {
+        if self.globals.contains(name) {
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}\r\n");
+        } else {
+            match self.locals.location_of(name) {
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                }
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                }
+            }
+        }
+    }
     pub(crate) fn emit_cond_test(&mut self, cond: &Expr) -> (&'static str, &'static str) {
         // `if (!<expr>)` — generate the same flag-setting test as
         // `<expr>` but swap the true/false jump mnemonics so the
@@ -909,6 +944,47 @@ impl<'a> super::FunctionEmitter<'a> {
                     op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
                     op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
                 );
+            }
+            // `<ptr>[K] <eq/ne> imm` for a CONSTANT subscript K and an
+            // int (word) pointee — BCC loads the pointer into BX and
+            // compares the pointee memory directly against the immediate
+            // (`cmp word ptr [bx+off], imm`), folding K*stride into the
+            // displacement, with no AX load. Covers a near global pointer
+            // (fixture 891: `int *p; if (p[1] == 5)`) and near stack/reg
+            // local pointers. Far pointers (`les bx,...`) and char pointees
+            // (which integer-promote before the compare) fall through to
+            // the runtime/`==0`-only siblings and the generic compare below.
+            if matches!(op, BinOp::Eq | BinOp::Ne)
+                && let Some(k_rhs) = try_const_eval(right)
+                && let ExprKind::ArrayIndex { array, index } = &left.kind
+                && let ExprKind::Ident(name) = &array.kind
+                && let Some(idx) = try_const_eval(index)
+                && let Some(pointee) = self.near_ptr_ident_pointee(name)
+                && pointee.is_int_like()
+                && !pointee.is_char_like()
+            {
+                let stride = i32::from(pointee.size_bytes());
+                let off = (idx as i32).wrapping_mul(stride);
+                self.emit_load_near_ptr_to_bx(name);
+                let bx_disp = if off == 0 {
+                    "[bx]".to_owned()
+                } else if off > 0 {
+                    format!("[bx+{off}]")
+                } else {
+                    format!("[bx-{}]", -off)
+                };
+                let v = k_rhs as i32;
+                let imm = if (-128..=127).contains(&v) {
+                    format!("{v}")
+                } else {
+                    format!("{}", v as u16)
+                };
+                let _ = write!(self.out, "\tcmp\tword ptr {bx_disp},{imm}\r\n");
+                return match op {
+                    BinOp::Eq => ("je", "jne"),
+                    BinOp::Ne => ("jne", "je"),
+                    _ => unreachable!(),
+                };
             }
             // `p[idx] <eq/ne> 0` where p is a stack-resident pointer
             // local. After the address calc lands in BX, BCC emits
