@@ -498,6 +498,7 @@ pub(crate) fn emit_function(
         })
         .collect();
     let local_long: Vec<bool> = func.locals.iter().map(|l| l.is_long).collect();
+    let local_long_int_fold: Vec<bool> = func.locals.iter().map(|l| l.long_int_fold).collect();
     let local_literals: Vec<bool> = func.locals.iter().map(|l| l.init_is_literal).collect();
     let local_far_ptrs: Vec<bool> = func.locals.iter().map(|l| l.is_far_ptr).collect();
     let local_huge_ptrs: Vec<bool> = func.locals.iter().map(|l| l.is_huge_ptr).collect();
@@ -988,6 +989,7 @@ pub(crate) fn emit_function(
         unsigned_globals,
         float_globals,
         long_locals: &local_long,
+        long_int_fold: &local_long_int_fold,
         init_literals: &local_literals,
         far_ptr_locals: &local_far_ptrs,
         huge_ptr_locals: &local_huge_ptrs,

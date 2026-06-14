@@ -363,6 +363,14 @@ pub struct LocalSpec {
     /// (counted in chkstk N) but is ACCESSED via a saved register (the first
     /// such local in a function → SI, the second → DI). Fixtures 1550/2069.
     pub is_register: bool,
+    /// For a `long` local only: true when the init reduces to a known constant
+    /// via a literal, a copy of another foldable-const long, or an identity op
+    /// (`a * 1L`, `a + 0L`). MSC const-propagates such a long through an `(int)`
+    /// truncation (`return (int)r;` → `mov ax,K`), unlike a long built by real
+    /// arithmetic/cast/shift (`a + b`, `(long)i`, `a >> 1`) whose `(int)` read
+    /// stays a slot load. The store still uses `init`; this only gates the read.
+    /// Fixture 1783 (vs 1037 / 1638 / 2183).
+    pub long_int_fold: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -413,20 +421,20 @@ pub enum BitBase {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false, long_int_fold: false }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false, long_int_fold: false }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false, long_int_fold: false }
     }
     /// `float`/`double` local. `width` is 4 (float) or 8 (double); `bits` is
     /// the f64 value of a literal initializer (None for uninitialized). `init`
     /// carries the truncated int value so `(int)f` const-folds.
     pub fn float_(width: usize, bits: Option<u64>) -> Self {
         let init = bits.map(|b| f64::from_bits(b) as i32);
-        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None, is_register: false }
+        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None, is_register: false, long_int_fold: false }
     }
     /// A `float`/`double` local whose initializer is a const-foldable cast or
     /// arithmetic (`(float)i`, `double d = f`, `a + b`) rather than a direct
@@ -434,7 +442,7 @@ impl LocalSpec {
     /// so the int-fold view does NOT replace `(int)<local>` with `mov ax,K`;
     /// instead the store keeps st(0) live (`fst`) and the cast is `call __ftol`.
     pub fn float_nonliteral(width: usize, bits: u64) -> Self {
-        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None, is_register: false }
+        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None, is_register: false, long_int_fold: false }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -493,6 +501,10 @@ pub struct Locals<'a> {
     /// loads (return, assign) bypass the fold view so the slot is
     /// read at runtime even when its constant value is known.
     pub long_locals: &'a [bool],
+    /// Parallel-indexed: true for a `long` local whose init folds through an
+    /// `(int)` truncation (literal/copy/identity). Its single-AX read emits the
+    /// low-word immediate instead of a slot load. Fixture 1783.
+    pub long_int_fold: &'a [bool],
     /// Parallel-indexed: true iff the local's init came from a pure
     /// literal expression. Char locals fold for bare reads only when
     /// this is true (fixture 1023 vs 1046).
@@ -729,6 +741,7 @@ impl Locals<'_> {
             unsigned_globals: self.unsigned_globals,
             float_globals: self.float_globals,
             long_locals: self.long_locals,
+            long_int_fold: self.long_int_fold,
             init_literals: self.init_literals,
             far_ptr_locals: self.far_ptr_locals,
             huge_ptr_locals: self.huge_ptr_locals,
@@ -825,6 +838,11 @@ impl Locals<'_> {
     }
     pub fn is_long_local(&self, idx: usize) -> bool {
         self.long_locals.get(idx).copied().unwrap_or(false)
+    }
+    /// True for a `long` local whose `(int)` truncation folds to its low-word
+    /// immediate (literal/copy/identity init). Fixture 1783.
+    pub fn long_int_fold(&self, idx: usize) -> bool {
+        self.long_int_fold.get(idx).copied().unwrap_or(false)
     }
     pub fn init_is_literal(&self, idx: usize) -> bool {
         self.init_literals.get(idx).copied().unwrap_or(false)

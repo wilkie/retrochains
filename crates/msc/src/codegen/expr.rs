@@ -476,6 +476,23 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Expr::Local(i) => {
+            // A `long` local reaching this single-AX context is being truncated to
+            // an int (`(int)r`). When its value folds (literal/copy/identity init),
+            // MSC materializes the low-word immediate instead of a slot load —
+            // `mov ax,K` (fixture 1783) vs the `mov ax,[bp-d]` reload for a long
+            // built by real arithmetic/cast/shift (1037/1638/2183).
+            if locals.is_long_local(*i)
+                && locals.long_int_fold(*i)
+                && let Some(k) = locals.inits.get(*i).copied().flatten()
+            {
+                let k16 = (k as u32 & 0xFFFF) as u16;
+                if k16 == 0 {
+                    out.extend_from_slice(&[0x2B, 0xC0]); // sub ax,ax
+                } else {
+                    out.push(0xB8); out.extend_from_slice(&k16.to_le_bytes()); // mov ax,K
+                }
+                return;
+            }
             // Reuse AX when a just-emitted store/load already left local `i`
             // there (MSC's straight-line register liveness).
             emit_load_local_reuse(*i, locals, out);

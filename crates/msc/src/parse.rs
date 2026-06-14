@@ -1468,6 +1468,28 @@ pub(crate) fn init_is_zero_const_identity(e: &Expr) -> bool {
         _ => false,
     }
 }
+/// For a `long` local init: true when the value reduces to a known constant via
+/// a literal, a copy of another foldable-const long, or an identity op (`a * 1L`,
+/// `a + 0L`, `a << 0`). MSC const-propagates such a long through an `(int)`
+/// truncation (`return (int)r;` → `mov ax,K`). Real long arithmetic/cast/shift
+/// (`a + b`, `(long)i`, `a >> 1`) is NOT foldable — its `(int)` read stays a slot
+/// load. Fixture 1783 (vs 1037 / 1638 / 2183).
+pub(crate) fn long_init_int_foldable(e: &Expr, locals: &[LocalSpec]) -> bool {
+    match e {
+        Expr::IntLit(_) => true,
+        Expr::Local(j) => locals.get(*j).is_some_and(|s| s.is_long && s.long_int_fold),
+        Expr::BinOp { op, left, right } => {
+            let ident_right = matches!((op, right.as_ref()),
+                (BinOp::Mul | BinOp::Div, Expr::IntLit(1))
+                | (BinOp::Add | BinOp::Sub | BinOp::Shl | BinOp::Shr, Expr::IntLit(0)));
+            let ident_left = matches!((op, left.as_ref()),
+                (BinOp::Mul, Expr::IntLit(1)) | (BinOp::Add, Expr::IntLit(0)));
+            (ident_right && long_init_int_foldable(left, locals))
+                || (ident_left && long_init_int_foldable(right, locals))
+        }
+        _ => false,
+    }
+}
 pub(crate) fn init_expr_has_matching_literal_leaf(
     e: &Expr,
     fold_val: i32,
@@ -2244,9 +2266,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     elem_count = n as usize;
                 }
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: stotal, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: stotal, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false, long_int_fold: false }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal * elem_count, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+                    LocalSpec { size: 1, array_len: stotal * elem_count, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false, long_int_fold: false }
                 };
                 let local_idx = locals.len();
                 p.local_names.push(lname);
@@ -2433,7 +2455,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     size: 2, array_len: n as usize, init: None, struct_idx: None, is_long: false,
                     init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false,
                     init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None,
-                    block_offset: None, is_register: false,
+                    block_offset: None, is_register: false, long_int_fold: false,
                 };
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
@@ -2463,7 +2485,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     size: 2, array_len: 1, init: None, struct_idx: None, is_long: false,
                     init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: elem, pointee_unsigned: false, is_unsigned: false,
                     init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None,
-                    block_offset: None, is_register: false,
+                    block_offset: None, is_register: false, long_int_fold: false,
                 };
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
@@ -2505,7 +2527,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     size: 2, array_len: 1, init: None, struct_idx: None, is_long: false,
                     init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 2, pointee_unsigned: false, is_unsigned: false,
                     init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None,
-                    block_offset: None, is_register: false,
+                    block_offset: None, is_register: false, long_int_fold: false,
                 };
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
@@ -2593,7 +2615,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             } else {
                 (size, array_len, false)
             };
-            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, is_huge_ptr: is_huge && is_far_ptr_decl, pointee_size: if star_count > 0 { if is_long_decl { 4 } else { size } } else { 0 }, pointee_unsigned: has_unsigned && star_count > 0 && size == 1, is_unsigned: has_unsigned && star_count == 0 && (size == 1 || size == 2 || is_long_slot), init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: has_register && star_count == 0 && slot_len == 1 && !is_long_slot && slot_size == 2 };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, is_huge_ptr: is_huge && is_far_ptr_decl, pointee_size: if star_count > 0 { if is_long_decl { 4 } else { size } } else { 0 }, pointee_unsigned: has_unsigned && star_count > 0 && size == 1, is_unsigned: has_unsigned && star_count == 0 && (size == 1 || size == 2 || is_long_slot), init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: has_register && star_count == 0 && slot_len == 1 && !is_long_slot && slot_size == 2, long_int_fold: false };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
@@ -2794,6 +2816,15 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     } else { None };
                     scalar_inits.push((local_idx, init_expr.clone()));
                     let fold_k = if skip_fold || cse_a.is_some() { None } else { init_expr.fold(&init_view) };
+                    // A `long` local whose init reduces to a known constant via a
+                    // literal/copy/identity folds through a later `(int)` truncation
+                    // (fixture 1783). Compute before `init_expr` is moved below.
+                    let long_int_fold_flag = locals.get(local_idx).is_some_and(|l| l.is_long)
+                        && long_init_int_foldable(&init_expr, &locals);
+                    if long_int_fold_flag {
+                        locals[local_idx].long_int_fold = true;
+                        if let Some(s) = p.local_specs.get_mut(local_idx) { s.long_int_fold = true; }
+                    }
                     if let Some(a) = cse_a {
                         prelude.push(Stmt::Assign {
                             target: AssignTarget::Local(local_idx),
