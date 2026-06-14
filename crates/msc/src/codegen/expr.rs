@@ -3729,11 +3729,31 @@ fn ptr_index_byte_chain(left: &Expr, right: &Expr, inits: &[Option<i32>]) -> Opt
 }
 /// A call expression (direct or indirect).
 fn is_any_call(e: &Expr) -> bool { matches!(e, Expr::Call { .. } | Expr::CallPtr { .. }) }
+/// A call-chain leaf that is a bare call OR `<call> * <const>`. Returns the inner
+/// call and the optional constant multiplier (applied via `imul` after the call,
+/// once its result is in AX). Lets `ops[0](10,5) * 100 + ops[1](10,5)` schedule
+/// through the SI parker like a 2-call chain (fixture 1996).
+fn call_leaf_mul(e: &Expr) -> Option<(&Expr, Option<i32>)> {
+    if is_any_call(e) {
+        return Some((e, None));
+    }
+    if let Expr::BinOp { op: BinOp::Mul, left, right } = e
+        && is_any_call(left)
+        && let Expr::IntLit(k) = right.as_ref()
+    {
+        return Some((left, Some(*k)));
+    }
+    None
+}
 /// A call eligible as a NON-rightmost operand of the call-chain scheduler: its
 /// argument is built in CX (so ≤1 CX-buildable arg) and, if indirect, its target
 /// must be SI-safe (call instruction uses no scratch register).
 fn eligible_left_call(e: &Expr, inits: &[Option<i32>]) -> bool {
-    let (largs, target) = match e {
+    let inner = match call_leaf_mul(e) {
+        Some((c, _)) => c,
+        None => return false,
+    };
+    let (largs, target) = match inner {
         Expr::Call { args, .. } => (args.as_slice(), None),
         Expr::CallPtr { target, args } => (args.as_slice(), Some(target.as_ref())),
         _ => return false,
@@ -3752,7 +3772,9 @@ fn collect_call_chain<'a>(e: &'a Expr, calls: &mut Vec<&'a Expr>, ops: &mut Vec<
             ops.push(*op);
             if is_any_call(right) { calls.push(right); true } else { false }
         }
-        _ if is_any_call(e) => { calls.push(e); true }
+        // The leftmost leaf (the AX-target) may be a `<call> * <const>`; parked
+        // operands (reached via the `right` arm above) stay bare calls.
+        _ if call_leaf_mul(e).is_some() => { calls.push(e); true }
         _ => false,
     }
 }
@@ -3948,7 +3970,8 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         emit_expr_to_ax(calls[n - 1], locals, out, fixups);
         for k in 0..n - 1 {
             let call = calls[n - 2 - k];
-            let (largs, name, target): (&[Expr], Option<&str>, Option<&Expr>) = match call {
+            let (inner_call, mul_k) = call_leaf_mul(call).expect("call_chain leaf");
+            let (largs, name, target): (&[Expr], Option<&str>, Option<&Expr>) = match inner_call {
                 Expr::Call { name, args } => (args, Some(name), None),
                 Expr::CallPtr { target, args } => (args, None, Some(target)),
                 _ => unreachable!(),
@@ -3979,6 +4002,12 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
                 out.extend_from_slice(&[0x83, 0xC4, (2 * largs.len()) as u8]); // add sp,2N
             }
             if char_ret { out.push(0x98); } // cbw
+            // `<call> * K` leaf: scale the result now (`mov cx,K; imul cx`).
+            if let Some(k) = mul_k {
+                let kw = (k as u32 & 0xFFFF) as u16;
+                out.push(0xB9); out.extend_from_slice(&kw.to_le_bytes()); // mov cx,K
+                out.extend_from_slice(&[0xF7, 0xE9]); // imul cx
+            }
         }
         // Combine: AX holds calls[0]; fold each op in source order with the reg /
         // temp that parked the corresponding operand (op[j] ↔ park index n-2-j).
@@ -4181,6 +4210,14 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
             return;
         }
+        // Non-memory left (e.g. a call result) `* K`: evaluate it into AX, then
+        // `mov cx,K; imul cx`. The memory cases above handle Local/Param/Global
+        // left directly; this catches the rest (fixture 1996 `ops[0](10,5)*100`).
+        let kw = (*k as u32 & 0xFFFF) as u16;
+        emit_expr_to_ax(left, locals, out, fixups);
+        out.push(0xB9); out.extend_from_slice(&kw.to_le_bytes()); // mov cx,K
+        out.extend_from_slice(&[0xF7, 0xE9]); // imul cx
+        return;
     }
     // Comparison ops materialize as 0/1 in AX via cmp+jcc.
     if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
