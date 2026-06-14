@@ -2470,82 +2470,74 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // Float-literal pool: distinct (bits, width) from all float/double
     // locals, placed in CONST after the strings (word-aligned, `width` bytes
     // each). MSC materializes these as `$T` DD/DQ temps.
+    // The CONST float pool is interned in FUNCTION-DEFINITION order: each
+    // function's constants are collected (in the within-function category order
+    // below) before the next function's, so a callee defined first (e.g.
+    // `double half(double x){return x/2.0;}`) places its constant ahead of a
+    // later caller's. Fixtures 2144, 2146.
     let mut float_pool: Vec<(u64, usize)> = Vec::new();
+    let mut intern = |pool: &mut Vec<(u64, usize)>, e: (u64, usize)| {
+        if !pool.contains(&e) { pool.push(e); }
+    };
     for f in &unit.functions {
+        // float/double locals
         for l in &f.locals {
-            if l.is_float
-                && let Some(bits) = l.float_bits
-                && !float_pool.contains(&(bits, l.size))
-            {
-                float_pool.push((bits, l.size));
+            if l.is_float && let Some(bits) = l.float_bits {
+                intern(&mut float_pool, (bits, l.size));
             }
         }
-    }
-    // Float/double literals passed as call arguments also intern into the
-    // CONST pool (the caller does `fld $T; ...; fstp [bx]` to push them).
-    for f in &unit.functions {
+        // Float/double literals passed as call arguments (the caller does
+        // `fld $T; …; fstp [bx]` to push them).
         let mut args = Vec::new();
         for s in &f.body { collect_call_float_args_stmt(s, &mut args); }
-        for (bits, width) in args {
-            if !float_pool.contains(&(bits, width)) {
-                float_pool.push((bits, width));
-            }
-        }
-    }
-    // …as do float/double literals stored to a global (`g = 3.14;`).
-    for f in &unit.functions {
+        for e in args { intern(&mut float_pool, e); }
+        // …as do float/double literals stored to a global (`g = 3.14;`).
         let mut stores = Vec::new();
         for s in &f.body { collect_global_store_floats_stmt(s, &mut stores); }
-        for (bits, width) in stores {
-            if !float_pool.contains(&(bits, width)) {
-                float_pool.push((bits, width));
-            }
-        }
-    }
-    // …and the const-folded value of a `float`/`double` `return` (parse folds
-    // it to a FloatLit), materialized as a CONST temp for the __fac sequence.
-    for f in &unit.functions {
-        if f.return_float_width == 0 { continue; }
-        for s in &f.body {
-            if let Stmt::Return(Expr::FloatLit(bits, is_double)) = s {
-                let w = if *is_double { 8 } else { 4 };
-                if !float_pool.contains(&(*bits, w)) {
-                    float_pool.push((*bits, w));
+        for e in stores { intern(&mut float_pool, e); }
+        // …and the const-folded value of a `float`/`double` `return` (parse
+        // folds it to a FloatLit), materialized as a CONST temp for __fac.
+        if f.return_float_width != 0 {
+            for s in &f.body {
+                if let Stmt::Return(Expr::FloatLit(bits, is_double)) = s {
+                    intern(&mut float_pool, (*bits, if *is_double { 8 } else { 4 }));
                 }
             }
         }
-    }
-    // …and float/double array element stores (`a[k] = 1.0f`) — width from the
-    // literal (a float array gets float literals, a double array doubles).
-    for f in &unit.functions {
+        // …and the literal operand of `return <float/double param> OP <lit>`
+        // (`x / 2.0`, `d * 10.0`) — a width-8 (double) temp. Fixtures 2144, 2146.
+        if f.return_float_width != 0 {
+            for s in &f.body {
+                if let Stmt::Return(Expr::BinOp { left, right, .. }) = s
+                    && matches!(left.as_ref(), Expr::Param(i) if f.param_float_width.get(*i).copied().unwrap_or(0) != 0)
+                    && let Expr::FloatLit(bits, _) = right.as_ref()
+                {
+                    intern(&mut float_pool, (*bits, 8));
+                }
+            }
+        }
+        // …and float/double array element stores (`a[k] = 1.0f`) — width from
+        // the literal (a float array gets float literals, a double array doubles).
         for s in &f.body {
             if let Stmt::Assign { target: AssignTarget::IndexedLocal { local, .. }, value: Expr::FloatLit(bits, is_double) } = s
                 && f.locals.get(*local).map(|l| l.is_float).unwrap_or(false)
             {
-                let w = if *is_double { 8 } else { 4 };
-                if !float_pool.contains(&(*bits, w)) {
-                    float_pool.push((*bits, w));
-                }
+                intern(&mut float_pool, (*bits, if *is_double { 8 } else { 4 }));
             }
         }
-    }
-    // …and the operand of `return (int)(<float-global-array>[K] op lit)` — a
-    // width-8 (double) temp.
-    for f in &unit.functions {
+        // …and the operand of `return (int)(<float-global-array>[K] op lit)` —
+        // a width-8 (double) temp.
         for s in &f.body {
             if let Stmt::Return(Expr::BinOp { left, right, .. }) = s
                 && let Expr::Index { array, .. } = left.as_ref()
                 && unit.globals.get(*array).map(|g| g.is_float).unwrap_or(false)
                 && let Expr::FloatLit(bits, _) = right.as_ref()
-                && !float_pool.contains(&(*bits, 8))
             {
-                float_pool.push((*bits, 8));
+                intern(&mut float_pool, (*bits, 8));
             }
         }
-    }
-    // …and the literal operand of a coupled FP op (`return (int)(f + 1.5f)` or a
-    // compound assign `d += 5.5`) — always a width-8 (double) temp.
-    for f in &unit.functions {
+        // …and the literal operand of a coupled FP op (`return (int)(f + 1.5f)`
+        // or a compound assign `d += 5.5`) — always a width-8 (double) temp.
         for s in &f.body {
             let operand = match s {
                 Stmt::Return(Expr::BinOp { left, right, .. })
@@ -2558,23 +2550,15 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 }
                 _ => None,
             };
-            if let Some(bits) = operand
-                && !float_pool.contains(&(bits, 8))
-            {
-                float_pool.push((bits, 8));
-            }
+            if let Some(bits) = operand { intern(&mut float_pool, (bits, 8)); }
         }
-    }
-    // …and the f64 of a known float/double local promoted to a double for a
-    // variadic call (`printf("%f", f)`). Fixtures 2198, 3999.
-    for f in &unit.functions {
+        // …and the f64 of a known float/double local promoted to a double for a
+        // variadic call (`printf("%f", f)`). Fixtures 2198, 3999.
         let mut v: Vec<(u64, usize)> = Vec::new();
         for s in &f.body {
             collect_vararg_float_local_stmt(s, &f.locals, &unit.variadic_fns, &pascal_fns, &static_fns, &mut v);
         }
-        for (bits, w) in v {
-            if !float_pool.contains(&(bits, w)) { float_pool.push((bits, w)); }
-        }
+        for e in v { intern(&mut float_pool, e); }
     }
     if !float_pool.is_empty() && const_cursor % 2 != 0 {
         const_cursor += 1;

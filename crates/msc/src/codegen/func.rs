@@ -669,7 +669,10 @@ pub(crate) fn emit_function(
         && crate::codegen::statements::body_has_char_accum(&body);
     let frame_bytes: usize = cumulative as usize
         + 4 * func.struct_field_temp_count as usize
-        + if has_float_arg_call { 2 } else { 0 }
+        // The float-arg-call result spill (`mov [bp-2],ax`) is only needed when
+        // the result is NOT consumed by a float-return receive — that path copies
+        // it into the 8-byte temp instead, so the 2-byte spill is unused (2144).
+        + if has_float_arg_call && !returns_float_call { 2 } else { 0 }
         + if returns_float_call { 8 } else { 0 }
         + if has_char_accum_temp { 2 } else { 0 }
         + 2 * call_chain_temps; // call-chain result spill slots (fixture 1954)

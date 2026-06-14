@@ -1312,6 +1312,36 @@ pub(crate) fn emit_return(
                 push_bp_disp(out, disp);
                 true
             }
+            // `<float/double param> OP <float literal>` — load the param onto
+            // st(0), then apply the op with the constant as a QWORD memory
+            // operand: `f<op> qword [$T]` (DC /r m64). Fixtures 2144, 2146
+            // (`x / 2.0`, `d * 10.0`).
+            Expr::BinOp { op, left, right }
+                if matches!(left.as_ref(), Expr::Param(i) if locals.is_float_param(*i))
+                    && matches!(right.as_ref(), Expr::FloatLit(..)) =>
+            {
+                let Expr::Param(i) = left.as_ref() else { unreachable!() };
+                let Expr::FloatLit(bits, _) = right.as_ref() else { unreachable!() };
+                let width = locals.float_param_width(*i);
+                let ld = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+                let disp = param_disp(*i);
+                // fld <width> [bp+disp]
+                fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                out.push(0x9B);
+                out.push(ld);
+                out.push(bp_modrm(0x46, disp));
+                push_bp_disp(out, disp);
+                // f<op> qword [$T]  (DC /r m64: /0 fadd /1 fmul /4 fsub /6 fdiv)
+                let reg = match op { BinOp::Add => 0u8, BinOp::Mul => 1, BinOp::Sub => 4, BinOp::Div => 6, _ => 0 };
+                fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                out.push(0x9B);
+                out.push(0xDC);
+                out.push(0x06 | (reg << 3));
+                let bo = out.len() - 1;
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits: *bits, width: 8 } });
+                true
+            }
             _ => false,
         };
         if produced {
