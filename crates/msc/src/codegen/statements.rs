@@ -2401,7 +2401,7 @@ pub(crate) fn negate_cond(c: &Cond) -> Option<Cond> {
 }
 /// True when `s` contains a `break`/`continue` belonging to the current loop
 /// (i.e. not absorbed by a nested loop or switch).
-fn stmt_has_loop_break(s: &Stmt) -> bool {
+pub(crate) fn stmt_has_loop_break(s: &Stmt) -> bool {
     match s {
         Stmt::Break | Stmt::Continue => true,
         Stmt::If { then_branch, else_branch, .. } =>

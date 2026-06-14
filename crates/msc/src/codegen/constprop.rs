@@ -123,6 +123,112 @@ fn float_local_used_as_call_arg(stmts: &[Stmt], idx: usize) -> bool {
     }
     stmts.iter().any(|s| scan_stmt(s, idx))
 }
+/// Pre-pass: rewrite `while (C) BODY` → `do BODY while (C)` when an assignment
+/// in the straight-line code reaching the loop makes the entry test C true, so
+/// the body provably runs at least once and MSC drops the while form's initial
+/// jmp (and alignment NOP). The discriminator is that only `Stmt::Assign`
+/// values count: a declarator literal (`int i = 0;`) is folded into the local's
+/// spec.init and emits no statement, so it stays in the while form for
+/// emit_loop's alignment-gated do-while elision (fixture 1182). A plain
+/// assignment (`int i; i = 0; while (i < 4)`, or fixture 1452's nested
+/// `j = 0; while (j < 2)`, or fixture 922's `g = 3; while (g)`) is a statement,
+/// so it elides unconditionally — confirmed against the MSC oracle. Sound
+/// because the rewrite fires only when C is true on first entry, so
+/// `while`≡`do-while` regardless of later iterations; emit re-folds per-pass.
+mod runonce {
+    use crate::{Cond, Expr, RelOp, Stmt, SwitchArm};
+    use crate::AssignTarget;
+    use std::collections::HashMap;
+
+    type Recent = HashMap<(bool, usize), i32>;
+
+    fn val(e: &Expr, recent: &Recent) -> Option<i32> {
+        match e {
+            Expr::IntLit(k) => Some(*k),
+            Expr::Local(i) => recent.get(&(false, *i)).copied(),
+            Expr::Global(g) => recent.get(&(true, *g)).copied(),
+            _ => None,
+        }
+    }
+    fn while_entry_true(cond: &Cond, recent: &Recent) -> bool {
+        match cond {
+            Cond::Truthy(e) => val(e, recent).is_some_and(|v| v != 0),
+            Cond::Cmp { op, left, right } => {
+                let (Some(l), Some(r)) = (val(left, recent), val(right, recent)) else {
+                    return false;
+                };
+                match op {
+                    RelOp::Eq => l == r,
+                    RelOp::Ne => l != r,
+                    RelOp::Lt => l < r,
+                    RelOp::Gt => l > r,
+                    RelOp::Le => l <= r,
+                    RelOp::Ge => l >= r,
+                }
+            }
+            // And/Or entry tests are left to the generic emit path.
+            Cond::And(_, _) | Cond::Or(_, _) => false,
+        }
+    }
+    /// Recurse into a statement's nested bodies (so inner loops are rewritten),
+    /// without carrying any straight-line knowledge across the boundary.
+    fn descend(s: &mut Stmt) {
+        match s {
+            Stmt::Block(v) => run(v),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => {
+                descend(body);
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                descend(then_branch);
+                if let Some(e) = else_branch {
+                    descend(e);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for SwitchArm { body, .. } in cases {
+                    run(body);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// The literal scalar value a statement establishes for a single variable,
+    /// or `None` if it's not a `var = <int-literal>` assignment.
+    fn stmt_establishes(stmt: &Stmt) -> Option<((bool, usize), i32)> {
+        let Stmt::Assign { target, value } = stmt else { return None };
+        let Expr::IntLit(k) = value else { return None };
+        match target {
+            AssignTarget::Local(i) => Some(((false, *i), *k)),
+            AssignTarget::Global(g) => Some(((true, *g), *k)),
+            _ => None,
+        }
+    }
+    /// Process a straight-line statement list, rewriting a `while` to do-while
+    /// when its entry test is made true by the IMMEDIATELY preceding statement
+    /// (an intervening statement defeats it — MSC keeps the while form, fixture
+    /// 559) and the body has no loop-level break/continue (a break keeps the
+    /// while form too — confirmed against the oracle).
+    pub(super) fn run(stmts: &mut [Stmt]) {
+        let mut prev: Recent = HashMap::new();
+        for stmt in stmts.iter_mut() {
+            if let Stmt::While { cond, body } = stmt
+                && while_entry_true(cond, &prev)
+                && !crate::codegen::statements::stmt_has_loop_break(body)
+            {
+                let owned = std::mem::replace(stmt, Stmt::Empty);
+                if let Stmt::While { cond, body } = owned {
+                    *stmt = Stmt::DoWhile { body, cond };
+                }
+            }
+            descend(stmt);
+            // `prev` reflects ONLY the immediately preceding statement.
+            prev.clear();
+            if let Some((key, k)) = stmt_establishes(stmt) {
+                prev.insert(key, k);
+            }
+        }
+    }
+}
 pub(crate) fn const_prop_globals(
     stmts: &[Stmt],
     local_specs: &[LocalSpec],
@@ -190,7 +296,9 @@ pub(crate) fn const_prop_globals(
             cp.l_known.insert(i, k);
         }
     }
-    let stmts = drop_dead_after_goto(stmts.to_vec());
+    let mut stmts = drop_dead_after_goto(stmts.to_vec());
+    // Rewrite provably-run-once `while`s to do-while form before const-prop.
+    runonce::run(&mut stmts);
     let new_stmts: Vec<Stmt> = stmts.iter().map(|s| {
         let mut new_stmt = s.clone();
         prop_stmt(&mut new_stmt, &mut cp);
@@ -448,25 +556,6 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
 }
 
 fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
-    // `while (g) { ...; g = g ± 1; }` where the global g is known nonzero at
-    // entry: the body runs at least once, so MSC lowers it to do-while form and
-    // fuses the body's trailing `dec/inc [g]` flag-set into the loop-back jcc
-    // (no entry jmp, no cmp). The local analog is handled at emit time via
-    // entry_inits; a global needs this AST rewrite because emit can't see the
-    // global's entry value. Gated to the flag-fusing shape so we don't reshape
-    // loops MSC would keep in while form. Fixture 922.
-    let do_while_rewrite = if let Stmt::While { cond: Cond::Truthy(Expr::Global(gi)), body } = &*stmt {
-        cp.g_known.get(gi).is_some_and(|&v| v != 0)
-            && crate::codegen::statements::body_sets_flags_for_cond(
-                body, &Cond::Truthy(Expr::Global(*gi)))
-    } else {
-        false
-    };
-    if do_while_rewrite
-        && let Stmt::While { cond, body } = std::mem::replace(stmt, Stmt::Empty)
-    {
-        *stmt = Stmt::DoWhile { body, cond };
-    }
     match stmt {
         Stmt::Return(e) => prop_expr(e, cp),
         Stmt::ExprStmt(e) => {
