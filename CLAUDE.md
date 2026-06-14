@@ -35,7 +35,7 @@ cargo build --workspace --bins
 target/debug/xfix verify-all --toolchain ours
 ```
 
-The current baseline is **4088 pass, 2 fail** out of 4090 BCC fixtures. The two
+The current baseline is **4090 pass, 2 fail** out of 4092 BCC fixtures. The two
 failures (`891-int-global-pointer-subscript-cmp-const-obj` and
 `893-int-global-pointer-subscript-as-call-arg-obj`) are pre-existing on
 `main`. Any refactor — especially pure code moves — must reproduce this
@@ -44,5 +44,6 @@ non-zero whenever any fixture fails, so check the printed summary, not just
 the exit code.
 
 The MSC toolchain has its own pool — `verify-all --toolchain ours --compiler
-msc` — currently **3931 pass / 33 fail** out of 3964. (A `4146`-style fixture
-can be MSC-only when our BCC can't yet match real BCC; see its commit.)
+msc` — currently **3932 pass / 33 fail** out of 3965. (A fixture can be
+MSC-only when our BCC can't yet match real BCC; capture both with `xfix
+capture --compiler {bcc,msc}` and add both `invocation.{bcc,msc}.toml`.)
