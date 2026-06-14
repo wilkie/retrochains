@@ -264,10 +264,16 @@ pub(crate) fn const_prop_globals(
     // const-fold pass sees `int x = 1; switch(x)` as having x=1
     // without re-deriving it from prologue stores.
     for (i, spec) in local_specs.iter().enumerate() {
-        // Skip long locals: substituting `Local(c)` → `IntLit(K)` would
-        // make `return (int)c;` emit a const load instead of a slot
-        // read (fixture 1037). The emit-time fold_cond path still sees
-        // the init via `locals.inits` for cond elision (1632).
+        // Skip long locals: substituting `Local(c)` → `IntLit(K)` would make
+        // `return (int)c;` emit a const load instead of a slot read (fixture
+        // 1037), and would corrupt LONG-context reads — `printf("%ld",a)`,
+        // int→long promotion (1638/1639), long shifts (2183) — by dropping the
+        // high word. MSC *does* fold the `(int)<long>` truncation for a literal-
+        // equivalent long (`(int)42L`, `a*1L` → `mov ax,2a`; fixture 1783), but
+        // its discriminator (fold ×1/copy/pure-literal, NOT shifts/casts/adds)
+        // isn't captured by `init_is_literal` — which is also true for 1638/2183
+        // — so it's left unhandled. The emit-time fold_cond path still sees the
+        // init via `locals.inits` for cond elision (1632).
         if spec.is_long { continue; }
         // A `float`/`double` local consumed by a call argument keeps its float
         // value: substituting it to an IntLit would truncate (`printf("%f", f)`
