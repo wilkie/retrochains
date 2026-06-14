@@ -5198,6 +5198,30 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 // the type and `*` (e.g. `(int far *)`), then skip `*`s.
                 while matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
                 skip_decl_modifiers(p);
+                // Function-pointer cast `(<ret> (*)(params))` — identity for a
+                // near fn pointer (2 bytes); consume the `(*)` declarator and the
+                // parameter list, then the outer `)`, and return the operand
+                // unchanged. Fixture 2332 (`(int (*)(void))vp`).
+                if matches!(p.peek(), Some(Tok::LParen))
+                    && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+                    && matches!(p.toks.get(p.pos + 2), Some(Tok::RParen))
+                    && matches!(p.toks.get(p.pos + 3), Some(Tok::LParen))
+                {
+                    p.bump(); p.bump(); p.bump(); // `(` `*` `)`
+                    p.eat(&Tok::LParen)?; // parameter list open
+                    let mut depth = 1usize;
+                    while depth > 0 {
+                        match p.bump() {
+                            Some(Tok::LParen) => depth += 1,
+                            Some(Tok::RParen) => depth -= 1,
+                            None => return Err(EmitError::Unsupported(
+                                "unterminated fn-pointer cast parameter list".to_owned())),
+                            _ => {}
+                        }
+                    }
+                    p.eat(&Tok::RParen)?; // outer cast close
+                    return parse_atom(p);
+                }
                 let mut had_star = false;
                 while matches!(p.peek(), Some(Tok::Star)) { p.bump(); had_star = true; }
                 p.eat(&Tok::RParen)?;

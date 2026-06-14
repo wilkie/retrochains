@@ -1136,6 +1136,22 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     } else {
                         cp.l_known.remove(l);
                     }
+                    // Function-address propagation: `fp = two` records fp→_two; a
+                    // later plain copy `vp = fp` rewrites to `vp = FuncAddr(two)`
+                    // so the store materializes `mov [slot], OFFSET _two` directly
+                    // (MSC propagates the address through near-pointer copies, incl.
+                    // identity casts `(void*)`/`(int(*)())`). Fixture 2332.
+                    match value {
+                        Expr::FuncAddr(name) => {
+                            cp.func_addr.insert(*l, name.clone());
+                        }
+                        Expr::Local(j) if cp.func_addr.contains_key(j) => {
+                            let name = cp.func_addr[j].clone();
+                            *value = Expr::FuncAddr(name.clone());
+                            cp.func_addr.insert(*l, name);
+                        }
+                        _ => { cp.func_addr.remove(l); }
+                    }
                 }
                 AssignTarget::IndexedLocal { local, byte_off }
                 | AssignTarget::IndexedLocalByte { local, byte_off }
@@ -1316,6 +1332,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.la_known.clear();
             cp.la_var_written.clear();
             cp.ptr_alias.clear();
+            cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
@@ -1334,6 +1351,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.la_known.clear();
             cp.la_var_written.clear();
             cp.ptr_alias.clear();
+            cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
@@ -1383,6 +1401,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.la_known.clear();
             cp.la_var_written.clear();
             cp.ptr_alias.clear();
+            cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
@@ -1397,6 +1416,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.la_known.clear();
             cp.la_var_written.clear();
             cp.ptr_alias.clear();
+            cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
@@ -1435,6 +1455,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.la_known.clear();
             cp.la_var_written.clear();
             cp.ptr_alias.clear();
+            cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
@@ -1447,6 +1468,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.la_known.clear();
             cp.la_var_written.clear();
             cp.ptr_alias.clear();
+            cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
@@ -1476,6 +1498,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.la_known.clear();
             cp.la_var_written.clear();
             cp.ptr_alias.clear();
+            cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
@@ -1503,6 +1526,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         global_array_lens: cp.global_array_lens.clone(),
         union_locals: cp.union_locals.clone(),
         union_globals: cp.union_globals.clone(),
+        func_addr: cp.func_addr.clone(),
         structs: cp.structs.clone(),
         global_struct_idxs: cp.global_struct_idxs.clone(),
         la_field_size: cp.la_field_size.clone(),

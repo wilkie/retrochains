@@ -3875,6 +3875,11 @@ struct ConstProp {
     union_locals: std::collections::HashSet<usize>,
     /// Global indices whose type is a `union` (same rationale, `ga_field_size`).
     union_globals: std::collections::HashSet<usize>,
+    /// Locals known to hold a function's address (`fp = two`, or a copy of such
+    /// a local). A later copy `vp = fp` rewrites to `FuncAddr` so it materializes
+    /// `mov [slot], OFFSET _f` directly instead of load+store. Cleared at branch
+    /// boundaries. Fixture 2332.
+    func_addr: std::collections::HashMap<usize, String>,
     /// Struct layouts (field offsets + nested struct_idx), used to compute a
     /// member's nesting depth for the struct-field-sum reorder.
     structs: Vec<StructDef>,
