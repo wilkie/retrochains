@@ -2736,6 +2736,47 @@ fn try_rewrite_break_loop(s: &Stmt, ret: &Stmt, id: usize) -> Option<Vec<Stmt>> 
     });
     Some(new)
 }
+/// A return-terminated infinite loop with BOTH a leading and a trailing
+/// `if (c) break;` (no other break in between):
+///   `while (1) { if (c1) break; MIDDLE; if (c2) break; } return X;`
+///     →  `L: if (c1) return X;  MIDDLE;  if (!c2) goto L;  return X;`
+/// The two `return X` share one epilogue block (return-block sharing): the
+/// first (if-guarded) is physical, the bare trailing one jumps to it. The
+/// `if (!c2) goto L` is the loop-back. Fixture 2772.
+fn try_rewrite_two_break_loop(s: &Stmt, ret: &Stmt, id: usize) -> Option<Vec<Stmt>> {
+    let const_true = |c: &Cond| matches!(c, Cond::Truthy(Expr::IntLit(k)) if *k != 0);
+    let body = match s {
+        Stmt::While { cond, body } if const_true(cond) => body,
+        Stmt::DoWhile { body, cond } if const_true(cond) => body,
+        Stmt::For { init, cond, step, body }
+            if const_true(cond)
+                && matches!(init.as_ref(), Stmt::Empty)
+                && matches!(step.as_ref(), Stmt::Empty) => body,
+        _ => return None,
+    };
+    let stmts: &[Stmt] = match body.as_ref() {
+        Stmt::Block(v) => v,
+        other => std::slice::from_ref(other),
+    };
+    if stmts.len() < 2 { return None; }
+    let Stmt::If { cond: c1, then_branch: t1, else_branch: None } = &stmts[0] else { return None };
+    if !matches!(t1.as_ref(), Stmt::Break) { return None; }
+    let Stmt::If { cond: c2, then_branch: t2, else_branch: None } = stmts.last()? else { return None };
+    if !matches!(t2.as_ref(), Stmt::Break) { return None; }
+    let middle = &stmts[1..stmts.len() - 1];
+    if middle.iter().any(stmt_has_loop_break) { return None; }
+    let Stmt::Return(rv) = ret else { return None };
+    if return_share_key(rv).is_none() { return None; }
+    let neg_c2 = negate_cond(c2)?;
+    let label = format!("__tb{id}");
+    let mut new = Vec::new();
+    new.push(Stmt::Label(label.clone()));
+    new.push(Stmt::If { cond: c1.clone(), then_branch: Box::new(ret.clone()), else_branch: None });
+    new.extend_from_slice(middle);
+    new.push(Stmt::If { cond: neg_c2, then_branch: Box::new(Stmt::Goto(label)), else_branch: None });
+    new.push(ret.clone());
+    Some(new)
+}
 /// `while (1) { ...; break; }` — and the do-while(1) / bare `for (;;)`
 /// equivalents — executes its body exactly once: MSC drops the loop
 /// structure entirely and emits the body once, minus the trailing break.
@@ -2825,6 +2866,18 @@ pub(crate) fn fold_break_loops(stmts: Vec<Stmt>) -> (Vec<Stmt>, std::collections
         if let Some(body) = match_once_loop(&stmts[i]) {
             out.extend(body);
             i += 1;
+            continue;
+        }
+        if i + 1 < stmts.len()
+            && matches!(stmts[i + 1], Stmt::Return(_))
+            && let Some(rw) = try_rewrite_two_break_loop(&stmts[i], &stmts[i + 1], id)
+        {
+            id += 1;
+            for m in collect_loop_body_mutations(&[&stmts[i]]) {
+                extra_mut.insert(m);
+            }
+            out.extend(rw);
+            i += 2;
             continue;
         }
         if i + 1 < stmts.len()
