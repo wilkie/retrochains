@@ -1819,6 +1819,29 @@ pub(crate) fn emit_return(
             && matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
             && expr.fold(locals.inits).is_none()
         {
+            // Value-numbering: `return a == b` / `a != b` where `b` was just
+            // CSE-copied from `a` (`b = a` emitted `mov ax,[a]; mov [b],ax`, AX
+            // still live). The two slots are provably equal, so the result is a
+            // constant 1/0 — no runtime compare. The tail-scan (gated by the
+            // branch barrier) only matches when that exact copy is the immediately
+            // preceding code, so a later store to either local breaks it.
+            // Fixture 2216 (`a=x*4; b=x<<2; return a==b`).
+            if matches!(op, BinOp::Eq | BinOp::Ne)
+                && let (Expr::Local(li), Expr::Local(ri)) = (left.as_ref(), right.as_ref())
+                && locals.size(*li) == 2 && locals.size(*ri) == 2
+                && !locals.is_long_local(*li) && !locals.is_float_local(*li)
+            {
+                let (da, db) = (locals.disp(*li), locals.disp(*ri));
+                let barrier = locals.last_branch_barrier.get();
+                if crate::codegen::expr::ax_holds_slot_copy(out, da, db, barrier)
+                    || crate::codegen::expr::ax_holds_slot_copy(out, db, da, barrier)
+                {
+                    if matches!(op, BinOp::Eq) { out.extend_from_slice(&[0xB8, 0x01, 0x00]); }
+                    else { out.extend_from_slice(&[0x2B, 0xC0]); }
+                    crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
+                    return;
+                }
+            }
             // `return x == 0`/`!x` and `return x != 0` (is-zero / is-nonzero):
             // MSC uses the carry trick `cmp word [x],1` (CF set iff x==0), then
             // `sbb ax,ax` (ax = -CF). `== 0` finishes with `neg ax` (→1 iff x==0);

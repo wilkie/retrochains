@@ -1709,6 +1709,19 @@ fn ax_holds_long_low(out: &[u8], low_disp: i16, barrier: usize) -> bool {
         && out[out.len() - pat.len()..] == pat
         && out.len() - pat.len() >= barrier
 }
+/// True when the tail of `out` is exactly `mov ax,[bp+src]; mov [bp+dst],ax` —
+/// the slot copy `dst = src` (with AX left holding the shared value). Used by the
+/// value-numbering equality fold to prove two locals are equal. Only the disp8
+/// encoding is matched (the common small-frame case). Fixture 2216.
+pub(crate) fn ax_holds_slot_copy(out: &[u8], src: i16, dst: i16, barrier: usize) -> bool {
+    if !(-128..=127).contains(&src) || !(-128..=127).contains(&dst) {
+        return false;
+    }
+    let pat = [0x8B, 0x46, src as u8, 0x89, 0x46, dst as u8];
+    out.len() >= pat.len()
+        && out[out.len() - pat.len()..] == pat
+        && out.len() - pat.len() >= barrier
+}
 pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], barrier: usize) -> bool {
     let ends = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
     // The instruction that established AX's value must be STRAIGHT-LINE (at or past
