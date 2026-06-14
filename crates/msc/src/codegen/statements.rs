@@ -2389,6 +2389,64 @@ fn emit_cse_loop(cw: &CseDerefWhile, temp: i16, locals: &Locals<'_>, out: &mut V
         out.push(0x00); // placeholder disp, patched by the caller
     }
 }
+/// A two-iterator string-compare loop: `while (*a && *b && *a == *b)` — two
+/// DISTINCT char-pointer iterators, each `*p` cached in its own byte temp
+/// (`*a`→[bp-2], `*b`→[bp-4]); the `==`/`!=` reuses the cached `*a` against the
+/// live `*b` in AL. Conjunct 0 (`*a`) is the loop-back COND; conjuncts 1 (`*b`)
+/// and 2 (the compare) are the top-of-body tests. Fixture 2203.
+pub(crate) struct TwoIterCse {
+    a_is_param: bool,
+    a: usize,
+    b_is_param: bool,
+    b: usize,
+    ne: bool,
+}
+pub(crate) fn two_iter_cse_while(cond: &Cond) -> Option<TwoIterCse> {
+    if !matches!(cond, Cond::And(..)) { return None; }
+    let mut conjs: Vec<&Cond> = Vec::new();
+    flatten_and(cond, &mut conjs);
+    if conjs.len() != 3 { return None; }
+    let (a_is_param, a, aw) = match conjs[0] { Cond::Truthy(e) => deref_ptr_id(e)?, _ => return None };
+    let (b_is_param, b, bw) = match conjs[1] { Cond::Truthy(e) => deref_ptr_id(e)?, _ => return None };
+    if aw || bw { return None; }                          // byte (char) derefs only
+    if (a_is_param, a) == (b_is_param, b) { return None; } // two distinct iterators
+    let (op, l, r) = match conjs[2] {
+        Cond::Cmp { op: op @ (RelOp::Eq | RelOp::Ne), left, right } =>
+            (op, deref_ptr_id(left)?, deref_ptr_id(right)?),
+        _ => return None,
+    };
+    if l.2 || r.2 { return None; }
+    let pair = [(l.0, l.1), (r.0, r.1)];
+    if !(pair.contains(&(a_is_param, a)) && pair.contains(&(b_is_param, b))) { return None; }
+    Some(TwoIterCse { a_is_param, a, b_is_param, b, ne: matches!(op, RelOp::Ne) })
+}
+/// True when any top-level `while` is a two-iterator strcmp loop — the prologue
+/// reserves two byte temps (4 bytes) and forces a slide frame.
+pub(crate) fn body_has_two_iter_cse(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| matches!(s, Stmt::While { cond, .. } if two_iter_cse_while(cond).is_some()))
+}
+/// Emit the loop-back COND (conjunct 0): load+cache `*a`, then `or al,al`. The
+/// back-jcc (jne) is appended by the caller.
+fn emit_two_iter_cond(t: &TwoIterCse, temp_a: i16, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let ad = ptr_disp(t.a_is_param, t.a, locals);
+    out.push(0x8B); out.push(bp_modrm(0x5E, ad)); push_bp_disp(out, ad);          // mov bx,[bp+a]
+    out.extend_from_slice(&[0x8A, 0x07]);                                         // mov al,[bx]
+    out.push(0x88); out.push(bp_modrm(0x46, temp_a)); push_bp_disp(out, temp_a);  // mov [temp_a],al
+    out.extend_from_slice(&[0x0A, 0xC0]);                                         // or al,al
+}
+/// Emit the top-of-body tests (conjuncts 1,2) with placeholder forward exit-jccs;
+/// records each exit-jcc disp-byte position for the caller to patch.
+fn emit_two_iter_loop(t: &TwoIterCse, temp_a: i16, temp_b: i16, locals: &Locals<'_>, out: &mut Vec<u8>, exits: &mut Vec<usize>) {
+    let bd = ptr_disp(t.b_is_param, t.b, locals);
+    out.push(0x8B); out.push(bp_modrm(0x5E, bd)); push_bp_disp(out, bd);          // mov bx,[bp+b]
+    out.extend_from_slice(&[0x8A, 0x07]);                                         // mov al,[bx]  (al=*b)
+    out.push(0x88); out.push(bp_modrm(0x46, temp_b)); push_bp_disp(out, temp_b);  // mov [temp_b],al
+    out.extend_from_slice(&[0x0A, 0xC0]);                                         // or al,al
+    out.push(0x74); exits.push(out.len()); out.push(0x00);                        // je EXIT (conjunct 1: *b==0)
+    out.push(0x38); out.push(bp_modrm(0x46, temp_a)); push_bp_disp(out, temp_a);  // cmp [temp_a],al
+    out.push(if t.ne { 0x74 } else { 0x75 });                                     // == exits on jne, != on je
+    exits.push(out.len()); out.push(0x00);
+}
 /// Emit the char-deref accumulate loop (see [`while_char_accum`]). `*s` is cached
 /// in a 2-byte stack temp at `min(local disp) - 2` (one slot below the locals,
 /// reserved by the prologue): `jmp COND; [nop]; BODY: mov al,[temp]; cbw;
@@ -4066,10 +4124,25 @@ pub(crate) fn emit_loop(
         // across ALL conjuncts (see [`cse_deref_while`]). Conjunct 0 → COND
         // (loop-back), conjuncts 1.. → the top-of-loop exit tests. The generic
         // split below emits exactly two conjuncts, each with its own deref/widen.
+        let two = two_iter_cse_while(cond);
         let cse = cse_deref_while(cond);
         let mut b_cond_buf: Vec<u8> = Vec::new();
         let mut b_cond_fixups: Vec<Fixup> = Vec::new();
-        if let Some(cw) = &cse {
+        if let Some(t) = &two {
+            // Two-iterator strcmp loop: conjunct 0 (*a) → COND (cmp_buf),
+            // conjuncts 1,2 (*b, cmp) → top-of-body tests (b_cond_buf). Caches
+            // `*a` at [bp-2], `*b` at [bp-4].
+            let temp_a = body_locals.deepest_local_disp() - 2;
+            let temp_b = body_locals.deepest_local_disp() - 4;
+            emit_two_iter_cond(t, temp_a, &body_locals, &mut cmp_buf);
+            let mut exits: Vec<usize> = Vec::new();
+            emit_two_iter_loop(t, temp_a, temp_b, &body_locals, &mut b_cond_buf, &mut exits);
+            let to_exit = b_cond_buf.len() + body_buf.len() + cmp_buf.len() + 2;
+            for pos in exits {
+                let disp = i8::try_from(to_exit - (pos + 1)).expect("two-iter cse exit disp fits in i8");
+                b_cond_buf[pos] = disp as u8;
+            }
+        } else if let Some(cw) = &cse {
             let temp = body_locals.deepest_local_disp() - 2;
             emit_cse_cond(cw, temp, &body_locals, &mut cmp_buf);
             let mut exits: Vec<usize> = Vec::new();
@@ -4146,6 +4219,8 @@ pub(crate) fn emit_loop(
     let jcc_opcode = match cond {
         Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
         Cond::Cmp { op, .. } => back_jcc(cond, *op),
+        // A two-iterator strcmp loop's COND is conjunct 0 (`*a` truthy) → jne.
+        Cond::And(..) if two_iter_cse_while(cond).is_some() => 0x75,
         // A CSE-deref loop's COND is conjunct 0 of the flattened `&&` chain.
         Cond::And(..) if let Some(cw) = cse_deref_while(cond) =>
             cse_back_jcc(&cw.conjuncts[0]),

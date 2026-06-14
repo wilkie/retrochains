@@ -557,6 +557,7 @@ pub(crate) fn emit_function(
             && (!func.locals.is_empty() || func_float_arg_call_result_used(func)))
         || func.struct_field_temp_count > 0
         || has_cse_byte_while
+        || crate::codegen::statements::body_has_two_iter_cse(&body)
         || has_bitfield_temp
     {
         Frame::WithSlide
@@ -708,8 +709,17 @@ pub(crate) fn emit_function(
         && !returns_float_call
         && !has_char_accum_temp
         && has_cse_byte_while;
+    // A two-iterator strcmp loop caches *a and *b in TWO byte temps ([bp-2],
+    // [bp-4]) at the shallowest extra slots — reserve 4 bytes. Fixture 2203.
+    let has_two_iter_cse = func.struct_field_temp_count == 0
+        && !has_float_arg_call
+        && !returns_float_call
+        && !has_char_accum_temp
+        && !has_cse_byte_temp
+        && crate::codegen::statements::body_has_two_iter_cse(&body);
     let frame_bytes: usize = cumulative as usize
         + if has_cse_byte_temp { 2 } else { 0 }
+        + if has_two_iter_cse { 4 } else { 0 }
         + 4 * func.struct_field_temp_count as usize
         // The float-arg-call result spill (`mov [bp-2],ax`) is only needed when
         // the result is NOT consumed by a float-return receive — that path copies
