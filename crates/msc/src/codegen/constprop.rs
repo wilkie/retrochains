@@ -1084,6 +1084,10 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 Cond::Truthy(Expr::Global(g)) => Some((true, *g)),
                 _ => None,
             };
+            // Snapshot the cond's variable reads BEFORE prop_cond substitutes
+            // them to literals — a false fold consumes these (see below) and the
+            // substituted cond would otherwise carry no Local/Global to mark.
+            let cond_before = cond.clone();
             prop_cond(cond, cp);
             if cp.substituted
                 && matches!(crate::codegen::statements::fold_cond_raw(cond, &[]), Some(k) if k != 0)
@@ -1116,11 +1120,16 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.la_var_written.clear();
                 cp.ga_known.clear();
                 // Init-seeded knowledge also lives in the EMIT-time fold view
-                // (locals.inits) — mark the surviving else-if chain's cond
-                // reads as mutated so the emitter re-tests them at runtime,
-                // mirroring the ternary-chain rule. `if (a>0)...else if (a<0)`
-                // with `int a = 0;` elides the first arm but emits a real
-                // `cmp [a],0` for the second (fixture 1201).
+                // (locals.inits) — mark the cond's own reads, plus the surviving
+                // else-if chain's cond reads, as mutated so the emitter re-tests
+                // them at runtime, mirroring the ternary-chain rule. `if (a>0)...
+                // else if (a<0)` with `int a = 0;` elides the first arm but emits
+                // a real `cmp [a],0` for the second (fixture 1201). For two
+                // SEPARATE ifs on the same variable, the dropped-false first if
+                // likewise consumes its var so the next sibling `if` re-tests at
+                // runtime (fixture 2001: `if(x==500)...; if(x==1000)...` with
+                // x=1000 drops the first but keeps the second's `cmp`).
+                mark_cond_reads(&cond_before, cp);
                 let mut chain: Option<&Stmt> = else_branch.as_deref();
                 while let Some(Stmt::If { cond, else_branch, .. }) = chain {
                     mark_cond_reads(cond, cp);
