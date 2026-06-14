@@ -42,6 +42,6 @@ whenever any fixture fails, so check the printed summary, not just the exit
 code.
 
 The MSC toolchain has its own pool — `verify-all --toolchain ours --compiler
-msc` — currently **3967 pass / 11 fail** out of 3978. (A fixture can be
+msc` — currently **3968 pass / 10 fail** out of 3978. (A fixture can be
 MSC-only when our BCC can't yet match real BCC; capture both with `xfix
 capture --compiler {bcc,msc}` and add both `invocation.{bcc,msc}.toml`.)

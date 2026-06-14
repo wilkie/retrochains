@@ -2736,6 +2736,80 @@ fn try_rewrite_break_loop(s: &Stmt, ret: &Stmt, id: usize) -> Option<Vec<Stmt>> 
     });
     Some(new)
 }
+/// Conservative structural equality for scalar expressions — used by the
+/// do-while continue tail-merge to decide two statements are identical. Returns
+/// false for any shape it doesn't explicitly handle (so a mismatch never merges).
+fn expr_eq(a: &Expr, b: &Expr) -> bool {
+    use Expr::*;
+    match (a, b) {
+        (IntLit(x), IntLit(y)) => x == y,
+        (Local(x), Local(y)) | (Global(x), Global(y)) | (Param(x), Param(y)) => x == y,
+        (BinOp { op: o1, left: l1, right: r1 }, BinOp { op: o2, left: l2, right: r2 }) =>
+            o1 == o2 && expr_eq(l1, l2) && expr_eq(r1, r2),
+        (DerefByte { ptr: p1 }, DerefByte { ptr: p2 })
+        | (DerefWord { ptr: p1 }, DerefWord { ptr: p2 }) => expr_eq(p1, p2),
+        (CastChar { value: v1, unsigned: u1, from_var: f1 }, CastChar { value: v2, unsigned: u2, from_var: f2 }) =>
+            u1 == u2 && f1 == f2 && expr_eq(v1, v2),
+        _ => false,
+    }
+}
+/// Conservative equality for scalar assignment targets.
+fn assign_target_eq(a: &AssignTarget, b: &AssignTarget) -> bool {
+    use AssignTarget::*;
+    match (a, b) {
+        (Local(x), Local(y)) | (Global(x), Global(y)) | (Param(x), Param(y)) => x == y,
+        (DerefParam(x), DerefParam(y)) | (DerefLocal(x), DerefLocal(y)) => x == y,
+        _ => false,
+    }
+}
+/// Conservative structural equality for statements (assignments / expr-stmts).
+fn stmt_eq(a: &Stmt, b: &Stmt) -> bool {
+    match (a, b) {
+        (Stmt::Assign { target: t1, value: v1 }, Stmt::Assign { target: t2, value: v2 }) =>
+            assign_target_eq(t1, t2) && expr_eq(v1, v2),
+        (Stmt::ExprStmt(e1), Stmt::ExprStmt(e2)) => expr_eq(e1, e2),
+        _ => false,
+    }
+}
+/// Do-while continue tail-merge: when the body's leading `if (c) { TAIL; continue; }`
+/// ends with the SAME statements `TAIL` that close the loop body, MSC factors the
+/// common tail — the `continue` jumps PAST the middle to the shared `TAIL`:
+///   do { if (c) { TAIL; continue; } MID; TAIL } while (d);
+///     →  do { if (c) goto L; MID; L: TAIL } while (d);
+/// Reuses the if/goto/label codegen. Fixture 3326.
+fn rewrite_dowhile_continue_tailmerge(s: &Stmt, id: usize) -> Option<Stmt> {
+    let Stmt::DoWhile { body, cond } = s else { return None };
+    let stmts: &[Stmt] = match body.as_ref() {
+        Stmt::Block(v) => v,
+        other => std::slice::from_ref(other),
+    };
+    let Stmt::If { cond: c, then_branch, else_branch: None } = stmts.first()? else { return None };
+    let inner: &[Stmt] = match then_branch.as_ref() {
+        Stmt::Block(v) => v,
+        other => std::slice::from_ref(other),
+    };
+    if !matches!(inner.last()?, Stmt::Continue) { return None; }
+    let tail = &inner[..inner.len() - 1]; // the if-body minus the trailing `continue`
+    if tail.is_empty() { return None; }
+    let after = &stmts[1..]; // body after the leading if
+    if after.len() < tail.len() { return None; }
+    let (mid, body_tail) = after.split_at(after.len() - tail.len());
+    // The if-body's TAIL must structurally match the loop body's trailing TAIL,
+    // and there must be no other break/continue anywhere in MID or the tail.
+    if !tail.iter().zip(body_tail).all(|(x, y)| stmt_eq(x, y)) { return None; }
+    if mid.iter().chain(body_tail).any(stmt_has_loop_break) { return None; }
+    let label = format!("__dc{id}");
+    let mut new_body = Vec::new();
+    new_body.push(Stmt::If {
+        cond: c.clone(),
+        then_branch: Box::new(Stmt::Goto(label.clone())),
+        else_branch: None,
+    });
+    new_body.extend_from_slice(mid);
+    new_body.push(Stmt::Label(label));
+    new_body.extend_from_slice(body_tail);
+    Some(Stmt::DoWhile { body: Box::new(Stmt::Block(new_body)), cond: cond.clone() })
+}
 /// A return-terminated infinite loop with BOTH a leading and a trailing
 /// `if (c) break;` (no other break in between):
 ///   `while (1) { if (c1) break; MIDDLE; if (c2) break; } return X;`
@@ -2865,6 +2939,14 @@ pub(crate) fn fold_break_loops(stmts: Vec<Stmt>) -> (Vec<Stmt>, std::collections
     while i < stmts.len() {
         if let Some(body) = match_once_loop(&stmts[i]) {
             out.extend(body);
+            i += 1;
+            continue;
+        }
+        // Do-while continue tail-merge (keeps the loop; just restructures the
+        // body), so the normal loop-mutation handling still applies. Fixture 3326.
+        if let Some(rw) = rewrite_dowhile_continue_tailmerge(&stmts[i], id) {
+            id += 1;
+            out.push(rw);
             i += 1;
             continue;
         }
