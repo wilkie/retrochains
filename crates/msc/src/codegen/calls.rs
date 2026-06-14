@@ -596,6 +596,16 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             out.extend_from_slice(&byte_off.to_le_bytes());
             fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *array } });
         }
+        // Word LOCAL-array element `a[K]` (constant index) as an argument:
+        // `push word ptr [bp+disp+2K]` (ff 76 disp). Mirrors the global-array
+        // case and the scalar Local push. Fixture 2042.
+        Expr::LocalIndex { local, index } if index.fold(locals.inits).is_some() => {
+            let k = index.fold(locals.inits).expect("folds");
+            let disp = locals.disp(*local) + (k as i16) * 2;
+            out.push(0xFF);
+            out.push(bp_modrm(0x76, disp));
+            push_bp_disp(out, disp);
+        }
         Expr::BinOp { .. } | Expr::Call { .. } | Expr::CallPtr { .. } | Expr::Ternary { .. }
             | Expr::DerefWord { .. } | Expr::DerefByte { .. }
             | Expr::GlobalField { .. } | Expr::LocalField { .. }

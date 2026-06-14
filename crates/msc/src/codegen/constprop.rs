@@ -1,5 +1,25 @@
 use crate::*;
 
+/// `e` is a direct or indirect call.
+fn cp_is_call(e: &Expr) -> bool { matches!(e, Expr::Call { .. } | Expr::CallPtr { .. }) }
+/// A call-chain leaf: a bare call or `<call> * <const>` (mirrors `call_leaf_mul`).
+fn cp_call_leaf(e: &Expr) -> bool {
+    cp_is_call(e)
+        || matches!(e, Expr::BinOp { op: BinOp::Mul, left, right }
+            if cp_is_call(left) && matches!(right.as_ref(), Expr::IntLit(_)))
+}
+/// `e` is a left-assoc add/sub chain whose every operand is a call leaf (the
+/// leftmost may be `<call>*K`; inner rights must be bare calls). Mirrors
+/// `collect_call_chain` so const-prop's first-eval suppression engages exactly
+/// when the codegen SI/DI call-chain scheduler will.
+fn cp_left_call_chain(e: &Expr) -> bool {
+    match e {
+        Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right } =>
+            cp_left_call_chain(left) && cp_is_call(right),
+        _ => cp_call_leaf(e),
+    }
+}
+
 /// Dead-code elimination around `goto`: (1) statements after an unconditional
 /// top-level `goto` are unreachable until the next label, so drop them; (2) a
 /// `goto L` whose target `L` is reachable from that point through only labels
@@ -1714,6 +1734,10 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         in_cond: cp.in_cond,
         saw_call: cp.saw_call,
         substituted: cp.substituted,
+        // Transient within a single prop_expr recursion; never carried across
+        // the branch snapshots cp_clone serves.
+        suppress_subst: false,
+        in_parked_call: false,
     }
 }
 /// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
@@ -2171,7 +2195,8 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // Long globals are never substituted — their compound
             // updates need `Global(g)` on the lhs for the long-specific
             // assign-codegen path to fire (fixture 207).
-            if !cp.long_globals.contains(idx)
+            if !cp.suppress_subst
+                && !cp.long_globals.contains(idx)
                 && let Some(&k) = cp.g_known.get(idx)
             {
                 *e = Expr::IntLit(k);
@@ -2179,7 +2204,8 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
         }
         Expr::Local(idx) => {
-            if let Some(&k) = cp.l_known.get(idx)
+            if !cp.suppress_subst
+                && let Some(&k) = cp.l_known.get(idx)
                 && !cp.local_specs.get(*idx).is_some_and(|s| s.is_register)
             {
                 *e = Expr::IntLit(k);
@@ -2243,8 +2269,23 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // indices are already byte-scaled at parse and reach here as IntLit,
             // so `right_was_var` keeps them from being scaled twice.
             let right_was_var = !matches!(right.as_ref(), Expr::IntLit(_));
+            // Multi-call add/sub chain: the rightmost call (this binop's `right`,
+            // emitted into AX before the left calls park in SI/DI) loads its leaf
+            // arguments from MEMORY, not const-propagated immediates. Only the
+            // OUTERMOST chain arms the suppression — the left sub-chain's parked
+            // calls keep const args (`in_parked_call` blocks re-arming).
+            let chain_top = matches!(op, BinOp::Add | BinOp::Sub)
+                && !cp.in_parked_call
+                && cp_is_call(right)
+                && cp_left_call_chain(left);
+            let saved_parked = cp.in_parked_call;
+            if chain_top { cp.in_parked_call = true; }
             prop_expr(left, cp);
+            cp.in_parked_call = saved_parked;
+            let saved_suppress = cp.suppress_subst;
+            if chain_top { cp.suppress_subst = true; }
             prop_expr(right, cp);
+            cp.suppress_subst = saved_suppress;
             // Algebraic identities on bit ops with a literal 0 operand:
             // `x & 0 → 0` (x dropped, so it must be side-effect-free) and
             // `x | 0 → x` / `0 | x → x`. MSC folds these away — e.g. a
@@ -2403,7 +2444,8 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 _ => unreachable!(),
             };
             prop_expr(index_ref, cp);
-            if let Expr::IntLit(k) = index_ref
+            if !cp.suppress_subst
+                && let Expr::IntLit(k) = index_ref
                 && let Ok(byte_off) = u16::try_from(*k as i64 * elem_size as i64)
                 && let Some(&v) = cp.ga_known.get(&(array, byte_off))
             {
@@ -2565,7 +2607,8 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 }
                 _ => unreachable!(),
             };
-            if let Some(k) = known_k
+            if !cp.suppress_subst
+                && let Some(k) = known_k
                 && let Ok(byte_off) = u16::try_from(k as i64 * elem_size as i64)
                 && let Some(&v) = cp.la_known.get(&(local, byte_off))
                 // A variable-indexed read (`a[i]`) forwards only from a
