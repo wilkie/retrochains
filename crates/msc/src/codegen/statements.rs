@@ -205,7 +205,22 @@ pub(crate) fn emit_stmt(
     // nested terminal `if(c) return e;` isn't mistaken for the function's tail.
     let final_top = locals.final_top_stmt.replace(false);
     match stmt {
-        Stmt::Return(expr) => emit_return(expr, locals, frame, return_int, return_long, out, fixups),
+        Stmt::Return(expr) => {
+            // A bare `return E` whose value already has a shared epilogue block
+            // (an earlier `if (c) return E`) jumps to it rather than re-emitting
+            // the value load + epilogue. MSC shares these. Fixtures 4165, 2772.
+            if return_int && !return_long
+                && let Some(key) = return_share_key(expr)
+                && locals.labels.borrow().contains_key(&key)
+            {
+                out.push(0xEB); // jmp short @retX
+                let pos = out.len();
+                out.push(0x00);
+                locals.label_fixups.borrow_mut().push((key, pos));
+                return;
+            }
+            emit_return(expr, locals, frame, return_int, return_long, out, fixups)
+        }
         Stmt::Empty => {}
         Stmt::ExprStmt(Expr::Call { name, args }) => {
             // The per-call `add sp,N` cleanup is elided only for the function's
@@ -711,9 +726,10 @@ pub(crate) fn emit_stmt(
             // path above). Absolute offset, inserted after the rebase so it is
             // not shifted again. First occurrence wins. Fixture 4036.
             if return_int && !return_long
-                && let Stmt::Return(Expr::IntLit(k)) = unwrap_single_stmt(then_branch)
+                && let Stmt::Return(re) = unwrap_single_stmt(then_branch)
+                && let Some(key) = return_share_key(re)
             {
-                locals.labels.borrow_mut().entry(format!("@ret{k}")).or_insert(then_base);
+                locals.labels.borrow_mut().entry(key).or_insert(then_base);
             }
             // Shift break/continue offsets recorded during the then
             // emit by `then_base` so they point at the correct bytes.
@@ -2219,6 +2235,18 @@ fn unwrap_single_stmt(s: &Stmt) -> &Stmt {
     match s {
         Stmt::Block(v) if v.len() == 1 => &v[0],
         other => other,
+    }
+}
+/// The shared-block label for `return <e>` when `e` is a value MSC emits the
+/// epilogue for ONCE and routes later identical returns to (a constant or a
+/// plain local). MSC shares both `if (c) return E` and bare `return E` blocks.
+/// Fixtures 4036 (const), 4165 (local, bare), 2772 (loop rewrite).
+fn return_share_key(e: &Expr) -> Option<String> {
+    match e {
+        Expr::IntLit(k) => Some(format!("@ret{k}")),
+        Expr::Local(x) => Some(format!("@retL{x}")),
+        Expr::Param(x) => Some(format!("@retP{x}")),
+        _ => None,
     }
 }
 /// Emit `if (cond) goto label` taken when `cond` is TRUE, for a (possibly
