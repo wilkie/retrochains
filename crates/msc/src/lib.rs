@@ -330,6 +330,10 @@ pub struct LocalSpec {
     /// pointed-to element (1 for char*, 2 for int*). Zero for non-pointer
     /// locals. Used to compute the step for postfix `p++`/`p--`.
     pub pointee_size: usize,
+    /// True for `unsigned char *p` — a `*p` byte read zero-extends with
+    /// `sub ah, ah` instead of sign-extending with `cbw`. (The pointee is
+    /// unsigned char; the pointer itself is never "unsigned".) Fixture 465.
+    pub pointee_unsigned: bool,
     /// True for `unsigned char x` — load uses `sub ah, ah` (zero-extend)
     /// instead of `cbw` (sign-extend).
     pub is_unsigned: bool,
@@ -406,20 +410,20 @@ pub enum BitBase {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     /// `float`/`double` local. `width` is 4 (float) or 8 (double); `bits` is
     /// the f64 value of a literal initializer (None for uninitialized). `init`
     /// carries the truncated int value so `(int)f` const-folds.
     pub fn float_(width: usize, bits: Option<u64>) -> Self {
         let init = bits.map(|b| f64::from_bits(b) as i32);
-        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None, is_register: false }
+        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None, is_register: false }
     }
     /// A `float`/`double` local whose initializer is a const-foldable cast or
     /// arithmetic (`(float)i`, `double d = f`, `a + b`) rather than a direct
@@ -427,7 +431,7 @@ impl LocalSpec {
     /// so the int-fold view does NOT replace `(int)<local>` with `mov ax,K`;
     /// instead the store keeps st(0) live (`fst`) and the cast is `call __ftol`.
     pub fn float_nonliteral(width: usize, bits: u64) -> Self {
-        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None, is_register: false }
+        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, is_huge_ptr: false, pointee_size: 0, pointee_unsigned: false, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None, is_register: false }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -501,6 +505,9 @@ pub struct Locals<'a> {
     /// non-pointers). Drives pointer-difference element scaling for
     /// `q - p` between two pointer locals (byte sub then `sar`).
     pub local_pointee_sizes: &'a [usize],
+    /// Parallel-indexed: true for `unsigned char *p` locals — a `*p` byte read
+    /// zero-extends (`sub ah,ah`) instead of sign-extending (`cbw`). Fixture 465.
+    pub local_pointee_unsigned: &'a [bool],
     /// Parallel-indexed byte width (4/8) of `float`/`double` locals, 0
     /// otherwise. A non-literal float local consumed by `(int)<local>` is
     /// stored with `fst` (st(0) kept live) and the cast is bare `call __ftol`.
@@ -708,6 +715,7 @@ impl Locals<'_> {
             array_locals: self.array_locals,
             unsigned_locals: self.unsigned_locals,
             local_pointee_sizes: self.local_pointee_sizes,
+            local_pointee_unsigned: self.local_pointee_unsigned,
             float_locals: self.float_locals,
             char_params: self.char_params,
             param_struct_bytes: self.param_struct_bytes,
@@ -791,6 +799,9 @@ impl Locals<'_> {
     }
     pub fn local_pointee_size(&self, idx: usize) -> usize {
         self.local_pointee_sizes.get(idx).copied().unwrap_or(0)
+    }
+    pub fn local_pointee_unsigned(&self, idx: usize) -> bool {
+        self.local_pointee_unsigned.get(idx).copied().unwrap_or(false)
     }
     /// 4 or 8 for a `float`/`double` local, else 0.
     pub fn float_local_width(&self, idx: usize) -> usize {
@@ -2156,6 +2167,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .collect();
     let char_globals: Vec<bool> = unit.globals.iter().map(|g| !g.is_pointer && g.element_size == 1 && g.array_len == 1).collect();
     let global_elem_sizes: Vec<usize> = unit.globals.iter().map(|g| g.element_size).collect();
+    let global_array_lens: Vec<usize> = unit.globals.iter().map(|g| g.array_len).collect();
     let unsigned_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_unsigned).collect();
     let float_globals: Vec<usize> = unit.globals.iter()
         .map(|g| if g.is_float { g.element_size } else { 0 }).collect();
@@ -2246,7 +2258,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .functions
         .iter()
         .enumerate()
-        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &unit.variadic_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &global_array_lens, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &unit.variadic_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -3598,6 +3610,10 @@ struct ConstProp {
     /// /scalars, 2 for int, etc). Used to pick IndexByte vs Index and the byte
     /// offset when resolving a global-pointer subscript through `ptr_alias_g`.
     global_elem_sizes: Vec<usize>,
+    /// Parallel to globals: each global's array length (1 for scalars). Used to
+    /// tell a char ARRAY from a scalar char global when resolving `*p` byte
+    /// stores through an alias. Fixture 465.
+    global_array_lens: Vec<usize>,
     /// Local indices whose type is a `union`. A union member read is folded
     /// from `la_known` only when its access size matches the recorded write's
     /// size (`la_field_size`) — MSC folds word↔word punning (2819) but reads a

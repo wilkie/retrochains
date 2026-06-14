@@ -53,6 +53,7 @@ pub(crate) fn const_prop_globals(
     local_specs: &[LocalSpec],
     long_globals: &[bool],
     global_elem_sizes: &[usize],
+    global_array_lens: &[usize],
     struct_is_union: &[bool],
     union_globals: &std::collections::HashSet<usize>,
 ) -> (
@@ -70,6 +71,7 @@ pub(crate) fn const_prop_globals(
     let mut cp = ConstProp {
         local_specs: local_specs.to_vec(),
         global_elem_sizes: global_elem_sizes.to_vec(),
+        global_array_lens: global_array_lens.to_vec(),
         union_locals,
         union_globals: union_globals.clone(),
         ..ConstProp::default()
@@ -574,15 +576,28 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             // `*p = ...` where p aliases x/g → rewrite to a direct store, and
             // rewrite any `*p` in the RHS to the aliased lvalue too, so a
             // compound `*p += K` becomes `x += K` (in-place add) not a fold.
+            let dlb_is_byte = matches!(target, AssignTarget::DerefLocalByte(_));
             if let (AssignTarget::DerefLocal(p) | AssignTarget::DerefLocalByte(p)) = target
                 && let Some(&a) = cp.ptr_alias.get(p)
                 && !matches!(a, AliasTarget::String(_))
             {
                 cp.aliases_used.insert(*p);
-                *target = match a {
-                    AliasTarget::Local(x) => AssignTarget::Local(x),
-                    AliasTarget::Global(g) => AssignTarget::Global(g),
-                    AliasTarget::String(_) => unreachable!(),
+                // A byte deref of a char ARRAY resolves to a byte ELEMENT store
+                // (`mov byte [g],imm`). A scalar keeps Local(x)/Global(g) so its
+                // known value still PROPAGATES (a later `return x` folds) — the
+                // element-table store would lose that. Fixture 465 (array) vs
+                // 1247/3956/3960 (scalars).
+                let is_array = match a {
+                    AliasTarget::Local(x) => cp.local_specs.get(x).map(|s| s.array_len > 1).unwrap_or(false),
+                    AliasTarget::Global(g) => cp.global_array_lens.get(g).copied().unwrap_or(1) > 1,
+                    AliasTarget::String(_) => false,
+                };
+                *target = match (a, dlb_is_byte && is_array) {
+                    (AliasTarget::Local(x), true) => AssignTarget::IndexedLocalByte { local: x, byte_off: 0 },
+                    (AliasTarget::Local(x), false) => AssignTarget::Local(x),
+                    (AliasTarget::Global(g), true) => AssignTarget::IndexedGlobalByte { array: g, byte_off: 0 },
+                    (AliasTarget::Global(g), false) => AssignTarget::Global(g),
+                    (AliasTarget::String(_), _) => unreachable!(),
                 };
                 alias_rewrite_derefs(value, cp);
             }
@@ -1238,6 +1253,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         ptr_addr: cp.ptr_addr.clone(),
         local_specs: cp.local_specs.clone(),
         global_elem_sizes: cp.global_elem_sizes.clone(),
+        global_array_lens: cp.global_array_lens.clone(),
         union_locals: cp.union_locals.clone(),
         union_globals: cp.union_globals.clone(),
         la_field_size: cp.la_field_size.clone(),

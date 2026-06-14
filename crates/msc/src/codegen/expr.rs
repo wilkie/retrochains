@@ -956,13 +956,19 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&[0x8A, 0x07, 0x98]);         // mov al,[bx]; cbw
                 return;
             }
-            // `*<char-ptr local>`: load p from its slot, byte-deref + widen.
+            // `*<char-ptr local>`: load p from its slot, byte-deref + widen. An
+            // `unsigned char *p` zero-extends (`sub ah,ah`) instead of `cbw`. (465)
             if let Expr::Local(idx) = ptr.as_ref() {
                 let disp = locals.disp(*idx);
                 out.push(0x8B);
                 out.push(bp_modrm(0x5E, disp));
                 push_bp_disp(out, disp); // mov bx, [bp-disp]
-                out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al, [bx]; cbw
+                out.extend_from_slice(&[0x8A, 0x07]); // mov al, [bx]
+                if locals.local_pointee_unsigned(*idx) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah
+                } else {
+                    out.push(0x98); // cbw
+                }
                 return;
             }
             // `*(char *)&x` — byte read of a local/global's own storage. The

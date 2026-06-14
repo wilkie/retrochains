@@ -414,6 +414,7 @@ pub(crate) fn emit_function(
     unsigned_globals: &[bool],
     float_globals: &[usize],
     global_elem_sizes: &[usize],
+    global_array_lens: &[usize],
     char_returners: &std::collections::HashSet<String>,
     long_returners: &std::collections::HashSet<String>,
     pascal_fns: &std::collections::HashSet<String>,
@@ -431,7 +432,7 @@ pub(crate) fn emit_function(
     // and `push_epilogue` emits `retf` (CB) instead of `ret` (C3).
     CUR_FN_FAR.with(|c| c.set(func.is_far));
     set_cur_fn_param_disps(func);
-    let (body, mutated_locals, loop_mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, struct_is_union, union_globals);
+    let (body, mutated_locals, loop_mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, global_array_lens, struct_is_union, union_globals);
     // Splice top-level blocks that contain a switch into the top-level
     // statement stream, so a switch inside a const-folded outer switch's
     // body reaches the partial-switch continuation machinery below
@@ -490,6 +491,7 @@ pub(crate) fn emit_function(
     let local_arrays: Vec<bool> = func.locals.iter().map(|l| l.array_len > 1).collect();
     let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
     let local_pointee: Vec<usize> = func.locals.iter().map(|l| if l.array_len > 1 { 0 } else { l.pointee_size as usize }).collect();
+    let local_pointee_uns: Vec<bool> = func.locals.iter().map(|l| l.pointee_unsigned).collect();
     let local_float: Vec<usize> = func.locals.iter().map(|l| if l.is_float { l.size } else { 0 }).collect();
     let fpu_live: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
     let fpu_pending_fwait: std::cell::Cell<bool> = std::cell::Cell::new(false);
@@ -889,6 +891,7 @@ pub(crate) fn emit_function(
         array_locals: &local_arrays,
         unsigned_locals: &local_unsigned,
         local_pointee_sizes: &local_pointee,
+        local_pointee_unsigned: &local_pointee_uns,
         float_locals: &local_float,
         char_params: &param_is_char,
         param_struct_bytes: &func.param_struct_bytes,
