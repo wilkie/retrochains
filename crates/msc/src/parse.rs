@@ -543,6 +543,73 @@ pub(crate) fn parse_typedef(p: &mut Parser<'_>) -> Result<(), EmitError> {
     p.eat(&Tok::Semi)?;
     Ok(())
 }
+/// Parse an ANONYMOUS nested struct body `{ field; ... }` (the `struct` keyword
+/// already consumed; next token is `{`), register it under a synthetic name, and
+/// return its registry index. Supports the simple scalar/pointer/array fields
+/// the corpus uses inside anonymous members (fixtures 3342, 2324) — bit-fields
+/// and fnptr fields inside an anon struct aren't needed.
+fn parse_anon_struct(p: &mut Parser<'_>, is_union: bool) -> Result<usize, EmitError> {
+    p.eat(&Tok::LBrace)?;
+    let mut fields: Vec<StructField> = Vec::new();
+    let mut cursor: usize = 0;
+    while !matches!(p.peek(), Some(Tok::RBrace)) {
+        let had_unsigned = matches!(p.peek(), Some(Tok::Kw("unsigned")));
+        skip_decl_modifiers(p);
+        let size: u8 = match p.peek() {
+            Some(Tok::Kw("int")) => { p.bump(); 2 }
+            Some(Tok::Kw("char")) => { p.bump(); 1 }
+            Some(Tok::Kw("long")) => { p.bump(); 4 }
+            other => return Err(EmitError::Unsupported(format!(
+                "anonymous struct field type not supported: {other:?}"))),
+        };
+        loop {
+            let is_ptr = matches!(p.peek(), Some(Tok::Star));
+            if is_ptr { p.bump(); }
+            let fname = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => return Err(EmitError::Unsupported(format!(
+                    "expected anonymous struct field name, got {other:?}"))),
+            };
+            let elem = if is_ptr { 2u8 } else { size };
+            let mut count = 1usize;
+            if matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let n = parse_signed_int(p)?;
+                if n <= 0 {
+                    return Err(EmitError::Unsupported("anonymous struct array length must be positive".to_owned()));
+                }
+                p.eat(&Tok::RBrack)?;
+                count = n as usize;
+            }
+            let span = elem as usize * count;
+            let byte_off = if is_union {
+                cursor = cursor.max(span);
+                0
+            } else {
+                if elem >= 2 && cursor % 2 != 0 { cursor += 1; }
+                let off = u16::try_from(cursor).expect("anon field offset fits");
+                cursor += span;
+                off
+            };
+            fields.push(StructField {
+                name: fname, byte_off, size: elem, struct_idx: None,
+                bit_width: 0, bit_off: 0, is_pointer: is_ptr,
+                pointee_size: if is_ptr { size } else { 0 }, is_unsigned: had_unsigned,
+            });
+            match p.peek() {
+                Some(Tok::Comma) => { p.bump(); }
+                _ => break,
+            }
+        }
+        p.eat(&Tok::Semi)?;
+    }
+    p.eat(&Tok::RBrace)?;
+    let needs_word_align = fields.iter().any(|f| f.size >= 2);
+    let total_bytes = if needs_word_align { (cursor + 1) & !1 } else { cursor };
+    let idx = p.structs.len();
+    p.structs.push(StructDef { name: format!("__anon{idx}"), fields, total_bytes, is_union });
+    Ok(idx)
+}
 pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // `union` shares the struct path: identical field syntax, but every
     // member sits at offset 0 and the total size is the largest member.
@@ -581,6 +648,14 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
         let mut field_struct_idx: Option<usize> = None;
         let size: u8 = if matches!(p.peek(), Some(Tok::Kw("struct"))) {
             p.bump();
+            // Anonymous nested struct member: `struct { ... } name;` (fixtures
+            // 3342, 2324). Parse + register the inner struct, then fall through
+            // to the member-name declarator below.
+            if matches!(p.peek(), Some(Tok::LBrace)) {
+                let inner = parse_anon_struct(p, false)?;
+                field_struct_idx = Some(inner);
+                u8::try_from(p.structs[inner].total_bytes).expect("anon struct fits in u8")
+            } else {
             let inner_name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => return Err(EmitError::Unsupported(format!(
@@ -600,6 +675,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 })?;
                 field_struct_idx = Some(inner);
                 u8::try_from(p.structs[inner].total_bytes).expect("nested struct fits in u8")
+            }
             }
         } else {
             match p.peek() {
