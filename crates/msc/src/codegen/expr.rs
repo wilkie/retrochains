@@ -3919,6 +3919,22 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
         return;
     }
+    // `(int)<long> + (int)(<same long> >> 16)`: the long's low word plus its
+    // high word. MSC reads the HIGH word into AX, then `add ax,[lo]` — it does
+    // NOT fold even when the long's value is known (long reads go to the slot).
+    // Fixture 1949.
+    if matches!(op, BinOp::Add)
+        && let Expr::Local(li) = left
+        && locals.is_long_local(*li)
+        && let Expr::BinOp { op: BinOp::Shr, left: hl, right: hr } = right
+        && matches!(hl.as_ref(), Expr::Local(hi) if *hi == *li)
+        && hr.fold(locals.inits) == Some(16)
+    {
+        let disp = locals.disp(*li);
+        emit_long_high_word_to_ax(&Expr::Local(*li), locals, out, fixups); // mov ax,[hi]
+        out.push(0x03); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // add ax,[lo]
+        return;
+    }
     // `<expr> + *ptr` where the RHS is a WORD deref of a simple pointer
     // local/param: emit the LHS into AX, load the pointer into BX, then
     // `add ax,[bx]` — no push/pop. Fixture 1983 (`cp[0] + *ip`).
