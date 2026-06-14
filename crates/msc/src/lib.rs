@@ -786,7 +786,14 @@ impl Locals<'_> {
     fn struct_field_unsigned(&self, struct_idx: Option<usize>, byte_off: u16) -> bool {
         let Some(si) = struct_idx else { return false; };
         let Some(sd) = self.structs.get(si) else { return false; };
-        sd.fields.iter().any(|f| f.byte_off == byte_off && f.size == 1 && f.is_unsigned)
+        // The byte at `byte_off` belongs to the size-1 field with the largest
+        // byte_off <= it (a `char[]` array element resolves to the array field;
+        // distinct char fields resolve to themselves). Return that field's sign.
+        sd.fields.iter()
+            .filter(|f| f.size == 1 && f.byte_off <= byte_off)
+            .max_by_key(|f| f.byte_off)
+            .map(|f| f.is_unsigned)
+            .unwrap_or(false)
     }
     /// `g.<byte field>` unsigned? (`g` a global struct.)
     pub fn global_field_unsigned(&self, global: usize, byte_off: u16) -> bool {
