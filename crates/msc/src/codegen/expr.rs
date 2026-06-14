@@ -1916,6 +1916,13 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
             // (e.g. a resolved `*arr[0]=100` between `arr[1]=&b` and `*arr[1]`,
             // fixture 2470). Opaque when it targets the operand's own slot.
             5
+        } else if n >= 3 && out[n - 3] == 0x8C && out[n - 2] == 0x56
+            && !(store_self.len() == 3 && out[n - 1] == store_self[2])
+        {
+            // mov [bp+d8], ss (8C 56 d) — a segment store to ANOTHER slot (the high
+            // word of a huge-pointer init `(huge)&x`: off then seg). Preserves AX,
+            // so a following far-diff push reuses the offset. Fixture 1773.
+            3
         } else {
             return false;
         };
@@ -2371,6 +2378,41 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         };
         if k { out.extend_from_slice(&[0xB8, 0x01, 0x00]); } // mov ax,1
         else { out.extend_from_slice(&[0x2B, 0xC0]); }       // sub ax,ax
+        return;
+    }
+    // `(int)(hp2 - hp1)` for two huge-pointer locals → the far-pointer diff
+    // helper `__aNahdiff`: push each pointer's segment+offset (hp1 then hp2),
+    // call, then scale the byte result down to elements (`sar ax,1` per log2 of
+    // the pointee size). A `(huge)&local` pointer's segment is SS, pushed
+    // directly; hp2's offset is reused from AX when its init `lea` is still live
+    // (across the seg store). Fixture 1773.
+    if matches!(op, BinOp::Sub)
+        && let (Expr::Local(p2), Expr::Local(p1)) = (left, right)
+        && locals.is_huge_ptr_local(*p2)
+        && locals.is_huge_ptr_local(*p1)
+    {
+        let d1 = locals.disp(*p1);
+        let d2 = locals.disp(*p2);
+        // Reuse AX for hp2's offset only if it still holds the init lea — check
+        // BEFORE emitting any pushes (which would hide the establishing store).
+        let store = { let mut v = vec![0x89, bp_modrm(0x46, d2)]; push_bp_disp(&mut v, d2); v };
+        let load = { let mut v = vec![0x8B, bp_modrm(0x46, d2)]; push_bp_disp(&mut v, d2); v };
+        let reuse_ax = ax_holds_word_operand(out, &load, &store, locals.last_branch_barrier.get());
+        out.push(0x16); // push ss  (hp1 segment)
+        out.push(0xFF); out.push(bp_modrm(0x76, d1)); push_bp_disp(out, d1); // push word [bp+hp1]
+        out.push(0x16); // push ss  (hp2 segment)
+        if reuse_ax {
+            out.push(0x50); // push ax  (hp2 offset, live)
+        } else {
+            out.push(0xFF); out.push(bp_modrm(0x76, d2)); push_bp_disp(out, d2); // push word [bp+hp2]
+        }
+        let call = out.len();
+        out.extend_from_slice(&[0xE8, 0x00, 0x00]);
+        fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: "__aNahdiff".to_owned() } });
+        let elem = locals.local_pointee_size(*p2).max(1);
+        for _ in 0..elem.trailing_zeros() {
+            out.extend_from_slice(&[0xD1, 0xF8]); // sar ax,1
+        }
         return;
     }
     // `e & 0xFFFF` is the identity in this int (AX) context — AX already holds a
