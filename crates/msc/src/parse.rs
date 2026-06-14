@@ -5093,7 +5093,76 @@ pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr,
         }
         left = Expr::BinOp { op, left: Box::new(left), right: Box::new(right) };
     }
-    Ok(left)
+    Ok(reorder_ptr_array_deref_chain(p, left))
+}
+/// `DerefWord/Byte { Local(li) [+ IntLit(off)] }` → `Some((li, off))`.
+fn deref_local_offset(e: &Expr) -> Option<(usize, i32)> {
+    let ptr = match e {
+        Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => ptr.as_ref(),
+        _ => return None,
+    };
+    match ptr {
+        Expr::Local(i) => Some((*i, 0)),
+        Expr::BinOp { op: BinOp::Add, left, right }
+            if matches!(left.as_ref(), Expr::Local(_))
+                && let Expr::IntLit(k) = right.as_ref() =>
+        {
+            let Expr::Local(i) = left.as_ref() else { unreachable!() };
+            Some((*i, *k))
+        }
+        _ => None,
+    }
+}
+/// MSC evaluates the `(*(p+J))[K]` operands (pointer-arithmetic derefs) of an
+/// add-chain BEFORE the bare `(*p)[K]` operand, regardless of source order — the
+/// bare deref (offset within one row, `< stride`) is always emitted last. Both
+/// forms parse to `DerefWord{ Local(p) + off }`, distinguishable only here by the
+/// row stride. Reorder a pure add-chain of same-pointer-array-local derefs:
+/// arithmetic operands (off `< 0` or `>= stride`) keep source order first, bare
+/// operands (`0 <= off < stride`) move last. Fixture 2329.
+fn reorder_ptr_array_deref_chain(p: &Parser<'_>, e: Expr) -> Expr {
+    if !matches!(e, Expr::BinOp { op: BinOp::Add, .. }) { return e; }
+    fn flat(e: Expr, out: &mut Vec<Expr>) {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            flat(*left, out);
+            out.push(*right);
+        } else {
+            out.push(e);
+        }
+    }
+    let mut terms = Vec::new();
+    flat(e, &mut terms);
+    // Classify every term; bail (rebuild in source order) if any doesn't qualify
+    // as a deref of the SAME pointer-to-array local.
+    let mut base: Option<usize> = None;
+    let mut is_bare: Vec<bool> = Vec::with_capacity(terms.len());
+    for t in &terms {
+        let Some((li, off)) = deref_local_offset(t) else { return rebuild_add(terms); };
+        let Some(name) = p.local_names.get(li) else { return rebuild_add(terms); };
+        let Some(&stride) = p.ptr_array_stride.get(name) else { return rebuild_add(terms); };
+        match base {
+            None => base = Some(li),
+            Some(b) if b != li => return rebuild_add(terms),
+            _ => {}
+        }
+        is_bare.push(off >= 0 && off < stride as i32);
+    }
+    // Stable partition: arithmetic derefs first (source order), bare derefs last.
+    let mut arith = Vec::new();
+    let mut bare = Vec::new();
+    for (t, b) in terms.into_iter().zip(is_bare) {
+        if b { bare.push(t); } else { arith.push(t); }
+    }
+    arith.extend(bare);
+    rebuild_add(arith)
+}
+fn rebuild_add(terms: Vec<Expr>) -> Expr {
+    let mut it = terms.into_iter();
+    let mut acc = it.next().expect("non-empty add chain");
+    for t in it {
+        acc = Expr::BinOp { op: BinOp::Add, left: Box::new(acc), right: Box::new(t) };
+    }
+    acc
 }
 /// Best-effort pointee-size inference for `*<expr>` lowering.
 /// Returns the byte width of `*expr`. `char *` resolves to 1; `int *`
@@ -5523,6 +5592,47 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     Some(0) => Expr::Local(i),
                     Some(k) => Expr::BinOp { op: BinOp::Add, left: Box::new(Expr::Local(i)), right: Box::new(Expr::IntLit(k * elem)) },
                     None => Expr::BinOp { op: BinOp::Add, left: Box::new(Expr::Local(i)), right: Box::new(index) },
+                };
+                return Ok(if elem == 1 {
+                    Expr::DerefByte { ptr: Box::new(inner_addr) }
+                } else {
+                    Expr::DerefWord { ptr: Box::new(inner_addr) }
+                });
+            }
+            // `(*(p ± J))[K]` — index element K of the J-th array reached from a
+            // pointer-to-array local (`int (*p)[N]`). `p ± J` strides by the row
+            // (ptr_array_stride bytes); `[K]` strides by the element. The additive
+            // parser already scaled `p ± J` by the pointee element size (`elem`),
+            // so the raw addend is `J*elem` — recover J and re-scale by the row
+            // stride. Resolves to `*(p + (J*rowstride + K*elem))` so const-prop
+            // folds it through a known alias to a direct load. Fixture 2329.
+            if matches!(p.peek(), Some(Tok::LBrack))
+                && let Expr::DerefWord { ptr } | Expr::DerefByte { ptr } = &inner
+                && let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = ptr.as_ref()
+                && let Expr::Local(i) = left.as_ref()
+                && p.local_names.get(*i).is_some_and(|n| p.ptr_array_stride.contains_key(n))
+                && let Expr::IntLit(raw_j) = right.as_ref()
+            {
+                let i = *i;
+                let stride = p.ptr_array_stride[&p.local_names[i]] as i32;
+                let elem = p.local_specs[i].pointee_size.max(1) as i32;
+                let signed_raw = if matches!(op, BinOp::Sub) { -*raw_j } else { *raw_j };
+                let row_off = (signed_raw / elem) * stride;
+                p.bump(); // `[`
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let inner_addr = match index.fold(&init_view) {
+                    Some(k) => {
+                        let off = row_off + k * elem;
+                        if off == 0 { Expr::Local(i) }
+                        else { Expr::BinOp { op: BinOp::Add, left: Box::new(Expr::Local(i)), right: Box::new(Expr::IntLit(off)) } }
+                    }
+                    None => Expr::BinOp {
+                        op: BinOp::Add,
+                        left: Box::new(Expr::BinOp { op: BinOp::Add, left: Box::new(Expr::Local(i)), right: Box::new(Expr::IntLit(row_off)) }),
+                        right: Box::new(index),
+                    },
                 };
                 return Ok(if elem == 1 {
                     Expr::DerefByte { ptr: Box::new(inner_addr) }
