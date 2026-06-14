@@ -2709,6 +2709,47 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         }
         return;
     }
+    // Chain of 3-4 char-byte subscripts of the SAME char-pointer global
+    // (`s[0]+s[5]+s[6]`): load the pointer into BX ONCE, then park the first leaf
+    // in CX, evaluate the rest right-to-left (last → DX, next → BX-via reuse… here
+    // only DX is needed for 3 terms) with the SECOND leaf as the AX pivot, and add
+    // back in reverse parking order. BX holds the base, so tail parking uses DX
+    // then SI. Fixture 2237.
+    if matches!(op, BinOp::Add)
+        && let Some((g, offs)) = ptr_index_byte_chain(left, right, locals.inits)
+    {
+        let n = offs.len();
+        // Park registers (BX is taken by the base pointer): CX, DX, SI for the
+        // tail. With ≤4 leaves we need at most CX + 2 tail regs (DX, SI).
+        const MOV_FROM_AX: [u8; 3] = [0xC8, 0xD0, 0xF0]; // mov cx/dx/si, ax
+        const ADD_AX_REG: [u8; 3] = [0xC1, 0xC2, 0xC6];  // add ax, cx/dx/si
+        let body_offset = out.len();
+        out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]); // mov bx,[g]
+        fixups.push(Fixup { body_offset: body_offset + 1, kind: FixupKind::GlobalAddr { global_idx: g } });
+        let byte_read = |off: i32, out: &mut Vec<u8>| {
+            if off == 0 { out.extend_from_slice(&[0x8A, 0x07]); } // mov al,[bx]
+            else { out.push(0x8A); out.push(0x47); out.push(off as u8); } // mov al,[bx+off]
+            out.push(0x98); // cbw
+        };
+        // leaf 0 → CX.
+        byte_read(offs[0], out);
+        out.push(0x8B); out.push(MOV_FROM_AX[0]); // mov cx, ax
+        let mut park_adds = vec![ADD_AX_REG[0]];
+        // tail leaves n-1 .. 2 → DX, SI (right-to-left).
+        let mut ri = 1;
+        for j in (2..n).rev() {
+            byte_read(offs[j], out);
+            out.push(0x8B); out.push(MOV_FROM_AX[ri]);
+            park_adds.push(ADD_AX_REG[ri]);
+            ri += 1;
+        }
+        // pivot leaf 1 → AX.
+        byte_read(offs[1], out);
+        for &code in park_adds.iter().rev() {
+            out.push(0x03); out.push(code);
+        }
+        return;
+    }
     // `s[i] + s[j]` — two char-byte subscripts of the SAME char-pointer global:
     // load the pointer into BX once, read `[bx+i]` (LHS) into AX and park in CX,
     // read `[bx+j]` (RHS), then `add ax,cx`. Fixture 2291 (`s[0]+s[1]`).
@@ -2753,6 +2794,37 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         out.extend_from_slice(&[0x8B, 0xC8]); // mov cx, ax
         byte_read(rk, out);                  // a[rk] → AX (RHS)
         out.extend_from_slice(&[0x03, 0xC1]); // add ax, cx
+        return;
+    }
+    // Chain of 3-4 CONST string-literal byte reads (`s[0]+s[1]+s[2]+s[3]` of a
+    // string-aliased char pointer): MSC parks the FIRST leaf in CX, then
+    // evaluates the rest RIGHT-TO-LEFT — the last leaf into DX, the next into BX,
+    // and the SECOND leaf as the AX pivot — then adds them back in reverse parking
+    // order (`add ax,bx; add ax,dx; add ax,cx`). Fixtures 1823, 2237.
+    if matches!(op, BinOp::Add)
+        && let Some(leaves) = str_lit_byte_chain(left, right)
+    {
+        let n = leaves.len();
+        const MOV_FROM_AX: [u8; 3] = [0xC8, 0xD0, 0xD8]; // mov cx/dx/bx, ax
+        const ADD_AX_REG: [u8; 3] = [0xC1, 0xC2, 0xC3];  // add ax, cx/dx/bx
+        // leaf 0 → CX.
+        emit_expr_to_ax(leaves[0], locals, out, fixups);
+        out.push(0x8B); out.push(MOV_FROM_AX[0]); // mov cx, ax
+        let mut park_adds = vec![ADD_AX_REG[0]]; // cx holds leaf 0
+        // tail leaves n-1 .. 2 → DX, BX … (right-to-left).
+        let mut ri = 1;
+        for j in (2..n).rev() {
+            emit_expr_to_ax(leaves[j], locals, out, fixups);
+            out.push(0x8B); out.push(MOV_FROM_AX[ri]); // mov dx/bx, ax
+            park_adds.push(ADD_AX_REG[ri]);
+            ri += 1;
+        }
+        // pivot leaf 1 → AX.
+        emit_expr_to_ax(leaves[1], locals, out, fixups);
+        // add back in reverse parking order.
+        for &code in park_adds.iter().rev() {
+            out.push(0x03); out.push(code);
+        }
         return;
     }
     // `str_a[i] + str_b[j]` — two CONST string-literal byte reads (folded from
@@ -3378,6 +3450,67 @@ fn ptr_deref_add_chain<'a>(left: &'a Expr, right: &'a Expr, _locals: &Locals<'_>
     if (3..=4).contains(&leaves.len()) { Some(leaves) } else { None }
 }
 
+/// Flatten a left-associative `a + b + c [+ d]` chain where every leaf is a
+/// CONST string-literal byte read (`StrLitByte`, folded from `s[K]` of a
+/// string-aliased char pointer), returning the leaves in source order. `None`
+/// unless the chain has 3 or 4 such leaves. Fixtures 1823, 2237.
+fn str_lit_byte_chain<'a>(left: &'a Expr, right: &'a Expr) -> Option<Vec<&'a Expr>> {
+    fn is_leaf(e: &Expr) -> bool { matches!(e, Expr::StrLitByte { .. }) }
+    fn walk<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) -> bool {
+        match e {
+            Expr::BinOp { op: BinOp::Add, left, right } => {
+                if !is_leaf(right) { return false; }
+                if !walk(left, out) { return false; }
+                out.push(right);
+                true
+            }
+            _ => {
+                if is_leaf(e) { out.push(e); true } else { false }
+            }
+        }
+    }
+    if !is_leaf(right) { return None; }
+    let mut leaves = Vec::new();
+    if !walk(left, &mut leaves) { return None; }
+    leaves.push(right);
+    if (3..=4).contains(&leaves.len()) { Some(leaves) } else { None }
+}
+/// Flatten a left-associative `s[a] + s[b] + s[c] [+ s[d]]` chain where every
+/// leaf is a `PtrIndexByte` of the SAME char-pointer global with a foldable
+/// index, returning `(global ptr, byte offsets in source order)`. `None` unless
+/// the chain has 3 or 4 such leaves. Fixture 2237.
+fn ptr_index_byte_chain(left: &Expr, right: &Expr, inits: &[Option<i32>]) -> Option<(usize, Vec<i32>)> {
+    fn walk(e: &Expr, g: &mut Option<usize>, offs: &mut Vec<i32>, inits: &[Option<i32>]) -> bool {
+        match e {
+            Expr::BinOp { op: BinOp::Add, left, right } =>
+                walk(left, g, offs, inits) && walk(right, g, offs, inits),
+            Expr::PtrIndexByte { ptr, index } => {
+                let Some(k) = index.fold(inits) else { return false };
+                match g {
+                    None => *g = Some(*ptr),
+                    Some(gg) if *gg == *ptr => {}
+                    _ => return false,
+                }
+                offs.push(k);
+                true
+            }
+            _ => false,
+        }
+    }
+    let mut g = None;
+    let mut offs = Vec::new();
+    // Only the 3-leaf schedule is verified by a fixture (2237). A 4-leaf same-base
+    // chain's tail-parking register (BX is the base, so SI would be next) is
+    // unverified, so leave those on the generic path.
+    if walk(&Expr::BinOp { op: BinOp::Add, left: Box::new(left.clone()), right: Box::new(right.clone()) },
+            &mut g, &mut offs, inits)
+        && offs.len() == 3
+    {
+        Some((g.unwrap(), offs))
+    } else {
+        None
+    }
+}
 /// A call expression (direct or indirect).
 fn is_any_call(e: &Expr) -> bool { matches!(e, Expr::Call { .. } | Expr::CallPtr { .. }) }
 /// A call eligible as a NON-rightmost operand of the call-chain scheduler: its
