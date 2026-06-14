@@ -2224,6 +2224,16 @@ fn emit_unsigned_byte_to_cx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fi
     }
     out.extend_from_slice(&[0x2A, 0xED]); // sub ch,ch
 }
+/// `*p` where `p` is a near char-pointer PARAM or LOCAL → the pointer's bp-disp
+/// (so the `mov bx,[p]` load can be scheduled separately from the deref).
+fn char_deref_ptr_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
+    let Expr::DerefByte { ptr } = e else { return None };
+    match ptr.as_ref() {
+        Expr::Param(p) => Some(param_disp(*p)),
+        Expr::Local(l) => Some(locals.disp(*l)),
+        _ => None,
+    }
+}
 fn signed_byte_load(e: &Expr, locals: &Locals<'_>) -> bool {
     match e {
         Expr::IndexByte { .. } | Expr::LocalIndexByte { .. } | Expr::DerefByte { .. } => true,
@@ -4256,6 +4266,27 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     {
         emit_expr_to_ax(left, locals, out, fixups);            // mov al,..; sub ah,ah
         emit_unsigned_byte_to_cx(right, locals, out, fixups);  // mov cl,..; sub ch,ch
+        let opc = match op {
+            BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
+            BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
+        };
+        out.push(opc); out.push(0xC1); // op ax, cx
+        return;
+    }
+    // `*a OP *b` — both operands are char-pointer DEREFS. Same RHS-park-LHS shape
+    // as below, but MSC hoists the LHS pointer load (`mov bx,[a]`) ABOVE the
+    // `mov cx,ax` that parks the RHS, then finishes the deref (`mov al,[bx]; cbw`).
+    // The `string-compare` epilogue `return *a - *b`. Fixtures 1352/3418/2362.
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && signed_byte_load(left, locals)
+        && signed_byte_load(right, locals)
+        && let Some(lptr) = char_deref_ptr_disp(left, locals)
+        && char_deref_ptr_disp(right, locals).is_some()
+    {
+        emit_expr_to_ax(right, locals, out, fixups);                    // *b → AX
+        out.push(0x8B); out.push(bp_modrm(0x5E, lptr)); push_bp_disp(out, lptr); // mov bx,[a]
+        out.extend_from_slice(&[0x8B, 0xC8]);                           // mov cx, ax
+        out.extend_from_slice(&[0x8A, 0x07, 0x98]);                     // mov al,[bx]; cbw
         let opc = match op {
             BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
             BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),

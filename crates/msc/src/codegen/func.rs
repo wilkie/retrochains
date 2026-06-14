@@ -522,9 +522,14 @@ pub(crate) fn emit_function(
     let has_float_arg_call = func_has_float_arg_call(func);
     // A `make().field` call spills its result to a frame temp sized by chkstk, so
     // the function needs a WithSlide frame even with no declared locals (2629).
+    // A string-compare `while(*p && *p==*q)` loop caches `*p` in a stack temp, so
+    // even a frameless (no-locals) function needs a slide frame to size for it.
+    // Fixtures 1352/3418 (params only). Fixture 2362 already has locals.
+    let has_strcmp_while = crate::codegen::statements::body_has_strcmp_while(&body);
     let base_frame = if (has_float_arg_call
             && (!func.locals.is_empty() || func_float_arg_call_result_used(func)))
         || func.struct_field_temp_count > 0
+        || has_strcmp_while
     {
         Frame::WithSlide
     } else {
@@ -668,7 +673,15 @@ pub(crate) fn emit_function(
         && !has_float_arg_call
         && !returns_float_call
         && crate::codegen::statements::body_has_char_accum(&body);
+    // The strcmp-loop cache temp occupies the same shallowest extra slot
+    // (`deepest_local_disp() - 2`), so it is mutually exclusive with the others.
+    let has_strcmp_temp = func.struct_field_temp_count == 0
+        && !has_float_arg_call
+        && !returns_float_call
+        && !has_char_accum_temp
+        && has_strcmp_while;
     let frame_bytes: usize = cumulative as usize
+        + if has_strcmp_temp { 2 } else { 0 }
         + 4 * func.struct_field_temp_count as usize
         // The float-arg-call result spill (`mov [bp-2],ax`) is only needed when
         // the result is NOT consumed by a float-return receive — that path copies
