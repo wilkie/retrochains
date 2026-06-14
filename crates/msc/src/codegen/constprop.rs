@@ -229,6 +229,106 @@ mod runonce {
         }
     }
 }
+/// Pre-pass: store-to-load forward a just-written variable-indexed array
+/// element to the read immediately following it. MSC recomputes the stored
+/// EXPRESSION rather than reloading the slot: `arr[i] = i+1; sum += arr[i]` →
+/// `sum += (i+1)` (`mov ax,[i]; inc ax`); `arr[i] = i*2` forwards `i*2`
+/// (oracle-confirmed, in and out of loops). Sound because the rewrite only fires
+/// when the forwarded value depends solely on the index variable and neither the
+/// index nor the array is written (nor a call made) between the store and the
+/// read — so re-evaluating it yields the just-stored element.
+mod store_fwd {
+    use crate::{AssignTarget, Expr, Stmt, SwitchArm};
+
+    /// `e` references only the index local `idx` (plus integer constants) and has
+    /// no call/assignment side effect — safe to re-evaluate at the read site.
+    fn depends_only_on(e: &Expr, idx: usize) -> bool {
+        match e {
+            Expr::IntLit(_) => true,
+            Expr::Local(i) => *i == idx,
+            Expr::BinOp { left, right, .. } => depends_only_on(left, idx) && depends_only_on(right, idx),
+            _ => false,
+        }
+    }
+    /// Whether statement `s` writes local `idx`, writes any element of local
+    /// array `arr`, or makes a call — any of which invalidates the forward.
+    fn invalidates(s: &Stmt, arr: usize, idx: usize) -> bool {
+        // A call anywhere clobbers memory; reuse the existing detector.
+        if crate::codegen::statements::stmt_call_count(s) > 0 {
+            return true;
+        }
+        match s {
+            Stmt::Assign { target, value: _ } => match target {
+                AssignTarget::Local(i) => *i == idx || *i == arr,
+                AssignTarget::IndexedLocal { local, .. }
+                | AssignTarget::IndexedLocalByte { local, .. }
+                | AssignTarget::IndexedLocalVar { local, .. }
+                | AssignTarget::IndexedLocalByteVar { local, .. }
+                | AssignTarget::LocalField { local, .. } => *local == arr || *local == idx,
+                _ => true, // deref / unknown target — be conservative
+            },
+            _ => false,
+        }
+    }
+    /// Replace every `arr[idx]` word read in `e` with `repl`.
+    fn replace(e: &mut Expr, arr: usize, idx: usize, repl: &Expr) {
+        if let Expr::LocalIndex { local, index } = e
+            && *local == arr
+            && matches!(index.as_ref(), Expr::Local(i) if *i == idx)
+        {
+            *e = repl.clone();
+            return;
+        }
+        match e {
+            Expr::BinOp { left, right, .. } => { replace(left, arr, idx, repl); replace(right, arr, idx, repl); }
+            Expr::AssignExpr { value, .. } => replace(value, arr, idx, repl),
+            Expr::Ternary { cond, then_arm, else_arm } => {
+                replace(cond, arr, idx, repl); replace(then_arm, arr, idx, repl); replace(else_arm, arr, idx, repl);
+            }
+            _ => {}
+        }
+    }
+    fn replace_in_stmt(s: &mut Stmt, arr: usize, idx: usize, repl: &Expr) {
+        match s {
+            Stmt::Assign { value, .. } => replace(value, arr, idx, repl),
+            Stmt::Return(e) | Stmt::ExprStmt(e) => replace(e, arr, idx, repl),
+            _ => {}
+        }
+    }
+    fn descend(s: &mut Stmt) {
+        match s {
+            Stmt::Block(v) => run(v),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => descend(body),
+            Stmt::If { then_branch, else_branch, .. } => {
+                descend(then_branch);
+                if let Some(e) = else_branch { descend(e); }
+            }
+            Stmt::Switch { cases, .. } => for SwitchArm { body, .. } in cases { run(body); },
+            _ => {}
+        }
+    }
+    pub(super) fn run(stmts: &mut [Stmt]) {
+        for s in stmts.iter_mut() {
+            descend(s);
+        }
+        for k in 0..stmts.len().saturating_sub(1) {
+            // Extract the store's (arr, idx, value) from statement k.
+            let info = if let Stmt::Assign { target: AssignTarget::IndexedLocalVar { local, index }, value } = &stmts[k]
+                && let Expr::Local(idx) = index.as_ref()
+                && depends_only_on(value, *idx)
+            {
+                Some((*local, *idx, value.clone()))
+            } else {
+                None
+            };
+            if let Some((arr, idx, e)) = info
+                && !invalidates(&stmts[k + 1], arr, idx)
+            {
+                replace_in_stmt(&mut stmts[k + 1], arr, idx, &e);
+            }
+        }
+    }
+}
 pub(crate) fn const_prop_globals(
     stmts: &[Stmt],
     local_specs: &[LocalSpec],
@@ -309,6 +409,8 @@ pub(crate) fn const_prop_globals(
     let mut stmts = drop_dead_after_goto(stmts.to_vec());
     // Rewrite provably-run-once `while`s to do-while form before const-prop.
     runonce::run(&mut stmts);
+    // Store-to-load forward a just-written variable-indexed array element.
+    store_fwd::run(&mut stmts);
     let new_stmts: Vec<Stmt> = stmts.iter().map(|s| {
         let mut new_stmt = s.clone();
         prop_stmt(&mut new_stmt, &mut cp);
