@@ -472,6 +472,23 @@ pub(crate) fn emit_stmt(
                 locals.label_fixups.borrow_mut().push((label.clone(), pos));
                 return;
             }
+            // A SECOND (or later) `if (cond) return K;` with the same constant K
+            // as an earlier one: MSC emits the `mov ax,K; <epilogue>` block ONCE
+            // and routes later occurrences to it via a jump-on-TRUE (the earlier
+            // occurrence recorded the `@retK` label at its block). Fixtures 4036
+            // (`if(c>='a'&&c<='z') return 1; if(c>='A'&&c<='Z') return 1;`).
+            if else_branch.is_none()
+                && return_int && !return_long
+                && let Stmt::Return(Expr::IntLit(k)) = unwrap_single_stmt(then_branch)
+                && fold_cond(cond, locals).is_none()
+            {
+                let lbl = format!("@ret{k}");
+                if locals.labels.borrow().contains_key(&lbl)
+                    && emit_if_and_goto_true(cond, &lbl, locals, out, fixups)
+                {
+                    return;
+                }
+            }
             // `if (c) return <expr>;` as the function's FINAL statement in an
             // int-returning fall-off function: MSC inverts the cond and jccs to
             // the SHARED tail epilogue, then lets the return-value computation
@@ -687,6 +704,16 @@ pub(crate) fn emit_stmt(
                 for (name, pos) in locals.labels.borrow_mut().iter_mut() {
                     if !labels_before.contains(name) { *pos += then_base; }
                 }
+            }
+            // Record a `@retK` label at this `if (cond) return K;` then-block
+            // (the `mov ax,K; <epilogue>` just appended) so a later identical
+            // `if (...) return K;` can route to it via a jump (the shared-block
+            // path above). Absolute offset, inserted after the rebase so it is
+            // not shifted again. First occurrence wins. Fixture 4036.
+            if return_int && !return_long
+                && let Stmt::Return(Expr::IntLit(k)) = unwrap_single_stmt(then_branch)
+            {
+                locals.labels.borrow_mut().entry(format!("@ret{k}")).or_insert(then_base);
             }
             // Shift break/continue offsets recorded during the then
             // emit by `then_base` so they point at the correct bytes.
@@ -2186,6 +2213,72 @@ fn flatten_and<'a>(c: &'a Cond, out: &mut Vec<&'a Cond>) {
     } else {
         out.push(c);
     }
+}
+/// Unwrap a single-statement block to its inner statement.
+fn unwrap_single_stmt(s: &Stmt) -> &Stmt {
+    match s {
+        Stmt::Block(v) if v.len() == 1 => &v[0],
+        other => other,
+    }
+}
+/// Emit `if (cond) goto label` taken when `cond` is TRUE, for a (possibly
+/// `&&`-chained) comparison/truthy test. All but the last conjunct jcc-on-FALSE
+/// to the fall-through (after this `if`); the last conjunct jcc-on-TRUE to
+/// `label`. Returns false (emitting NOTHING) when any conjunct isn't a plain
+/// int Cmp/Truthy (nested `||`, long operands → caller falls back). Used to
+/// route a SECOND identical `if (cond) return K;` to a shared return-K block.
+/// Fixtures 4036 (`&&`), and the single-Cmp case.
+fn emit_if_and_goto_true(
+    cond: &Cond, label: &str, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>,
+) -> bool {
+    let mut conjs: Vec<&Cond> = Vec::new();
+    flatten_and(cond, &mut conjs);
+    for c in &conjs {
+        match c {
+            Cond::Cmp { left, .. } if !crate::codegen::calls::long_operand(left, locals) => {}
+            Cond::Truthy(e) if !crate::codegen::calls::long_operand(e, locals) => {}
+            _ => return false,
+        }
+    }
+    let n = conjs.len();
+    let mut skip_pos: Vec<usize> = Vec::new();
+    for (i, c) in conjs.iter().enumerate() {
+        emit_cond_cmp_inner(c, locals, out, fixups);
+        let unsigned = cmp_is_unsigned(c, locals);
+        if i + 1 < n {
+            // not last: jcc-on-FALSE → after this `if` (skip the jump)
+            let jcc = match c {
+                Cond::Truthy(_) => 0x74, // je on zero
+                Cond::Cmp { op, .. } => {
+                    let j = inverted_jcc(*op);
+                    if unsigned { to_unsigned_jcc(j) } else { j }
+                }
+                _ => unreachable!(),
+            };
+            out.push(jcc);
+            skip_pos.push(out.len());
+            out.push(0x00);
+        } else {
+            // last: jcc-on-TRUE → the shared block label
+            let jcc = match c {
+                Cond::Truthy(_) => 0x75, // jne (nonzero)
+                Cond::Cmp { op, .. } => {
+                    let j = loop_back_jcc(*op);
+                    if unsigned { to_unsigned_jcc(j) } else { j }
+                }
+                _ => unreachable!(),
+            };
+            out.push(jcc);
+            let pos = out.len();
+            out.push(0x00);
+            locals.label_fixups.borrow_mut().push((label.to_owned(), pos));
+        }
+    }
+    let after = out.len();
+    for p in skip_pos {
+        out[p] = i8::try_from(after as i64 - (p as i64 + 1)).expect("&& skip rel8 fits") as u8;
+    }
+    true
 }
 pub(crate) fn cse_deref_while(cond: &Cond) -> Option<CseDerefWhile> {
     if !matches!(cond, Cond::And(..)) { return None; }
