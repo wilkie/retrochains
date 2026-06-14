@@ -3919,6 +3919,23 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
         return;
     }
+    // `<expr> + *ptr` where the RHS is a WORD deref of a simple pointer
+    // local/param: emit the LHS into AX, load the pointer into BX, then
+    // `add ax,[bx]` — no push/pop. Fixture 1983 (`cp[0] + *ip`).
+    if matches!(op, BinOp::Add)
+        && let Expr::DerefWord { ptr } = right
+        && matches!(ptr.as_ref(), Expr::Local(_) | Expr::Param(_))
+        && !matches!(left, Expr::DerefWord { .. })
+    {
+        emit_expr_to_ax(left, locals, out, fixups);
+        match ptr.as_ref() {
+            Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
+            Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
+            _ => unreachable!(),
+        }
+        out.extend_from_slice(&[0x03, 0x07]); // add ax,[bx]
+        return;
+    }
     // `<bit-field> * K`: load K into CX, read the bit-field into AX (reusing the
     // unit left live in AX by a preceding store to the same unit), then `imul cx`.
     // Fixture 2105 (`(int)fl.f1 * 100`).
