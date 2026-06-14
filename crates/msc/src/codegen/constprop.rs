@@ -1256,6 +1256,19 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
             prop_expr(e, cp)
         }
         Cond::Cmp { op, left, right } => {
+            // `p == q` / `p != q` over two pointer locals each aliasing a string
+            // literal: materialize each string's address and compare. Distinct
+            // literals get distinct CONST offsets, so the compare stays runtime
+            // (`mov ax,OFFSET sp; cmp ax,OFFSET sq`). Fixture 1431.
+            if matches!(op, RelOp::Eq | RelOp::Ne)
+                && let (Expr::Local(lp), Expr::Local(rp)) = (&*left, &*right)
+                && let (Some(AliasTarget::String(li)), Some(AliasTarget::String(ri)))
+                    = (cp.ptr_alias.get(lp).copied(), cp.ptr_alias.get(rp).copied())
+            {
+                *left = Expr::StrLit(li);
+                *right = Expr::StrLit(ri);
+                return;
+            }
             // `p == q` / `p != q` over two same-GLOBAL-base address values folds
             // to a constant condition (fixture 601). Local-base stays runtime.
             if matches!(op, RelOp::Eq | RelOp::Ne)

@@ -849,6 +849,17 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         emit_cmp_global_off_imm(array, byte_off, cmp_to, is_byte, out, fixups);
         return;
     }
+    // `p == q` / `p != q` over two string-literal addresses (from string-aliased
+    // pointer locals): materialize the left string's address into AX, then
+    // `cmp ax, OFFSET <right string>` (an imm16 carrying a StrLoad fixup). The
+    // caller's jcc reads ZF as usual. Fixture 1431.
+    if let Cond::Cmp { left: Expr::StrLit(la), right: Expr::StrLit(ra), .. } = cond {
+        crate::codegen::expr::emit_expr_to_ax(&Expr::StrLit(*la), locals, out, fixups);
+        let bo = out.len();
+        out.extend_from_slice(&[0x3D, 0x00, 0x00]); // cmp ax, imm16
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::StrLoad { string_idx: *ra } });
+        return;
+    }
     // `if (a.f0 & a.f1)` — AND of two equal-width bit-fields of the SAME unit,
     // one at bit-offset 0: read the HIGHER field shifted down (no mask), then
     // `and al,[unit]` — the unit's low byte holds the bit-0 field, so the AND
