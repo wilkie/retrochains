@@ -3930,6 +3930,11 @@ struct ConstProp {
     /// first-eval suppression — only the OUTERMOST chain's rightmost call
     /// loads from memory; the parked calls keep const-propagated args.
     in_parked_call: bool,
+    /// True while propagating the operands of an arithmetic BinOp. A register
+    /// local substitutes its known constant only here — a bare top-level read
+    /// (a `return n` or copy `a = n` RHS) keeps the register so codegen emits
+    /// `mov ax,si` / `mov [a],si`. Fixture 1763.
+    in_arith: bool,
 }
 
 /// The lvalue a pointer local currently aliases (`&x`).

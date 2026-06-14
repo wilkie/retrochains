@@ -1285,6 +1285,17 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         let hi = disp + 2;
         out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi);       // mov [hi],dx
     } else {
+        // `mem_local = register_local` → store the register directly
+        // (`mov [bp+disp], si`), not a round-trip through AX. Fixture 1763.
+        if !is_byte && !locals.is_long_local(local_idx)
+            && let Expr::Local(n) = value
+            && let Some(reg) = locals.reg_for_local(*n)
+        {
+            out.push(0x89);
+            out.push(bp_modrm(0x40 | (reg << 3) | 0x06, disp));
+            push_bp_disp(out, disp);
+            return;
+        }
         emit_expr_to_ax(value, locals, out, fixups);
         if is_byte {
             // Strip trailing CBW emitted for char globals/fields — AL still

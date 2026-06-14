@@ -1329,9 +1329,21 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     if let Expr::IntLit(k) = value
                         && !value_was_ternary
                         && !converting
-                        && !cp.local_specs.get(*l).is_some_and(|s| s.is_register)
                     {
+                        // Register targets ARE tracked (for arithmetic folding);
+                        // the bare-read protection (`in_arith`) keeps `mov ax,si`.
                         cp.l_known.insert(*l, *k);
+                    } else if let Some(src) = rhs_src_local
+                        && !converting
+                        && cp.local_specs.get(src).is_some_and(|s| s.is_register)
+                        && !cp.local_specs.get(*l).is_some_and(|s| s.is_register)
+                        && let Some(&k) = cp.l_known.get(&src)
+                    {
+                        // `a = <register local n>` keeps the register store (the
+                        // RHS stays `Local(n)`, not substituted), but the target
+                        // inherits n's known constant so later arithmetic folds.
+                        // Fixture 1763.
+                        cp.l_known.insert(*l, k);
                     } else {
                         cp.l_known.remove(l);
                     }
@@ -1738,6 +1750,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         // the branch snapshots cp_clone serves.
         suppress_subst: false,
         in_parked_call: false,
+        in_arith: false,
     }
 }
 /// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
@@ -2204,9 +2217,14 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
         }
         Expr::Local(idx) => {
+            // A register local substitutes its known constant only inside an
+            // arithmetic expression (`cp.in_arith`); a bare top-level read keeps
+            // the register (MSC emits `mov ax,si`). Non-register locals always
+            // substitute. Fixture 1763.
+            let reg = cp.local_specs.get(*idx).is_some_and(|s| s.is_register);
             if !cp.suppress_subst
+                && (!reg || cp.in_arith)
                 && let Some(&k) = cp.l_known.get(idx)
-                && !cp.local_specs.get(*idx).is_some_and(|s| s.is_register)
             {
                 *e = Expr::IntLit(k);
                 cp.substituted = true;
@@ -2280,12 +2298,19 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 && cp_left_call_chain(left);
             let saved_parked = cp.in_parked_call;
             if chain_top { cp.in_parked_call = true; }
+            // A register local read is substituted with its constant only when
+            // nested inside an arithmetic expression (`a + n`, `n + 1`). A bare
+            // top-level read (a `return n` or a copy `a = n` RHS) keeps the
+            // register so codegen emits `mov ax,si` / `mov [a],si`. Fixture 1763.
+            let saved_arith = cp.in_arith;
+            cp.in_arith = true;
             prop_expr(left, cp);
             cp.in_parked_call = saved_parked;
             let saved_suppress = cp.suppress_subst;
             if chain_top { cp.suppress_subst = true; }
             prop_expr(right, cp);
             cp.suppress_subst = saved_suppress;
+            cp.in_arith = saved_arith;
             // Algebraic identities on bit ops with a literal 0 operand:
             // `x & 0 → 0` (x dropped, so it must be side-effect-free) and
             // `x | 0 → x` / `0 | x → x`. MSC folds these away — e.g. a
