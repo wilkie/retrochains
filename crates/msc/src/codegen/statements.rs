@@ -938,6 +938,101 @@ pub(crate) fn stmt_has_imul(s: &Stmt) -> bool {
         _ => false,
     }
 }
+/// The in-place modification a word global-array element undergoes in the
+/// SI-address-CSE pattern (`arr[i] <rmw>; return arr[i]`). Only compound
+/// arithmetic (`++`/`--`/`+= K`/`-= K`) qualifies — a const store `arr[i] = K`
+/// does NOT CSE the address (MSC stores via BX and folds the read to `mov ax,K`).
+/// Fixture 1963.
+#[derive(Clone, Copy)]
+pub(crate) enum ElemRmw { Add(i32), Sub(i32) }
+
+/// Detect `arr[i] <modify>; return arr[i];` — a write then an immediate read of
+/// the SAME word global-array element at a runtime index. MSC computes the
+/// element ADDRESS once into SI and reuses it for the write and the read
+/// (`mov si,[i]; shl si,1; add si,OFFSET arr; <op> word [si]; mov ax,[si]`),
+/// saving SI in the frame. Fixture 1963. Returns (array, index, modify).
+pub(crate) fn global_index_cse_pair<'a>(
+    write: &'a Stmt,
+    read: &Stmt,
+    long_globals: &[bool],
+    global_elem_sizes: &[usize],
+    inits: &[Option<i32>],
+) -> Option<(usize, &'a Expr, ElemRmw)> {
+    let Stmt::Assign { target: AssignTarget::IndexedGlobalVar { array, index }, value } = write
+    else { return None };
+    // Word (int) array only: exclude long; char arrays use IndexedGlobalByteVar.
+    if long_globals.get(*array).copied().unwrap_or(false) { return None; }
+    if global_elem_sizes.get(*array).copied().unwrap_or(2) != 2 { return None; }
+    // The index must be a single runtime variable (so the SAME address serves
+    // both accesses without recomputation/side effects).
+    if index.fold(inits).is_some()
+        || !matches!(index.as_ref(), Expr::Param(_) | Expr::Local(_) | Expr::Global(_))
+    {
+        return None;
+    }
+    let Stmt::Return(Expr::Index { array: a2, index: i2 }) = read else { return None };
+    if a2 != array || !crate::codegen::assign::simple_index_eq(index, i2) { return None; }
+    let same_elem = |l: &Expr| matches!(l, Expr::Index { array: la, index: li }
+        if la == array && crate::codegen::assign::simple_index_eq(index, li));
+    let rmw = match value {
+        Expr::BinOp { op, left, right } if same_elem(left.as_ref()) => {
+            let Expr::IntLit(k) = right.as_ref() else { return None };
+            match op {
+                BinOp::Add => ElemRmw::Add(*k),
+                BinOp::Sub => ElemRmw::Sub(*k),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some((*array, index.as_ref(), rmw))
+}
+/// Emit the SI-address-CSE sequence for [`global_index_cse_pair`], ending with
+/// the function epilogue (it consumes both the write and the `return` read).
+pub(crate) fn emit_global_index_cse(
+    array: usize,
+    index: &Expr,
+    rmw: ElemRmw,
+    locals: &Locals<'_>,
+    frame: Frame,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    // mov si, <index>
+    match index {
+        Expr::Param(p) => { let d = param_disp(*p); out.push(0x8B); out.push(bp_modrm(0x76, d)); push_bp_disp(out, d); }
+        Expr::Local(l) => { let d = locals.disp(*l); out.push(0x8B); out.push(bp_modrm(0x76, d)); push_bp_disp(out, d); }
+        Expr::Global(g) => {
+            out.push(0x8B);
+            let bo = out.len();
+            out.extend_from_slice(&[0x36, 0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+        }
+        _ => unreachable!("validated by global_index_cse_pair"),
+    }
+    out.extend_from_slice(&[0xD1, 0xE6]); // shl si,1  (word element ×2)
+    // add si, OFFSET arr  (81 /0; imm16 carries the array's data offset via fixup)
+    out.push(0x81);
+    let bo = out.len();
+    out.extend_from_slice(&[0xC6, 0x00, 0x00]);
+    fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: array } });
+    // <op> word [si]
+    match rmw {
+        ElemRmw::Add(1) => out.extend_from_slice(&[0xFF, 0x04]),  // inc word [si]
+        ElemRmw::Sub(1) => out.extend_from_slice(&[0xFF, 0x0C]),  // dec word [si]
+        ElemRmw::Add(k) | ElemRmw::Sub(k) => {
+            let modrm = if matches!(rmw, ElemRmw::Sub(_)) { 0x2C } else { 0x04 };
+            if let Ok(k8) = i8::try_from(k) {
+                out.extend_from_slice(&[0x83, modrm, k8 as u8]);
+            } else {
+                out.extend_from_slice(&[0x81, modrm]);
+                out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+            }
+        }
+    }
+    out.extend_from_slice(&[0x8B, 0x04]); // mov ax,[si]
+    crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
+}
 /// True when a condition evaluates with no side effects (so an `if` with an
 /// empty body can be dropped). Mirrors [`expr_is_pure`] across the Cond tree.
 pub(crate) fn cond_is_pure(cond: &Cond) -> bool {

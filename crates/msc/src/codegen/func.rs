@@ -602,6 +602,12 @@ pub(crate) fn emit_function(
     // A call chain of ≥4 calls spills results to frame temps (below the locals),
     // so it needs a real BP frame with DI+SI saved. Fixture 1954.
     let call_chain_temps = max_call_chain_temps(&body, &local_inits);
+    // `arr[i]++; return arr[i]` (word global array, same runtime index) computes
+    // the element address once in SI — needs SI saved. Fixture 1963.
+    let has_gidx_cse = body.windows(2).any(|w| {
+        crate::codegen::statements::global_index_cse_pair(
+            &w[0], &w[1], long_globals, global_elem_sizes, &local_inits).is_some()
+    });
     let frame = if call_chain_temps > 0 {
         Frame::WithSlideDiSi
     } else if reg_locals.len() >= 2 {
@@ -623,15 +629,15 @@ pub(crate) fn emit_function(
     {
         Frame::NoneDiSi
     } else if matches!(base_frame, Frame::WithSlide)
-        && body_needs_si(&body, &local_inits)
+        && (body_needs_si(&body, &local_inits) || has_gidx_cse)
     {
         Frame::WithSlideSi
     } else if matches!(base_frame, Frame::BpOnly)
-        && body_needs_si(&body, &local_inits)
+        && (body_needs_si(&body, &local_inits) || has_gidx_cse)
     {
         Frame::BpOnlySi
     } else if matches!(base_frame, Frame::None)
-        && body_needs_si(&body, &local_inits)
+        && (body_needs_si(&body, &local_inits) || has_gidx_cse)
     {
         Frame::NoneSi
     } else {
@@ -1173,6 +1179,18 @@ pub(crate) fn emit_function(
             let base = bytes.len();
             for mut f in fxs { f.body_offset += base; fixups.push(f); }
             bytes.extend_from_slice(&buf);
+            reachable = false;
+            break;
+        }
+
+        // Global-array element write-then-read CSE: `arr[i]++; return arr[i]`
+        // reuses the element address in SI across both. Fixture 1963.
+        if i + 1 < body.len()
+            && let Some((array, index, rmw)) = crate::codegen::statements::global_index_cse_pair(
+                stmt, &body[i + 1], long_globals, global_elem_sizes, &local_inits)
+        {
+            crate::codegen::statements::emit_global_index_cse(
+                array, index, rmw, &locals_view, frame, &mut bytes, &mut fixups);
             reachable = false;
             break;
         }
