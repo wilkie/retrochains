@@ -2548,6 +2548,12 @@ pub(crate) fn emit_while(
         emit_infinite_loop(body_stmt, locals, frame, return_int, return_long, out, fixups);
         return;
     }
+    // `while (C) { switch(...){…}; TAIL }` with a ≥2-case switch: MSC keeps the
+    // test at the top (no rotation) and weaves the loop tail into the switch's
+    // partial-continuation layout. Fixture 3234.
+    if try_emit_while_switch(cond, body_stmt, locals, frame, return_int, return_long, out, fixups) {
+        return;
+    }
     emit_loop(cond, &[body_stmt], None, None, None, false, locals, frame, return_int, return_long, out, fixups);
 }
 /// The RelOp for the same comparison with operands swapped (`a OP b` ⟺
@@ -4047,6 +4053,167 @@ pub(crate) fn collect_loop_body_mutations(stmts: &[&Stmt]) -> std::collections::
     for s in stmts { visit_stmt(s, &mut set); }
     set
 }
+/// Build a loop-body view of `locals`: the same frame/type metadata and the
+/// same SHARED mutable tables (loop_stack, labels, label_fixups, fpu state),
+/// but with `inits` rebound to `body_inits` (init values cleared for locals
+/// mutated inside the loop) and FRESH per-statement scratch cells. Mirrors the
+/// inline construction in [`emit_loop`]/[`emit_do_while`].
+pub(crate) fn loop_body_locals<'a>(
+    locals: &'a Locals<'a>,
+    body_inits: &'a [Option<i32>],
+) -> Locals<'a> {
+    Locals {
+        inits: body_inits,
+        entry_inits: locals.entry_inits,
+        disps: locals.disps,
+        sizes: locals.sizes,
+        long_globals: locals.long_globals,
+        char_globals: locals.char_globals,
+        global_elem_sizes: locals.global_elem_sizes,
+        structs: locals.structs,
+        global_struct_idxs: locals.global_struct_idxs,
+        local_struct_idxs: locals.local_struct_idxs,
+        unsigned_globals: locals.unsigned_globals,
+        float_globals: locals.float_globals,
+        long_locals: locals.long_locals,
+        init_literals: locals.init_literals,
+        far_ptr_locals: locals.far_ptr_locals,
+        huge_ptr_locals: locals.huge_ptr_locals,
+        array_locals: locals.array_locals,
+        unsigned_locals: locals.unsigned_locals,
+        local_pointee_sizes: locals.local_pointee_sizes,
+        local_pointee_unsigned: locals.local_pointee_unsigned,
+        local_float_bits: locals.local_float_bits,
+        float_locals: locals.float_locals,
+        char_params: locals.char_params,
+        param_struct_bytes: locals.param_struct_bytes,
+        long_params: locals.long_params,
+        unsigned_params: locals.unsigned_params,
+        param_float_widths: locals.param_float_widths,
+        param_pointee_sizes: locals.param_pointee_sizes,
+        char_returners: locals.char_returners,
+        long_returners: locals.long_returners,
+        pascal_fns: locals.pascal_fns,
+        static_fns: locals.static_fns,
+        far_fns: locals.far_fns,
+        variadic_fns: locals.variadic_fns,
+        pascal_cleanup: locals.pascal_cleanup,
+        si_local: locals.si_local,
+        di_local: locals.di_local,
+        long_param_funcs: locals.long_param_funcs,
+        struct_param_funcs: locals.struct_param_funcs,
+        float_param_funcs: locals.float_param_funcs,
+        struct_return_funcs: locals.struct_return_funcs,
+        float_returners: locals.float_returners,
+        loop_stack: locals.loop_stack,
+        labels: locals.labels,
+        label_fixups: locals.label_fixups,
+        fpu_live: locals.fpu_live,
+        return_float_width: locals.return_float_width,
+        return_struct_bytes: locals.return_struct_bytes,
+        struct_temp_bss_offset: locals.struct_temp_bss_offset,
+        float_call_temp_disp: locals.float_call_temp_disp,
+        fpu_pending_fwait: locals.fpu_pending_fwait,
+        param_struct_ptr_bytes: locals.param_struct_ptr_bytes,
+        int_cast_ptrs: locals.int_cast_ptrs,
+        struct_field_temp_base: locals.struct_field_temp_base,
+        elide_call_cleanup: std::cell::Cell::new(false),
+        ternary_tail_epilogue: std::cell::RefCell::new(None),
+        last_branch_barrier: std::cell::Cell::new(0),
+        merge_barrier: std::cell::Cell::new(None),
+        last_top_stmt: std::cell::Cell::new(false),
+        final_top_stmt: std::cell::Cell::new(false),
+    }
+}
+/// `while (C) { switch (n) { … } TAIL }` where the switch has ≥2 non-default
+/// value cases: MSC does NOT rotate this loop (no initial jmp / test-at-bottom).
+/// It emits the cond test at the TOP (exit-jcc forward), then lays the switch
+/// out via the partial-continuation FWD layout with TAIL as the continuation —
+/// the loop-back `jmp` is woven in right after TAIL, before the trailing case
+/// bodies. Fixture 3234. Returns false when the shape doesn't match.
+#[allow(clippy::too_many_arguments)]
+fn try_emit_while_switch(
+    cond: &Cond,
+    body_stmt: &Stmt,
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> bool {
+    // Cond must be a single Cmp (the only exit-test shape a fixture exercises).
+    let Cond::Cmp { op, .. } = cond else { return false };
+    let exit_jcc: u8 = inverted_jcc(*op);
+    // Body must be `{ switch(...){…}; TAIL… }` with the switch FIRST.
+    let stmts: &[Stmt] = match body_stmt {
+        Stmt::Block(v) => v,
+        single => std::slice::from_ref(single),
+    };
+    let Some((Stmt::Switch { scrutinee, cases }, tail)) = stmts.split_first() else { return false };
+    // Trigger only for ≥2 non-default value cases (a single-case switch keeps
+    // the rotated form — fixtures zprobe-sw1nd / zprobe-while-switch).
+    if cases.iter().filter(|a| a.value.is_some()).count() < 2 { return false; }
+    if switch_is_table(cases) { return false; }
+    // No loop-level break/continue (the switch owns its own breaks); TAIL must
+    // not itself break the loop, and the scrutinee must be a runtime value.
+    if tail.iter().any(stmt_has_loop_break) { return false; }
+    if matches!(scrutinee, Expr::IntLit(_)) { return false; }
+    // Each case body must be a simple sequence ending in a trailing top-level
+    // `break` (or returning): no C fall-through to the next arm, and no nested
+    // break (in an `if`) or loop `continue`, which `emit_arm` would route
+    // through the loop stack and leave unpatched. Only the plain shape weaves.
+    for a in cases.iter() {
+        let (main, trailing_break) = match a.body.last() {
+            Some(Stmt::Break) => (&a.body[..a.body.len() - 1], true),
+            _ => (a.body.as_slice(), false),
+        };
+        if main.iter().any(stmt_has_loop_break) { return false; }
+        let returns = main.iter().any(|s| stmt_always_returns(s, locals));
+        if !trailing_break && !returns { return false; }
+    }
+
+    // Body fold view: clear init values for locals mutated in the loop body so
+    // case bodies (`s = s + 10`) read the slot, not the pre-loop init.
+    let body_mutations = collect_loop_body_mutations(&[body_stmt]);
+    let body_inits: Vec<Option<i32>> = locals.inits.iter().enumerate()
+        .map(|(i, &v)| if body_mutations.contains(&i) { None } else { v })
+        .collect();
+    let body_locals = loop_body_locals(locals, &body_inits);
+    body_locals.loop_stack.borrow_mut().push(LoopCtx::default());
+
+    // Loop top: the cond test. l_top points at the first cmp byte.
+    let l_top = out.len();
+    let mut cmp_buf = Vec::new();
+    let mut cmp_fixups: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond, &body_locals, &mut cmp_buf, &mut cmp_fixups);
+    let cmp_base = out.len();
+    for mut c in cmp_fixups { c.body_offset += cmp_base; fixups.push(c); }
+    out.extend_from_slice(&cmp_buf);
+    out.push(exit_jcc);
+    let exit_patch = out.len();
+    out.push(0x00); // END placeholder
+
+    // The switch + TAIL, woven via the partial-continuation FWD layout. ft is
+    // the default arm (chain fall-through) when present, else the chain's final
+    // jmp reaches the continuation.
+    let ft = cases.iter().position(|a| a.value.is_none());
+    let fold = ChainFold { ops: build_chain_ops(cases), fallin_arm: None };
+    emit_partial_switch_with_continuation(
+        scrutinee, None, &fold, ft, cases, tail,
+        &body_locals, frame, return_int, return_long, out, fixups,
+        Some(l_top),
+    );
+
+    // Patch the exit jcc to the post-loop fall-out.
+    let end = out.len();
+    out[exit_patch] = (end as i32 - (exit_patch + 1) as i32) as u8;
+
+    // Drop the loop context; this shape forbids loop-level break/continue, so
+    // there are no placeholders to patch.
+    body_locals.loop_stack.borrow_mut().pop();
+    true
+}
 /// Shared loop emitter — handles the alignment-pad, body
 /// concatenation, cmp+jcc tail, and backward-jcc displacement.
 /// Both while-loops (single-body) and for-loops (step+body) route
@@ -4650,6 +4817,11 @@ pub(crate) fn emit_partial_switch_with_continuation(
     return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
+    // When `Some(l_top)`, this switch is the body of a test-at-top loop: the
+    // continuation is the loop tail, and instead of a function epilogue MSC
+    // emits a backward `jmp l_top` woven in right after it (before the trailing
+    // case bodies). Fixture 3234.
+    loop_back: Option<usize>,
 ) -> bool {
 
     // Bodies referenced by the surviving tests, in op order, deduped. A
@@ -4718,8 +4890,10 @@ pub(crate) fn emit_partial_switch_with_continuation(
         nfc_idxs.iter().map(|&ai| emit_arm(Some(ai), None)).collect();
 
     // need_cont: true when any body doesn't terminate, or a `jl` test reaches
-    // the continuation directly (→ continuation needed).
-    let need_cont = !ft_term || nfc_bufs.iter().any(|(_, _, t)| !t) || jl_to_cont;
+    // the continuation directly (→ continuation needed). A loop body always
+    // needs its tail + loop-back emitted.
+    let need_cont = loop_back.is_some()
+        || !ft_term || nfc_bufs.iter().any(|(_, _, t)| !t) || jl_to_cont;
 
     // Pre-emit continuation (only when needed).
     let mut cont_bytes: Vec<u8> = Vec::new();
@@ -4732,7 +4906,9 @@ pub(crate) fn emit_partial_switch_with_continuation(
                       &mut cont_bytes, &mut cont_fxs);
             if stmt_always_returns(s, locals) { reachable = false; }
         }
-        if reachable {
+        // A loop tail loops back rather than returning — the back-jmp is woven
+        // in by the FWD layout below, so no function epilogue here.
+        if reachable && loop_back.is_none() {
             crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, &mut cont_bytes);
         }
     }
@@ -4848,6 +5024,15 @@ pub(crate) fn emit_partial_switch_with_continuation(
             let base = out.len();
             for mut f in cont_fxs { f.body_offset += base; fixups.push(f); }
             out.extend_from_slice(&cont_bytes);
+        }
+
+        // Loop tail: weave the backward jmp to the loop top right after the
+        // continuation, before the trailing case bodies (fixture 3234).
+        if let Some(l_top) = loop_back {
+            out.push(0xEB);
+            let p = out.len();
+            out.push(0x00);
+            out[p] = (l_top as i32 - (p + 1) as i32) as u8;
         }
 
         // NFC[1..]: after continuation; each starts even (a continuation
@@ -5198,7 +5383,7 @@ pub(crate) fn emit_runtime_switch(
     // - No breaks and default exists → default-as-fallthrough: default body emitted
     //   first (right after chain), non-default bodies after; no jmp after chain.
     // - Otherwise → jmp (2 bytes) + alignment nop (if jmp end is odd) after chain.
-    let default_fallthrough = default_idx.is_some() && !any_breaks;
+    let default_fallthrough = default_idx.is_some();
     let jmp_nop_len: usize = if default_fallthrough {
         0
     } else {

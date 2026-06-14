@@ -1129,6 +1129,7 @@ pub(crate) fn emit_function(
                     func.return_long,
                     &mut bytes,
                     &mut fixups,
+                    None,
                 );
                 reachable = cont_reachable;
                 break; // all remaining statements consumed inside the call
