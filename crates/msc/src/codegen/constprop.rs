@@ -217,8 +217,15 @@ fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
         }
         return;
     }
-    // Single-use: drain the alias so a later deref reloads at runtime.
-    if from_alias { cp.aliases_used.insert(p); } else { cp.ptr_addr.remove(&p); }
+    // Single-use: drain the alias so a later deref reloads at runtime. A pointer
+    // into a GLOBAL array (`p = &a[K]`, ptr_addr base = Global) holds a link-time
+    // constant address, so MSC resolves EVERY deref — keep that alias alive for
+    // multiple reads. Fixture 2584 (`p[-1] + p[0]`).
+    if from_alias {
+        cp.aliases_used.insert(p);
+    } else if !matches!(base, AliasTarget::Global(_)) {
+        cp.ptr_addr.remove(&p);
+    }
     let elem = if is_byte { 1 } else { 2 };
     let total = base_off + deref_off;
     if total < 0 || total % elem != 0 { return; }
