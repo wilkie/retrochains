@@ -1440,6 +1440,47 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&else_buf);
                 return;
             }
+            // Nested min/max: `outer ? (l1 OP c ? l1 : c) : (l2 OP c ? l2 : c)`
+            // — both arms select between their own left operand and a SHARED
+            // right operand `c` under the same comparison. MSC loads the chosen
+            // left into AX per branch, then SHARES the `cmp ax,[c]; jcc keep;
+            // mov ax,[c]` tail (the same shape a lone select-operand ternary
+            // emits, with the load already done). Fixture 2883 (max3).
+            if cond.fold(locals.inits).is_none()
+                && let Some((op1, ld1, rd1)) = minmax_ternary_parts(then_arm, locals)
+                && let Some((op2, ld2, rd2)) = minmax_ternary_parts(else_arm, locals)
+                && op1 == op2 && rd1 == rd2
+            {
+                let cond_c = cond_from_expr((**cond).clone());
+                let cond_size = {
+                    let mut b = Vec::new();
+                    emit_cond_skip(&cond_c, 0, locals, &mut b, &mut Vec::new());
+                    b.len()
+                };
+                // then = mov ax,[ld1] (3) + jmp short (2); a nop pads the else
+                // branch to an even start when the running offset would be odd.
+                let needs_nop = (out.len() + cond_size + 5) % 2 != 0;
+                let skip = 5 + usize::from(needs_nop);
+                emit_cond_skip(&cond_c, i8::try_from(skip).expect("skip fits"), locals, out, fixups);
+                // then: mov ax,[bp+ld1]
+                out.push(0x8B); out.push(bp_modrm(0x46, ld1)); push_bp_disp(out, ld1);
+                // else load (mov ax,[bp+ld2]) — built first to size the jmp.
+                let mut else_load = Vec::new();
+                else_load.push(0x8B); else_load.push(bp_modrm(0x46, ld2)); push_bp_disp(&mut else_load, ld2);
+                out.push(0xEB);
+                out.push(u8::try_from(else_load.len() + usize::from(needs_nop)).expect("else fits"));
+                if needs_nop { out.push(0x90); }
+                out.extend_from_slice(&else_load);
+                // shared tail: cmp ax,[bp+c]; jcc +<mov size>; mov ax,[bp+c]
+                let mut keep_load = Vec::new();
+                keep_load.push(0x8B); keep_load.push(bp_modrm(0x46, rd1)); push_bp_disp(&mut keep_load, rd1);
+                out.push(0x3B); out.push(bp_modrm(0x46, rd1)); push_bp_disp(out, rd1);
+                let jcc = match op1 { BinOp::Gt | BinOp::Ge => 0x7Du8, _ => 0x7E };
+                out.push(jcc);
+                out.push(u8::try_from(keep_load.len()).expect("keep fits"));
+                out.extend_from_slice(&keep_load);
+                return;
+            }
             // `c ? *a : *b` — both arms deref simple word pointers: each
             // branch loads only its pointer into BX; the `mov ax,[bx]` tail
             // is SHARED after the join. Fixture 3512.
@@ -2188,6 +2229,31 @@ fn ptr_int_sub(left: &Expr, right: &Expr, locals: &Locals<'_>) -> Option<(usize,
     if elem < 2 || !elem.is_power_of_two() { return None; }
     if locals.param_pointee_size(*ri) != 0 { return None; } // right must be scalar
     Some((elem, param_disp(*ri)))
+}
+
+/// A select-operand (min/max) ternary `(l OP r ? l : r)` with simple word
+/// bp-relative operands → (op, l_disp, r_disp). The true-value is the
+/// comparison's LHS and the false-value its RHS, so the result is min/max(l, r).
+pub(crate) fn minmax_ternary_parts(e: &Expr, locals: &Locals<'_>) -> Option<(BinOp, i16, i16)> {
+    let Expr::Ternary { cond, then_arm, else_arm } = e else { return None };
+    let Expr::BinOp { op, left: cl, right: cr } = cond.as_ref() else { return None };
+    if !matches!(op, BinOp::Gt | BinOp::Ge | BinOp::Lt | BinOp::Le) { return None; }
+    if !same_var(then_arm, cl) || !same_var(else_arm, cr) { return None; }
+    let ld = simple_word_bp(cl, locals)?;
+    let rd = simple_word_bp(cr, locals)?;
+    Some((*op, ld, rd))
+}
+
+/// True when both arms of an outer ternary are min/max select-operand ternaries
+/// sharing the SAME comparison op and the SAME right operand `r` — the max3
+/// idiom `outer ? (a OP c ? a : c) : (b OP c ? b : c)`. MSC loads the chosen
+/// left operand into AX per branch, then SHARES one `cmp ax,[c]; jcc; mov ax,[c]`
+/// tail. Fixture 2883.
+pub(crate) fn is_nested_minmax_ternary(then_arm: &Expr, else_arm: &Expr, locals: &Locals<'_>) -> bool {
+    match (minmax_ternary_parts(then_arm, locals), minmax_ternary_parts(else_arm, locals)) {
+        (Some((op1, _, rd1)), Some((op2, _, rd2))) => op1 == op2 && rd1 == rd2,
+        _ => false,
+    }
 }
 
 /// True when a ternary is the `(L OP R) ? L : R` select-operand idiom that

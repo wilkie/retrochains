@@ -1870,6 +1870,7 @@ pub(crate) fn emit_return(
         } else if let Expr::Ternary { cond, then_arm, else_arm } = expr
             && cond.fold(locals.inits).is_none()
             && !is_ternary_select_operand(cond, then_arm, else_arm, locals)
+            && !crate::codegen::expr::is_nested_minmax_ternary(then_arm, else_arm, locals)
         {
             // Runtime `return cond ? a : b` — like the comparison/logical
             // returns, MSC inlines a separate epilogue+ret into EACH arm
