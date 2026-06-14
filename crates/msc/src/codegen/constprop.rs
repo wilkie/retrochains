@@ -1206,6 +1206,20 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             } else {
                 prop_expr(value, cp);
             }
+            // `v = (int)p` where p aliases `&x` (a stack local, offset 0): MSC
+            // re-materializes the address with `lea` rather than reusing the live
+            // AX or reloading the slot, so substitute the pointer value with its
+            // address expression. Oracle-confirmed (1779 + probes): every
+            // value-read of an aliased pointer re-leas. Gated to a non-pointer
+            // target (an int conversion); deref reads `*p` are handled by
+            // fold_aliased_deref and are not bare `Local(p)` values, so untouched.
+            if let Expr::Local(p) = value
+                && let Some(&AliasTarget::Local(x)) = cp.ptr_alias.get(p)
+                && let AssignTarget::Local(t) = target
+                && cp.local_specs.get(*t).map(|s| s.pointee_size).unwrap_or(0) == 0
+            {
+                *value = Expr::AddrOfLocal(x);
+            }
             // A runtime-indexed store whose index carries a side effect
             // (`a[i++] = v`) mutates the index variable — propagate the index
             // so the `i++` registers as a mutation and a later `return i`
@@ -2262,6 +2276,19 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             {
                 let off = if matches!(op, BinOp::Sub) { -(*k * s.size as i32) } else { *k * s.size as i32 };
                 *e = Expr::BinOp { op: BinOp::Add, left: left.clone(), right: Box::new(Expr::IntLit(off)) };
+                return;
+            }
+            // `e - e` → 0 for identical, side-effect-free operands (MSC folds the
+            // algebraic identity; fixture 1779 `v - v`).
+            if matches!(op, BinOp::Sub)
+                && matches!((left.as_ref(), right.as_ref()),
+                    (Expr::Local(a), Expr::Local(b)) if a == b)
+                    | matches!((left.as_ref(), right.as_ref()),
+                        (Expr::Global(a), Expr::Global(b)) if a == b)
+                    | matches!((left.as_ref(), right.as_ref()),
+                        (Expr::Param(a), Expr::Param(b)) if a == b)
+            {
+                *e = Expr::IntLit(0);
                 return;
             }
             // Identity simplifications MSC drops (the no-op operation vanishes,
