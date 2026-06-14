@@ -329,6 +329,67 @@ mod store_fwd {
         }
     }
 }
+/// Pre-pass: when a call has 2+ comma-expression args `(side, value)`, MSC runs
+/// ALL the side-effects first (in the cdecl right-to-left push order) and only
+/// then reads the values — `sum2((x=10,x),(x=20,x))` runs `x=20; x=10` then pushes
+/// the final `x` (=10) for BOTH args (oracle fixture 2315), rather than
+/// interleaving side+push per arg. Hoist each comma arg's sides (RTL) to
+/// statements before the call and replace the arg with its value; const-prop then
+/// folds the deferred value reads against the post-side state.
+mod comma_hoist {
+    use crate::{Expr, Stmt, SwitchArm};
+
+    /// If `e` is a direct `Call`/`CallPtr` with ≥2 comma (`Seq`) args, return the
+    /// RTL-ordered side statements to hoist and rewrite the args to their values.
+    fn hoist_call(e: &mut Expr) -> Option<Vec<Stmt>> {
+        let args = match e {
+            Expr::Call { args, .. } | Expr::CallPtr { args, .. } => args,
+            _ => return None,
+        };
+        if args.iter().filter(|a| matches!(a, Expr::Seq { .. })).count() < 2 {
+            return None;
+        }
+        let mut sides: Vec<Stmt> = Vec::new();
+        // cdecl pushes right-to-left, so the rightmost arg's side-effects run first.
+        for a in args.iter_mut().rev() {
+            if let Expr::Seq { sides: s, value } = a {
+                sides.append(s);
+                *a = (**value).clone();
+            }
+        }
+        Some(sides)
+    }
+    fn descend(s: &mut Stmt) {
+        match s {
+            Stmt::Block(v) => run(v),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => descend(body),
+            Stmt::If { then_branch, else_branch, .. } => {
+                descend(then_branch);
+                if let Some(e) = else_branch { descend(e); }
+            }
+            Stmt::Switch { cases, .. } => for SwitchArm { body, .. } in cases { run(body); },
+            _ => {}
+        }
+    }
+    pub(super) fn run(stmts: &mut Vec<Stmt>) {
+        let mut out: Vec<Stmt> = Vec::with_capacity(stmts.len());
+        for mut s in stmts.drain(..) {
+            descend(&mut s);
+            let call = match &mut s {
+                Stmt::Assign { value, .. } => Some(value),
+                Stmt::Return(e) | Stmt::ExprStmt(e) => Some(e),
+                _ => None,
+            };
+            if let Some(c) = call
+                && let Some(sides) = hoist_call(c)
+            {
+                out.extend(sides);
+            }
+            out.push(s);
+        }
+        *stmts = out;
+    }
+}
 pub(crate) fn const_prop_globals(
     stmts: &[Stmt],
     local_specs: &[LocalSpec],
@@ -409,6 +470,8 @@ pub(crate) fn const_prop_globals(
     let mut stmts = drop_dead_after_goto(stmts.to_vec());
     // Rewrite provably-run-once `while`s to do-while form before const-prop.
     runonce::run(&mut stmts);
+    // Hoist multi-comma-arg side-effects so values are read after all sides.
+    comma_hoist::run(&mut stmts);
     // Store-to-load forward a just-written variable-indexed array element.
     store_fwd::run(&mut stmts);
     let new_stmts: Vec<Stmt> = stmts.iter().map(|s| {
