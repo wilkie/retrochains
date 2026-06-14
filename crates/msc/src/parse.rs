@@ -5322,6 +5322,45 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 let e = idx_branch(else_arm)?;
                 return Ok(Expr::Ternary { cond: cond.clone(), then_arm: Box::new(t), else_arm: Box::new(e) });
             }
+            // `(c ? &s1 : &s2)->field` — arrow on a parenthesized ternary whose
+            // arms are addresses of struct objects. MSC distributes the member
+            // access into both arms, KEEPING the pointer-deref form per arm
+            // (`mov bx,&sN; mov ax,[bx]`) rather than simplifying `(&s)->f` to a
+            // direct `s.f`, and emits the two-epilogue ternary return. Lower to a
+            // Ternary of per-arm derefs so the existing runtime-ternary return
+            // path handles it. Offset-0 fields only (a plain deref of the selected
+            // address); a nonzero field offset would need an offset-deref node we
+            // don't emit yet. Fixture 3558.
+            if let Expr::Ternary { cond, then_arm, else_arm } = &inner
+                && matches!(p.peek(), Some(Tok::Arrow))
+            {
+                let arm_struct = |e: &Expr| -> Option<usize> {
+                    match e {
+                        Expr::AddrOfGlobal(g) => p.globals.get(*g).and_then(|gg| gg.struct_idx),
+                        Expr::AddrOfLocal(l) => p.local_specs.get(*l).and_then(|s| s.struct_idx),
+                        _ => None,
+                    }
+                };
+                if let Some(sidx) = arm_struct(then_arm)
+                    && arm_struct(else_arm) == Some(sidx)
+                {
+                    p.bump(); // `->`
+                    let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    if byte_off != 0 {
+                        return Err(EmitError::Unsupported(
+                            "nonzero field offset through a ternary pointer not yet supported".into()));
+                    }
+                    let mk = |arm: &Expr| -> Expr {
+                        let ptr = Box::new(arm.clone());
+                        if size == 1 { Expr::DerefByte { ptr } } else { Expr::DerefWord { ptr } }
+                    };
+                    return Ok(Expr::Ternary {
+                        cond: cond.clone(),
+                        then_arm: Box::new(mk(then_arm)),
+                        else_arm: Box::new(mk(else_arm)),
+                    });
+                }
+            }
             // `(*pfn)(args)` / `(pfn)(args)` — call through a function pointer.
             // Dereferencing a function pointer yields the function, so an
             // explicit `(*pfn)` is the same indirect call as `pfn`. Fixture 2414.

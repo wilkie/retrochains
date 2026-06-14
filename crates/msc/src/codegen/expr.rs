@@ -1096,6 +1096,25 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     });
                     out.extend_from_slice(&[0x8B, 0x07]);
                 }
+                // `*(&g)` — deref the ADDRESS of a struct global. MSC loads the
+                // address into BX (`mov bx, OFFSET _g`) then reads `[bx]`, rather
+                // than the direct `mov ax,[g]` it uses for `g.x`. Reached via the
+                // `(c?&s1:&s2)->x` ternary distribution (fixture 3558).
+                Expr::AddrOfGlobal(g) => {
+                    let body_offset = out.len();
+                    out.extend_from_slice(&[0xBB, 0x00, 0x00]); // mov bx, OFFSET _g
+                    fixups.push(Fixup {
+                        body_offset,
+                        kind: FixupKind::GlobalAddr { global_idx: *g },
+                    });
+                    out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
+                }
+                // `*(&local)` — `lea bx,[bp-disp]; mov ax,[bx]`.
+                Expr::AddrOfLocal(li) => {
+                    let disp = locals.disp(*li);
+                    out.push(0x8D); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+                    out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
+                }
                 Expr::Local(i) => {
                     // Deref a local pointer. For far/huge pointers use
                     // `les bx,[bp-p]; mov ax,es:[bx]`; for near pointers
