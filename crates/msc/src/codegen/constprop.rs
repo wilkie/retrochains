@@ -423,14 +423,17 @@ fn fold_ptr_value_init(target: usize, value: &mut Expr, cp: &ConstProp) -> bool 
             cp.ptr_addr.get(&p).copied()
         }
     };
-    if let Expr::BinOp { op: BinOp::Add, left, right } = value
+    if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
         && let Expr::Local(p) = left.as_ref()
         && *p != target
         && let Expr::IntLit(k) = right.as_ref()
         && let Some((base, off)) = resolve(*p)
         && !matches!(base, AliasTarget::String(_))
     {
-        *value = addr_expr(base, off + *k);
+        // `k` is already a byte offset (the parser scales pointer-init
+        // arithmetic by the pointee size). `p - K` subtracts it. Fixture 2269.
+        let delta = if matches!(op, BinOp::Sub) { -*k } else { *k };
+        *value = addr_expr(base, off + delta);
         return true;
     }
     false

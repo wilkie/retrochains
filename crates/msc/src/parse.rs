@@ -2582,7 +2582,27 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         }
                         found
                     };
-                    let init_expr = parse_expr(p)?;
+                    let mut init_expr = parse_expr(p)?;
+                    // `int *q = p ± K;` (no cast prefix) — pointer arithmetic
+                    // strides by `sizeof(*p)`, so scale the literal to a byte
+                    // offset here, matching the byte-offset convention that the
+                    // alias fold (`fold_ptr_value_init`) and the address store
+                    // use. A cast-prefixed init (`(char *)p + K`) is already in
+                    // the cast's element units, so it is left unscaled. Fixture
+                    // 2269 (`p + 2`/`p - 2` over `int *` → ±4 bytes).
+                    if !init_via_type_cast && star_count > 0
+                        && let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = &init_expr
+                        && let Expr::Local(pi) = left.as_ref()
+                        && let Expr::IntLit(k) = right.as_ref()
+                        && let Some(pp) = p.local_specs.get(*pi).map(|s| s.pointee_size)
+                        && pp > 1
+                    {
+                        init_expr = Expr::BinOp {
+                            op: *op,
+                            left: left.clone(),
+                            right: Box::new(Expr::IntLit(k * pp as i32)),
+                        };
+                    }
                     // Postfix `++`/`--` on the init expression — yields
                     // the *current* value (which is what we already
                     // have in init_expr), then increments the target.
