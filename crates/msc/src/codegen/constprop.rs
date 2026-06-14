@@ -2287,6 +2287,22 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // indices are already byte-scaled at parse and reach here as IntLit,
             // so `right_was_var` keeps them from being scaled twice.
             let right_was_var = !matches!(right.as_ref(), Expr::IntLit(_));
+            // MSC evaluates a pointer-arrow field (`pp->y`, a DerefLocalField)
+            // BEFORE a simple direct operand — even in a commutative add where
+            // both ultimately resolve to direct memory. Once the alias rewrite
+            // below flattens `pp->y` to a `GlobalField`, that ordering is lost,
+            // so swap the operands now (commutative op, right was the arrow, left
+            // is a simple direct operand) → the arrow-origin operand loads first.
+            // Fixture 2313 (`p.x + pp->y` → `mov ax,[p+2]; add ax,[p]`).
+            let swap_deref_first = matches!(op, BinOp::Add | BinOp::Mul
+                    | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+                && matches!(right.as_ref(), Expr::DerefLocalField { ptr_local, .. }
+                    if cp.ptr_alias.contains_key(ptr_local))
+                && matches!(left.as_ref(), Expr::GlobalField { .. } | Expr::LocalField { .. }
+                    | Expr::Global(_) | Expr::Local(_) | Expr::Param(_));
+            if swap_deref_first {
+                std::mem::swap(left, right);
+            }
             // Multi-call add/sub chain: the rightmost call (this binop's `right`,
             // emitted into AX before the left calls park in SI/DI) loads its leaf
             // arguments from MEMORY, not const-propagated immediates. Only the
@@ -2590,7 +2606,20 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 *e = Expr::IntLit(v);
             }
         }
-        Expr::DerefLocalField { .. } | Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => {
+        Expr::DerefLocalField { ptr_local, byte_off, size } => {
+            // `pp->f` where pp aliases `&g` / `&x` (incl. the address of a static
+            // local, which is a global) → the direct field of g / x, a plain
+            // memory load (NOT folded to the field's init value — MSC keeps the
+            // load). Mirrors `alias_rewrite_derefs`. Fixture 2313.
+            if let Some(&a) = cp.ptr_alias.get(ptr_local) {
+                match a {
+                    AliasTarget::Global(g) => *e = Expr::GlobalField { global: g, byte_off: *byte_off, size: *size },
+                    AliasTarget::Local(x) => *e = Expr::LocalField { local: x, byte_off: *byte_off, size: *size },
+                    AliasTarget::String(_) => {}
+                }
+            }
+        }
+        Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => {
             // Pointer-aliasing const-prop not yet implemented.
         }
         Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => {
