@@ -356,6 +356,147 @@ mod store_fwd {
 /// interleaving side+push per arg. Hoist each comma arg's sides (RTL) to
 /// statements before the call and replace the arg with its value; const-prop then
 /// folds the deferred value reads against the post-side state.
+/// Pre-pass: value-number additive expressions over const-indexed int-array
+/// elements so MSC's CSE+strength-reduction shows. When a sub-sum's value is
+/// provably equal to a stored element (`a[0]+a[1]` ≡ `a[2]` because a[0]=x,
+/// a[1]=y, a[2]=x+y), MSC reuses that element's load and doubles: `a[0]+a[1]+a[2]`
+/// → `a[2]+a[2]` → `mov ax,[a2]; shl ax,1` (fixture 2452). The rewrite must run
+/// BEFORE const-prop folds the literal sub-sum to an immediate (which would erase
+/// the structure), so it lives here as a raw-AST pre-pass. Conservative: any
+/// control flow, call, address-of, or non-simple store clears the tracked map, so
+/// only straight-line element value-numbering is attempted.
+mod value_number {
+    use crate::{AssignTarget, BinOp, Expr, Stmt};
+    use std::collections::HashMap;
+
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+    enum Atom {
+        Var(usize),
+        Const(i32),
+    }
+    type Canon = Vec<Atom>; // sorted multiset of additive root terms
+    type Key = (usize, u16); // (array local, byte offset) of a tracked element
+
+    /// Canonicalize `e` to a sorted multiset of root atoms, substituting tracked
+    /// element reads with the value-expr they hold. `None` for any shape we can't
+    /// reduce to additive root terms (a deref, call, non-word element, …) — those
+    /// block the CSE rather than risk a false match.
+    fn canon(e: &Expr, held: &HashMap<Key, Canon>) -> Option<Canon> {
+        match e {
+            Expr::IntLit(k) => Some(vec![Atom::Const(*k)]),
+            Expr::Local(i) => Some(vec![Atom::Var(*i)]),
+            _ if elem_key(e).is_some() => held.get(&elem_key(e).unwrap()).cloned(),
+            Expr::BinOp { op: BinOp::Add, left, right } => {
+                let mut c = canon(left, held)?;
+                c.extend(canon(right, held)?);
+                c.sort();
+                Some(c)
+            }
+            _ => None,
+        }
+    }
+
+    /// A single const-indexed word element read (`a[K]`) and its `(local,
+    /// byte_off)` key. Reads are `LocalIndex{index: IntLit}` (byte_off = K*2) or,
+    /// where the parser already folded the offset, `LocalField`.
+    fn elem_key(e: &Expr) -> Option<Key> {
+        match e {
+            Expr::LocalIndex { local, index } => match index.as_ref() {
+                Expr::IntLit(k) if *k >= 0 => Some((*local, (*k as u16) * 2)),
+                _ => None,
+            },
+            Expr::LocalField { local, byte_off, size: 2 } => Some((*local, *byte_off)),
+            _ => None,
+        }
+    }
+
+    /// `L + R` where canon(L) == canon(R) (a genuine multi-term sum) and one side
+    /// is a single element read → rewrite to `elem + elem` (reusing that read's
+    /// exact shape) so the emitter's `x + x → shl` fires. Top-down; else recurses.
+    fn rewrite(e: &mut Expr, held: &HashMap<Key, Canon>) {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            if let (Some(cl), Some(cr)) = (canon(left, held), canon(right, held))
+                && cl == cr
+                && cl.len() >= 2
+            {
+                let lk = elem_key(left);
+                let rk = elem_key(right);
+                // Skip when both sides are already the SAME element (`a[i]+a[i]`):
+                // the emitter doubles it directly, no rewrite needed.
+                let same = lk.is_some() && lk == rk;
+                let keep = if rk.is_some() {
+                    Some((**right).clone())
+                } else if lk.is_some() {
+                    Some((**left).clone())
+                } else {
+                    None
+                };
+                if !same && let Some(lv) = keep {
+                    *e = Expr::BinOp {
+                        op: BinOp::Add,
+                        left: Box::new(lv.clone()),
+                        right: Box::new(lv),
+                    };
+                    return;
+                }
+            }
+            rewrite(left, held);
+            rewrite(right, held);
+        }
+    }
+
+    /// Remove every tracked element whose value-expr references scalar `v` — a
+    /// reassignment of `v` makes those captured values stale.
+    fn invalidate_var(held: &mut HashMap<Key, Canon>, v: usize) {
+        held.retain(|_, c| !c.contains(&Atom::Var(v)));
+    }
+
+    fn has_call_or_escape(e: &Expr) -> bool {
+        match e {
+            Expr::Call { .. } | Expr::CallPtr { .. } | Expr::CallStructField { .. }
+            | Expr::AddrOfLocal(_) => true,
+            Expr::BinOp { left, right, .. } => has_call_or_escape(left) || has_call_or_escape(right),
+            _ => false,
+        }
+    }
+
+    pub(super) fn run(stmts: &mut [Stmt]) {
+        let mut held: HashMap<Key, Canon> = HashMap::new();
+        for s in stmts.iter_mut() {
+            match s {
+                Stmt::Return(e) | Stmt::ExprStmt(e) => {
+                    if has_call_or_escape(e) {
+                        held.clear();
+                    } else {
+                        rewrite(e, &held);
+                    }
+                }
+                Stmt::Assign { target, value } => {
+                    if has_call_or_escape(value) {
+                        held.clear();
+                        continue;
+                    }
+                    rewrite(value, &held);
+                    match target {
+                        AssignTarget::Local(x) => invalidate_var(&mut held, *x),
+                        AssignTarget::IndexedLocal { local, byte_off } => {
+                            match canon(value, &held) {
+                                Some(c) => { held.insert((*local, *byte_off), c); }
+                                None => { held.remove(&(*local, *byte_off)); }
+                            }
+                        }
+                        // Any other target (deref, variable index, param, global,
+                        // whole-array, …) is opaque to this narrow tracker.
+                        _ => held.clear(),
+                    }
+                }
+                Stmt::Empty | Stmt::Label(_) => {}
+                // Control flow / unknown — drop all tracking.
+                _ => held.clear(),
+            }
+        }
+    }
+}
 mod comma_hoist {
     use crate::{Expr, Stmt, SwitchArm};
 
@@ -494,6 +635,9 @@ pub(crate) fn const_prop_globals(
     comma_hoist::run(&mut stmts);
     // Store-to-load forward a just-written variable-indexed array element.
     store_fwd::run(&mut stmts);
+    // Value-number additive sums over const-indexed int-array elements so a
+    // sub-sum equal to a stored element reuses its load + doubles (fixture 2452).
+    value_number::run(&mut stmts);
     let new_stmts: Vec<Stmt> = stmts.iter().map(|s| {
         let mut new_stmt = s.clone();
         prop_stmt(&mut new_stmt, &mut cp);
