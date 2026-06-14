@@ -426,6 +426,16 @@ fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
     } else if !matches!(base, AliasTarget::Global(_)) {
         cp.ptr_addr.remove(&p);
     }
+    // An INTERIOR pointer into a LOCAL array (`p = &a[K]`, base_off≠0) indexed at
+    // a NON-zero deref offset is NOT folded by MSC — it keeps the runtime pointer
+    // deref `[bx + J*elem]` (reusing the live address), unlike `p[0]` / a
+    // base-pointer `p = a` which both fold to a direct element. A pointer into a
+    // GLOBAL array holds a link-time-constant address, so MSC resolves every
+    // deref (fixture 2584) — keep folding those. Fixtures 2377 (`p[-1]`), and the
+    // P0/P1/Pb oracle probes. The `from_alias`/ptr_addr consume above already ran.
+    if matches!(base, AliasTarget::Local(_)) && base_off != 0 && deref_off != 0 {
+        return;
+    }
     let elem = if is_byte { 1 } else { 2 };
     let total = base_off + deref_off;
     if total < 0 || total % elem != 0 { return; }

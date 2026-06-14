@@ -1167,6 +1167,29 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     out.extend_from_slice(&[0x8B, 0x1F]); // mov bx, [bx]
                     out.extend_from_slice(&[0x8B, 0x07]); // mov ax, [bx]
                 }
+                // `*(p + K)` over a scalar pointer LOCAL, where K is a BYTE offset
+                // (the parser byte-scales these — parse.rs ~5878). MSC keeps the
+                // live pointer in BX (reusing AX when p's value is still there) and
+                // reads `[bx + K]` WITHOUT re-scaling. Reached when const-prop
+                // declines to fold an interior local-array pointer deref (fixture
+                // 2377 `p[-1]`); emit_offset_deref would re-scale K and is for the
+                // unscaled element-index forms (decayed global / runtime index).
+                Expr::BinOp { op: BinOp::Add, left, right }
+                    if matches!(left.as_ref(), Expr::Local(i) if locals.local_pointee_size(*i) > 1)
+                        && matches!(right.as_ref(), Expr::IntLit(_)) =>
+                {
+                    let Expr::Local(p) = left.as_ref() else { unreachable!() };
+                    let Expr::IntLit(off) = right.as_ref() else { unreachable!() };
+                    emit_ptr_local_to_bx(locals.disp(*p), locals, out); // mov bx,[p] / mov bx,ax
+                    let off = *off;
+                    if off == 0 {
+                        out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
+                    } else if let Ok(o8) = i8::try_from(off) {
+                        out.extend_from_slice(&[0x8B, 0x47, o8 as u8]); // mov ax,[bx+d8]
+                    } else {
+                        out.push(0x8B); out.push(0x87); out.extend_from_slice(&(off as u16).to_le_bytes());
+                    }
+                }
                 Expr::BinOp { op: BinOp::Add, left, right } => {
                     // `*(base + idx)` word deref — decayed global array, or a
                     // pointer param/local, with a constant or runtime index.
