@@ -35,13 +35,13 @@ cargo build --workspace --bins
 target/debug/xfix verify-all --toolchain ours
 ```
 
-The current baseline is **4103 pass, 0 fail** out of 4103 BCC fixtures — the
+The current baseline is **4104 pass, 0 fail** out of 4104 BCC fixtures — the
 BCC pool is fully green. Any refactor — especially pure code moves — must
-reproduce this result exactly (all 4103 passing). `verify-all` exits non-zero
+reproduce this result exactly (all 4104 passing). `verify-all` exits non-zero
 whenever any fixture fails, so check the printed summary, not just the exit
 code.
 
 The MSC toolchain has its own pool — `verify-all --toolchain ours --compiler
-msc` — currently **3968 pass / 10 fail** out of 3978. (A fixture can be
+msc` — currently **3969 pass / 10 fail** out of 3979. (A fixture can be
 MSC-only when our BCC can't yet match real BCC; capture both with `xfix
 capture --compiler {bcc,msc}` and add both `invocation.{bcc,msc}.toml`.)
