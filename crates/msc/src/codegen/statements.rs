@@ -37,6 +37,22 @@ fn stmt_is_float_elem_store(stmt: &Stmt, locals: &Locals<'_>) -> bool {
         Stmt::Assign { target: AssignTarget::IndexedLocal { local, .. }, value: Expr::FloatLit(..) }
             if locals.is_float_local(*local))
 }
+/// True when a statement's FIRST emitted instruction is an x87 `fld` — a call
+/// whose last argument (pushed first, right-to-left) is a float/double value.
+/// A pending x87 `fwait` then merges into that `fld`'s leading `9B` rather than
+/// being flushed as a separate `90 9B`. Fixtures 2198, 3999.
+fn stmt_starts_with_float_push(stmt: &Stmt, locals: &Locals<'_>) -> bool {
+    let call_args = match stmt {
+        Stmt::ExprStmt(Expr::Call { args, .. } | Expr::CallPtr { args, .. }) => Some(args),
+        _ => None,
+    };
+    let Some(args) = call_args else { return false; };
+    match args.last() {
+        Some(Expr::FloatLit(..)) => true,
+        Some(Expr::Local(i)) => locals.is_float_local(*i),
+        _ => false,
+    }
+}
 /// `if (a[i] OP b[i]) { x = a[i] - b[i]; REST }` where a,b are char local arrays
 /// at the same runtime index and x is an int local: emit the in-place byte
 /// compare, then on the taken path reuse the loaded `b[i]` (in AL) and index (in
@@ -174,9 +190,14 @@ pub(crate) fn emit_stmt(
     // not another float store — the FxxRQQ emulator's 2-byte patch slot.
     if locals.fpu_pending_fwait.get() && !stmt_is_float_elem_store(stmt, locals) {
         locals.fpu_pending_fwait.set(false);
-        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
-        out.push(0x90);
-        out.push(0x9B);
+        // If this statement's first op is an x87 `fld` (a leading float arg push),
+        // that instruction's own leading `9B` serves as the pending fwait — no
+        // separate `90 9B` flush. Fixtures 2198/3999.
+        if !stmt_starts_with_float_push(stmt, locals) {
+            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
+            out.push(0x90);
+            out.push(0x9B);
+        }
     }
     // Read-and-clear the "function's final top-level statement" flag: only the
     // statement the function loop set it for should see it true. Recursing into
@@ -2569,6 +2590,7 @@ pub(crate) fn emit_threaded_for(
         unsigned_locals: locals.unsigned_locals,
         local_pointee_sizes: locals.local_pointee_sizes,
         local_pointee_unsigned: locals.local_pointee_unsigned,
+        local_float_bits: locals.local_float_bits,
         float_locals: locals.float_locals,
         char_params: locals.char_params,
         param_struct_bytes: locals.param_struct_bytes,
@@ -3580,6 +3602,7 @@ pub(crate) fn emit_loop(
         unsigned_locals: locals.unsigned_locals,
         local_pointee_sizes: locals.local_pointee_sizes,
         local_pointee_unsigned: locals.local_pointee_unsigned,
+        local_float_bits: locals.local_float_bits,
         float_locals: locals.float_locals,
         char_params: locals.char_params,
         param_struct_bytes: locals.param_struct_bytes,
@@ -4800,6 +4823,7 @@ pub(crate) fn emit_do_while(
         unsigned_locals: locals.unsigned_locals,
         local_pointee_sizes: locals.local_pointee_sizes,
         local_pointee_unsigned: locals.local_pointee_unsigned,
+        local_float_bits: locals.local_float_bits,
         float_locals: locals.float_locals,
         char_params: locals.char_params,
         param_struct_bytes: locals.param_struct_bytes,

@@ -48,6 +48,81 @@ pub(crate) fn drop_dead_after_goto(stmts: Vec<Stmt>) -> Vec<Stmt> {
     }
     out
 }
+/// True when float/double local `idx` is read (anywhere in its subtree) as an
+/// argument to a call — printf-style variadic float promotion or any callee
+/// expecting a float. Such reads must stay `Local` (no int-fold). A read only
+/// through an `(int)` cast (e.g. `return (int)f;`) is NOT a call arg, so a
+/// literal-init float there still folds to its truncated int. Fixtures
+/// 2198/3999 (keep float) vs 1670/1672 (fold cast).
+fn float_local_used_as_call_arg(stmts: &[Stmt], idx: usize) -> bool {
+    fn reads_local(e: &Expr, idx: usize) -> bool {
+        match e {
+            Expr::Local(i) => *i == idx,
+            Expr::BinOp { left, right, .. } | Expr::Index2D { row: left, col: right, .. } =>
+                reads_local(left, idx) || reads_local(right, idx),
+            Expr::Ternary { cond, then_arm, else_arm } =>
+                reads_local(cond, idx) || reads_local(then_arm, idx) || reads_local(else_arm, idx),
+            Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => reads_local(ptr, idx),
+            Expr::Index { index, .. } | Expr::IndexByte { index, .. }
+            | Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. }
+            | Expr::ParamIndex { index, .. } | Expr::PtrIndexByte { index, .. } => reads_local(index, idx),
+            Expr::AssignExpr { value, .. } => reads_local(value, idx),
+            Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => reads_local(value, idx),
+            Expr::Call { args, .. } | Expr::CallStructField { args, .. } =>
+                args.iter().any(|a| reads_local(a, idx)),
+            Expr::CallPtr { target, args } =>
+                reads_local(target, idx) || args.iter().any(|a| reads_local(a, idx)),
+            Expr::Seq { value, .. } => reads_local(value, idx),
+            _ => false,
+        }
+    }
+    fn scan_expr(e: &Expr, idx: usize) -> bool {
+        match e {
+            Expr::Call { args, .. } | Expr::CallStructField { args, .. } =>
+                args.iter().any(|a| reads_local(a, idx) || scan_expr(a, idx)),
+            Expr::CallPtr { target, args } =>
+                args.iter().any(|a| reads_local(a, idx)) || scan_expr(target, idx)
+                    || args.iter().any(|a| scan_expr(a, idx)),
+            Expr::BinOp { left, right, .. } | Expr::Index2D { row: left, col: right, .. } =>
+                scan_expr(left, idx) || scan_expr(right, idx),
+            Expr::Ternary { cond, then_arm, else_arm } =>
+                scan_expr(cond, idx) || scan_expr(then_arm, idx) || scan_expr(else_arm, idx),
+            Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => scan_expr(ptr, idx),
+            Expr::Index { index, .. } | Expr::IndexByte { index, .. }
+            | Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. }
+            | Expr::ParamIndex { index, .. } | Expr::PtrIndexByte { index, .. } => scan_expr(index, idx),
+            Expr::AssignExpr { value, .. } => scan_expr(value, idx),
+            Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => scan_expr(value, idx),
+            Expr::Seq { sides, value } => sides.iter().any(|s| scan_stmt(s, idx)) || scan_expr(value, idx),
+            _ => false,
+        }
+    }
+    fn scan_cond(c: &Cond, idx: usize) -> bool {
+        match c {
+            Cond::Truthy(e) => scan_expr(e, idx),
+            Cond::Cmp { left, right, .. } => scan_expr(left, idx) || scan_expr(right, idx),
+            Cond::And(a, b) | Cond::Or(a, b) => scan_cond(a, idx) || scan_cond(b, idx),
+        }
+    }
+    fn scan_stmt(s: &Stmt, idx: usize) -> bool {
+        match s {
+            Stmt::Return(e) | Stmt::ExprStmt(e) => scan_expr(e, idx),
+            Stmt::Assign { value, .. } => scan_expr(value, idx),
+            Stmt::If { cond, then_branch, else_branch } =>
+                scan_cond(cond, idx) || scan_stmt(then_branch, idx)
+                    || else_branch.as_ref().is_some_and(|e| scan_stmt(e, idx)),
+            Stmt::While { cond, body } => scan_cond(cond, idx) || scan_stmt(body, idx),
+            Stmt::DoWhile { body, cond } => scan_stmt(body, idx) || scan_cond(cond, idx),
+            Stmt::For { init, cond, step, body } =>
+                scan_stmt(init, idx) || scan_cond(cond, idx) || scan_stmt(step, idx) || scan_stmt(body, idx),
+            Stmt::Block(ss) => ss.iter().any(|s| scan_stmt(s, idx)),
+            Stmt::Switch { scrutinee, cases } =>
+                scan_expr(scrutinee, idx) || cases.iter().any(|a| a.body.iter().any(|s| scan_stmt(s, idx))),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| scan_stmt(s, idx))
+}
 pub(crate) fn const_prop_globals(
     stmts: &[Stmt],
     local_specs: &[LocalSpec],
@@ -88,6 +163,15 @@ pub(crate) fn const_prop_globals(
         // read (fixture 1037). The emit-time fold_cond path still sees
         // the init via `locals.inits` for cond elision (1632).
         if spec.is_long { continue; }
+        // A `float`/`double` local consumed by a call argument keeps its float
+        // value: substituting it to an IntLit would truncate (`printf("%f", f)`
+        // would push `3` for `3.14f`) and defeat the double-vararg promotion. Its
+        // reads stay `Local`. Fixtures 2198/3999. But a literal-init float read
+        // ONLY through an `(int)` cast (`return (int)f;`) must still fold to its
+        // truncated int — fixtures 1670/1672 — so don't blanket-skip floats.
+        if spec.is_float {
+            if float_local_used_as_call_arg(stmts, i) { continue; }
+        }
         // `register` locals live in SI/DI — their reads go through the register,
         // never a propagated immediate, so keep them out of the const tables.
         if spec.is_register { continue; }

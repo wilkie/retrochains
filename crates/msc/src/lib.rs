@@ -517,6 +517,10 @@ pub struct Locals<'a> {
     /// Parallel-indexed: true for `unsigned char *p` locals — a `*p` byte read
     /// zero-extends (`sub ah,ah`) instead of sign-extending (`cbw`). Fixture 465.
     pub local_pointee_unsigned: &'a [bool],
+    /// Parallel-indexed: the f64 literal value of a `float`/`double` local with a
+    /// known constant init (else None). Used to promote a known float/double local
+    /// to a double when passed to a variadic call. Fixtures 2198, 3999.
+    pub local_float_bits: &'a [Option<u64>],
     /// Parallel-indexed byte width (4/8) of `float`/`double` locals, 0
     /// otherwise. A non-literal float local consumed by `(int)<local>` is
     /// stored with `fst` (st(0) kept live) and the cast is bare `call __ftol`.
@@ -728,6 +732,7 @@ impl Locals<'_> {
             unsigned_locals: self.unsigned_locals,
             local_pointee_sizes: self.local_pointee_sizes,
             local_pointee_unsigned: self.local_pointee_unsigned,
+            local_float_bits: self.local_float_bits,
             float_locals: self.float_locals,
             char_params: self.char_params,
             param_struct_bytes: self.param_struct_bytes,
@@ -836,6 +841,10 @@ impl Locals<'_> {
     }
     pub fn local_pointee_unsigned(&self, idx: usize) -> bool {
         self.local_pointee_unsigned.get(idx).copied().unwrap_or(false)
+    }
+    /// f64 literal value of a known float/double local (else None).
+    pub fn local_float_bits(&self, idx: usize) -> Option<u64> {
+        self.local_float_bits.get(idx).copied().flatten()
     }
     /// 4 or 8 for a `float`/`double` local, else 0.
     pub fn float_local_width(&self, idx: usize) -> usize {
@@ -1962,6 +1971,72 @@ fn collect_call_float_args_expr(e: &Expr, out: &mut Vec<(u64, usize)>) {
     }
 }
 
+/// Collect the f64 (width 8) of every known float/double LOCAL passed to a
+/// VARIADIC call — promoted to double, needing a CONST pool entry. Fixtures
+/// 2198, 3999.
+fn collect_vararg_float_local_expr(
+    e: &Expr, locals: &[LocalSpec],
+    variadic: &std::collections::HashSet<String>,
+    pascal: &std::collections::HashSet<String>,
+    statics: &std::collections::HashSet<String>,
+    out: &mut Vec<(u64, usize)>,
+) {
+    if let Expr::Call { name, args } = e {
+        let sym = crate::codegen::callee_symbol_full(name, pascal.contains(name), statics.contains(name));
+        if variadic.contains(&sym) {
+            for a in args {
+                if let Expr::Local(li) = a
+                    && locals.get(*li).map(|l| l.is_float).unwrap_or(false)
+                    && let Some(bits) = locals.get(*li).and_then(|l| l.float_bits)
+                {
+                    out.push((bits, 8));
+                }
+            }
+        }
+    }
+    match e {
+        Expr::Call { args, .. } | Expr::CallPtr { args, .. } =>
+            for a in args { collect_vararg_float_local_expr(a, locals, variadic, pascal, statics, out); },
+        Expr::BinOp { left, right, .. } => {
+            collect_vararg_float_local_expr(left, locals, variadic, pascal, statics, out);
+            collect_vararg_float_local_expr(right, locals, variadic, pascal, statics, out);
+        }
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            collect_vararg_float_local_expr(cond, locals, variadic, pascal, statics, out);
+            collect_vararg_float_local_expr(then_arm, locals, variadic, pascal, statics, out);
+            collect_vararg_float_local_expr(else_arm, locals, variadic, pascal, statics, out);
+        }
+        _ => {}
+    }
+}
+fn collect_vararg_float_local_stmt(
+    s: &Stmt, locals: &[LocalSpec],
+    variadic: &std::collections::HashSet<String>,
+    pascal: &std::collections::HashSet<String>,
+    statics: &std::collections::HashSet<String>,
+    out: &mut Vec<(u64, usize)>,
+) {
+    let mut e = |x: &Expr, out: &mut Vec<(u64, usize)>| collect_vararg_float_local_expr(x, locals, variadic, pascal, statics, out);
+    match s {
+        Stmt::Return(x) | Stmt::ExprStmt(x) => e(x, out),
+        Stmt::Assign { value, .. } => e(value, out),
+        Stmt::If { then_branch, else_branch, .. } => {
+            collect_vararg_float_local_stmt(then_branch, locals, variadic, pascal, statics, out);
+            if let Some(eb) = else_branch { collect_vararg_float_local_stmt(eb, locals, variadic, pascal, statics, out); }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } =>
+            collect_vararg_float_local_stmt(body, locals, variadic, pascal, statics, out),
+        Stmt::For { init, step, body, .. } => {
+            collect_vararg_float_local_stmt(init, locals, variadic, pascal, statics, out);
+            collect_vararg_float_local_stmt(step, locals, variadic, pascal, statics, out);
+            collect_vararg_float_local_stmt(body, locals, variadic, pascal, statics, out);
+        }
+        Stmt::Block(ss) => for x in ss { collect_vararg_float_local_stmt(x, locals, variadic, pascal, statics, out); },
+        Stmt::Switch { cases, .. } =>
+            for c in cases { for x in &c.body { collect_vararg_float_local_stmt(x, locals, variadic, pascal, statics, out); } },
+        _ => {}
+    }
+}
 fn collect_call_float_args_stmt(s: &Stmt, out: &mut Vec<(u64, usize)>) {
     match s {
         Stmt::Return(e) | Stmt::ExprStmt(e) => collect_call_float_args_expr(e, out),
@@ -2488,6 +2563,17 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             {
                 float_pool.push((bits, 8));
             }
+        }
+    }
+    // …and the f64 of a known float/double local promoted to a double for a
+    // variadic call (`printf("%f", f)`). Fixtures 2198, 3999.
+    for f in &unit.functions {
+        let mut v: Vec<(u64, usize)> = Vec::new();
+        for s in &f.body {
+            collect_vararg_float_local_stmt(s, &f.locals, &unit.variadic_fns, &pascal_fns, &static_fns, &mut v);
+        }
+        for (bits, w) in v {
+            if !float_pool.contains(&(bits, w)) { float_pool.push((bits, w)); }
         }
     }
     if !float_pool.is_empty() && const_cursor % 2 != 0 {

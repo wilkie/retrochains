@@ -495,6 +495,8 @@ pub(crate) fn emit_function(
     let local_pointee: Vec<usize> = func.locals.iter().map(|l| if l.array_len > 1 { 0 } else { l.pointee_size as usize }).collect();
     let local_pointee_uns: Vec<bool> = func.locals.iter().map(|l| l.pointee_unsigned).collect();
     let local_struct_idxs: Vec<Option<usize>> = func.locals.iter().map(|l| l.struct_idx).collect();
+    let local_float_bits_v: Vec<Option<u64>> = func.locals.iter()
+        .map(|l| if l.is_float { l.float_bits } else { None }).collect();
     let local_float: Vec<usize> = func.locals.iter().map(|l| if l.is_float { l.size } else { 0 }).collect();
     let fpu_live: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
     let fpu_pending_fwait: std::cell::Cell<bool> = std::cell::Cell::new(false);
@@ -737,9 +739,25 @@ pub(crate) fn emit_function(
     // instruction — then no `fwait` is needed after the last float init. True
     // for a coupled `(int)<local>` (→ `call __ftol`) and for a float `return`
     // (→ `fld …; fstp __fac`).
+    // Also true when the first body statement is a variadic call whose first-
+    // pushed argument (the last arg, right-to-left) is a float/double value —
+    // that push leads with an x87 `fld` (`9B …`), so the prologue's last float
+    // init defers its `fwait` into that `9B` rather than emitting `90 9B`.
+    // Fixtures 2198, 3999.
+    let body_starts_float_push = match body.first() {
+        Some(Stmt::ExprStmt(Expr::Call { args, .. } | Expr::CallPtr { args, .. })) => {
+            match args.last() {
+                Some(Expr::FloatLit(..)) => true,
+                Some(Expr::Local(i)) => func.locals.get(*i).map(|l| l.is_float).unwrap_or(false),
+                _ => false,
+            }
+        }
+        _ => false,
+    };
     let body_starts_fp = coupled_float_local.is_some()
         || (func.return_float_width != 0
-            && matches!(body.first(), Some(Stmt::Return(Expr::FloatLit(..)))));
+            && matches!(body.first(), Some(Stmt::Return(Expr::FloatLit(..)))))
+        || body_starts_float_push;
 
     // Initialized-local writes — `int x = K;` → `c7 46 disp lo hi`;
     // `char x = K;` → `c6 46 disp imm8`. Arrays don't get a constant
@@ -901,6 +919,7 @@ pub(crate) fn emit_function(
         unsigned_locals: &local_unsigned,
         local_pointee_sizes: &local_pointee,
         local_pointee_unsigned: &local_pointee_uns,
+        local_float_bits: &local_float_bits_v,
         float_locals: &local_float,
         structs,
         global_struct_idxs,

@@ -56,6 +56,14 @@ pub(crate) fn emit_call_inner(
             emit_push_struct_arg(arg, struct_bytes, locals, out, fixups);
         } else if let Expr::FloatLit(bits, is_double) = arg {
             emit_push_arg_float(*bits, if *is_double { 8 } else { 4 }, out, fixups);
+        } else if is_variadic
+            && let Expr::Local(li) = arg
+            && locals.is_float_local(*li)
+            && let Some(bits) = locals.local_float_bits(*li)
+        {
+            // A known float/double local promotes to a DOUBLE when passed to a
+            // variadic callee — push the f64 from the CONST pool. Fixtures 2198/3999.
+            emit_push_arg_float(bits, 8, out, fixups);
         } else if is_long_param {
             emit_push_arg_long(arg, locals, out, fixups);
         } else {
@@ -80,6 +88,8 @@ pub(crate) fn emit_call_inner(
         let sb = struct_bytes_at(i);
         if sb > 0 { sb }
         else if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } }
+        else if is_variadic && matches!(a, Expr::Local(li)
+            if locals.is_float_local(*li) && locals.local_float_bits(*li).is_some()) { 8 }
         else if push_long_at(i) { 4 } else { 2 }
     }).sum();
     // The single last call before a slide-frame epilogue elides its cleanup
@@ -353,11 +363,11 @@ pub(crate) fn emit_push_arg_float(bits: u64, width: usize, out: &mut Vec<u8>, fi
     out.push(0x9B);
     out.push(op);
     out.push(0x1F);
-    // nop (parity) + fwait, marker on the leading byte.
+    // The FIWRQQ emulator's standalone-fwait patch slot is always the full
+    // 2-byte `90 9B` (nop + fwait), regardless of alignment — the trailing `9B`
+    // fuses onto the next instruction's leading byte. Marker on the leading byte.
     fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
-    if out.len() % 2 == 0 {
-        out.push(0x90); // nop
-    }
+    out.push(0x90); // nop
     out.push(0x9B); // fwait
 }
 /// Push one call argument onto the stack. For Phase 1: constants
