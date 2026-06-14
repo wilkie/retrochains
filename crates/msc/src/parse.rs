@@ -271,10 +271,20 @@ pub(crate) fn parse_struct_brace_group(p: &mut Parser<'_>, sidx: usize, stotal: 
     while !matches!(p.peek(), Some(Tok::RBrace)) {
         let field = &p.structs[sidx].fields[field_idx];
         let field_size = field.size;
+        let field_is_ptr = field.is_pointer;
         while slots.iter().map(GlobalInit::size_bytes).sum::<usize>() < field.byte_off as usize {
             slots.push(GlobalInit::Byte(0));
         }
         match p.peek() {
+            // A bare function name initializing a function-pointer field
+            // (`{two, 1}`) → a `_DATA` word holding OFFSET _two with a FIXUP to
+            // the function's EXTDEF index, like a scalar fn-ptr global. Fixture
+            // 2209.
+            Some(Tok::Ident(s)) if field_is_ptr => {
+                let sym = symbol_name(s);
+                p.bump();
+                slots.push(GlobalInit::FuncAddr(sym));
+            }
             Some(Tok::LBrace) => {
                 p.bump();
                 while !matches!(p.peek(), Some(Tok::RBrace)) {
@@ -6196,7 +6206,15 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     if let Some(k) = index.fold(&init_view) {
                         let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
                             .expect("struct-array field offset fits");
-                        return Ok(Expr::GlobalField { global: idx, byte_off, size });
+                        let field = Expr::GlobalField { global: idx, byte_off, size };
+                        // `ops[K].fn(args)` — call through a function-pointer field
+                        // of a static struct-array element. Fixture 2209.
+                        if matches!(p.peek(), Some(Tok::LParen)) {
+                            p.bump();
+                            let args = parse_call_args(p)?;
+                            return Ok(Expr::CallPtr { target: Box::new(field), args });
+                        }
+                        return Ok(field);
                     }
                     // Runtime index → scale at codegen time.
                     return Ok(Expr::StructArrayField {
