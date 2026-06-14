@@ -1,0 +1,4 @@
+description = "4-node self-ref struct chain"
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

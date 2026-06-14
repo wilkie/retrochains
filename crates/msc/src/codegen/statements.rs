@@ -883,6 +883,8 @@ pub(crate) fn expr_is_pure(e: &Expr) -> bool {
         }
         Expr::CastChar { value, .. } => expr_is_pure(value),
         Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => expr_is_pure(ptr),
+        // A pointer-chain field read is a side-effect-free memory walk.
+        Expr::PtrChainField { base, .. } => expr_is_pure(base),
         Expr::Index { index, .. }
         | Expr::IndexByte { index, .. }
         | Expr::LocalIndex { index, .. }

@@ -585,40 +585,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             });
         }
         Expr::PtrChainField { base, hops, final_off, final_size } => {
-            // Load the base pointer into BX.
-            match base.as_ref() {
-                Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
-                Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
-                Expr::Global(g) => {
-                    out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
-                    let bo = out.len() - 2;
-                    fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
-                }
-                // `arr[i]->...` — load the runtime-indexed struct pointer into BX
-                // (`mov bx,[i]; shl bx,1; mov bx,_arr[bx]`). Fixtures 3541, 2997.
-                Expr::PtrArrayElem { array, index } => {
-                    emit_ptr_array_load_bx(*array, index, locals, out, fixups);
-                }
-                // `a.next->...` — the pointer field of a struct VALUE: load
-                // `[bp+disp+byte_off]` into BX. Fixtures 1928, 1419.
-                Expr::LocalField { local, byte_off, .. } => {
-                    let d = locals.disp(*local) + *byte_off as i16;
-                    out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d);
-                }
-                Expr::GlobalField { global, byte_off, .. } => {
-                    let bo = out.len();
-                    out.push(0x8B); out.push(0x1E); out.extend_from_slice(&byte_off.to_le_bytes());
-                    fixups.push(Fixup { body_offset: bo + 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
-                }
-                other => panic!("unsupported ptr-chain base: {other:?}"),
-            }
-            // Walk each hop: mov bx,[bx+hop].
-            let mov_bx_off = |out: &mut Vec<u8>, off: u16| {
-                if off == 0 { out.extend_from_slice(&[0x8B, 0x1F]); }
-                else if off < 128 { out.push(0x8B); out.push(0x5F); out.push(off as u8); }
-                else { out.push(0x8B); out.push(0x9F); out.extend_from_slice(&off.to_le_bytes()); }
-            };
-            for &h in hops { mov_bx_off(out, h); }
+            emit_chain_ptr_to_bx(base, hops, locals, out, fixups);
             // Final field read at [bx + final_off]. final_off is interpreted as a
             // SIGNED i16 so a negative displacement (`(p-1)->x` → [bx-4]) uses the
             // disp8 form. Fixture 3251.
@@ -1109,16 +1076,10 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     });
                     out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
                 }
-                // `*(&local)` — `lea bx,[bp-disp]; mov ax,[bx]`. When AX still
-                // holds `&local` (a chain's deepest pointer reusing the setup
-                // lea), use `mov bx,ax` instead of re-lea'ing. Fixture 1928.
+                // `*(&local)` — `lea bx,[bp-disp]; mov ax,[bx]`.
                 Expr::AddrOfLocal(li) => {
                     let disp = locals.disp(*li);
-                    if ax_holds_addr_of_local(out, disp, locals.last_branch_barrier.get()) {
-                        out.extend_from_slice(&[0x8B, 0xD8]); // mov bx,ax
-                    } else {
-                        out.push(0x8D); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
-                    }
+                    out.push(0x8D); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
                     out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
                 }
                 Expr::Local(i) => {
@@ -2123,36 +2084,6 @@ fn ax_holds_slot_over_imm_stores(out: &[u8], disp: i16, barrier: usize) -> bool 
 /// which don't touch AX). Lets `return k` reuse a live constant instead of
 /// re-materializing it (fixtures 901/902). The scan finds the actual establishing
 /// instruction and checks its value, so a different AX value rejects cleanly.
-/// Whether AX provably still holds `&local` (the result of `lea ax,[bp+disp]`),
-/// looking past trailing AX-preserving stores (a struct's field stores after the
-/// address was lea'd into AX). Lets `*(&c)` reuse the live address with
-/// `mov bx,ax` instead of re-lea'ing. Fixture 1928 (the self-ref chain's
-/// deepest deref reuses the setup `lea ax,[bp-c]`).
-pub(crate) fn ax_holds_addr_of_local(out: &[u8], disp: i16, barrier: usize) -> bool {
-    let mut lea = vec![0x8D, bp_modrm(0x46, disp)];
-    push_bp_disp(&mut lea, disp);
-    let mut n = out.len();
-    loop {
-        if n >= lea.len() && out[n - lea.len()..n] == lea[..] {
-            return n - lea.len() >= barrier;
-        }
-        // Strip one trailing AX-preserving store (to ANOTHER slot/global).
-        let strip = if n >= 3 && out[n - 3] == 0x89 && (out[n - 2] == 0x46 || out[n - 2] == 0x56) {
-            3 // mov [bp+d8],ax / dx
-        } else if n >= 4 && out[n - 4] == 0x89 && (out[n - 3] == 0x86 || out[n - 3] == 0x96 || out[n - 3] == 0x16) {
-            4 // mov [bp+d16],ax/dx / mov [o16],dx
-        } else if n >= 3 && out[n - 3] == 0xA3 {
-            3 // mov [o16],ax
-        } else if n >= 5 && out[n - 5] == 0xC7 && out[n - 4] == 0x46 {
-            5 // mov word [bp+d8],imm16
-        } else if n >= 6 && out[n - 6] == 0xC7 && (out[n - 5] == 0x86 || out[n - 5] == 0x06) {
-            6 // mov word [bp+d16],imm16 / mov word [o16],imm16
-        } else {
-            return false;
-        };
-        n -= strip;
-    }
-}
 pub(crate) fn ax_holds_const(out: &[u8], k: i32, barrier: usize) -> bool {
     let target = (k as u32 & 0xFFFF) as u16;
     let mut n = out.len();
@@ -2515,6 +2446,52 @@ fn simple_word_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
             Some(locals.disp(*i))
         }
         _ => None,
+    }
+}
+/// Load a pointer-chain's pointer into BX (the base pointer + each `->` hop),
+/// stopping before the final field read. Shared by the [`Expr::PtrChainField`]
+/// value emit and the binop-RHS chain add (fixture 4179).
+pub(crate) fn emit_chain_ptr_to_bx(base: &Expr, hops: &[u16], locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match base {
+        Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
+        Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
+        Expr::Global(g) => {
+            out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+            let bo = out.len() - 2;
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+        }
+        // `arr[i]->...` — load the runtime-indexed struct pointer into BX
+        // (`mov bx,[i]; shl bx,1; mov bx,_arr[bx]`). Fixtures 3541, 2997.
+        Expr::PtrArrayElem { array, index } => {
+            emit_ptr_array_load_bx(*array, index, locals, out, fixups);
+        }
+        // `a.next->...` — the pointer field of a struct VALUE: load
+        // `[bp+disp+byte_off]` into BX. When AX still holds that field's value
+        // (the chain's root pointer was the last one stored, e.g. `b.next=&c`
+        // then `a.next->next->v`), reuse `mov bx,ax`. Fixtures 1928 (reuse),
+        // 4179 (no reuse — a deeper field was stored after), 1419.
+        Expr::LocalField { local, byte_off, .. } => {
+            let d = locals.disp(*local) + *byte_off as i16;
+            let load = { let mut v = vec![0x8B, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+            let store = { let mut v = vec![0x89, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+            if ax_holds_word_operand(out, &load, &store, locals.last_branch_barrier.get()) {
+                out.extend_from_slice(&[0x8B, 0xD8]); // mov bx,ax
+            } else {
+                out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d);
+            }
+        }
+        Expr::GlobalField { global, byte_off, .. } => {
+            let bo = out.len();
+            out.push(0x8B); out.push(0x1E); out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo + 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
+        }
+        other => panic!("unsupported ptr-chain base: {other:?}"),
+    }
+    // Walk each hop: mov bx,[bx+hop].
+    for &off in hops {
+        if off == 0 { out.extend_from_slice(&[0x8B, 0x1F]); }
+        else if off < 128 { out.push(0x8B); out.push(0x5F); out.push(off as u8); }
+        else { out.push(0x8B); out.push(0x9F); out.extend_from_slice(&off.to_le_bytes()); }
     }
 }
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
@@ -5195,6 +5172,7 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
                     | Expr::Call { .. } | Expr::Ternary { .. } | Expr::Seq { .. }
                     | Expr::GlobalField { .. } | Expr::LocalField { .. }
                     | Expr::DerefLocalField { .. } | Expr::DerefParamField { .. }
+                    | Expr::PtrChainField { .. }
                     | Expr::LocalIndex { .. } | Expr::Index { .. })
     {
         emit_expr_to_ax(left, locals, out, fixups);
@@ -5366,6 +5344,24 @@ pub(crate) fn emit_binop_right(op: BinOp, right: &Expr, locals: &Locals<'_>, out
             }
         }
         out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
+        return;
+    }
+    // `<ax> op <ptr-chain field read>`: load the chain pointer into BX, then
+    // `op ax,[bx+final]` — no push/swap, since the chain reads memory directly.
+    // Fixture 4179 (`...->v + ...->next->v`, two chain terms summed).
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Expr::PtrChainField { base, hops, final_off, final_size: 2 } = right
+    {
+        emit_chain_ptr_to_bx(base, hops, locals, out, fixups);
+        let opcode = match op {
+            BinOp::Add => 0x03u8, BinOp::Sub => 0x2B,
+            BinOp::BitAnd => 0x23, BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33,
+            _ => unreachable!(),
+        };
+        let soff = *final_off as i16;
+        if soff == 0 { out.push(opcode); out.push(0x07); }
+        else if (-128..=127).contains(&soff) { out.push(opcode); out.push(0x47); out.push(soff as i8 as u8); }
+        else { out.push(opcode); out.push(0x87); out.extend_from_slice(&final_off.to_le_bytes()); }
         return;
     }
     // Generic fallback for complex RHS (Call, Ternary, deref...):

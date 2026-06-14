@@ -1,6 +1,49 @@
 use super::*;
 
 impl<'a> super::FunctionEmitter<'a> {
+    /// Resolve a struct field on a (possibly self-referential, name-only) pointee
+    /// type, looking the tag up in the struct table when its fields are empty.
+    fn resolve_pointee_field(&self, pointee: &Type, field: &str) -> Option<(u16, Type)> {
+        let resolved = match pointee {
+            Type::Struct { name: Some(tag), fields, .. } if fields.is_empty() =>
+                self.lookup_struct_by_tag(tag).unwrap_or_else(|| pointee.clone()),
+            _ => pointee.clone(),
+        };
+        resolved.field(field)
+    }
+    /// Load the POINTER VALUE of an arrow chain `..->f` into BX and return the
+    /// struct type it points to. Recurses to any depth: `a.next->next->next`
+    /// emits `mov bx,[a.next]; mov bx,[bx+nb]; mov bx,[bx+nc]`. The chain bottoms
+    /// out at an lvalue pointer field (loaded with `mov bx,[addr]`). Fixtures
+    /// 1928 (2-deep) and the deeper self-ref chains.
+    fn emit_arrow_chain_ptr_to_bx(&mut self, e: &Expr) -> Option<Type> {
+        let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Arrow } = &e.kind
+        else { return None };
+        if matches!(&base.kind, ExprKind::Member { kind: crate::ast::MemberKind::Arrow, .. }) {
+            // `base` is itself an arrow chain — load it into BX, then step through
+            // `base->field` (a pointer field) with one more `mov bx,[bx+off]`.
+            let base_pointee = self.emit_arrow_chain_ptr_to_bx(base)?;
+            let (off, fty) = self.resolve_pointee_field(&base_pointee, field)?;
+            let _ = write!(self.out, "\tmov\tbx,word ptr [bx+{off}]\r\n");
+            fty.pointee().cloned()
+        } else {
+            // `base` is an lvalue pointer field (`a.next`, a static struct ptr) —
+            // load its value, then step to `base->field`.
+            let (name, total_off, ty) = self.try_lvalue_chain_addr(base)?;
+            let base_pointee = ty.pointee()?;
+            let (off, fty) = self.resolve_pointee_field(base_pointee, field)?;
+            let addr = if self.globals.contains(&name) {
+                if total_off == 0 { format!("DGROUP:_{name}") } else { format!("DGROUP:_{name}+{total_off}") }
+            } else if let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) {
+                bp_addr(i16::try_from(i32::from(base_bp) + total_off as i32).unwrap_or(i16::MAX))
+            } else {
+                return None;
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr {addr}\r\n");
+            let _ = write!(self.out, "\tmov\tbx,word ptr [bx+{off}]\r\n");
+            fty.pointee().cloned()
+        }
+    }
     pub(crate) fn resolve_operand_source(&mut self, e: &Expr) -> OperandSource {
         if let Some(v) = try_const_eval(e) {
             return OperandSource::Immediate(v);
@@ -611,6 +654,18 @@ impl<'a> super::FunctionEmitter<'a> {
                         "\tmov\tbx,word ptr [bx+{}]\r\n",
                         inner_off,
                     );
+                    return OperandSource::DerefRegOffset {
+                        reg: crate::codegen::locals::Reg::Bx,
+                        offset: field_off as i16,
+                    };
+                }
+                // General N-arrow chain (3+ deep): recursively load the chain
+                // pointer into BX, then deref the final field. The 1- and 2-deep
+                // cases above return early; this catches deeper self-ref chains.
+                if matches!(&base.kind, ExprKind::Member { kind: crate::ast::MemberKind::Arrow, .. })
+                    && let Some(pointee) = self.emit_arrow_chain_ptr_to_bx(base)
+                    && let Some((field_off, _)) = self.resolve_pointee_field(&pointee, field)
+                {
                     return OperandSource::DerefRegOffset {
                         reg: crate::codegen::locals::Reg::Bx,
                         offset: field_off as i16,
