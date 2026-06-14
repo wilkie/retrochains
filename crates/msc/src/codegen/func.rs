@@ -159,6 +159,12 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             Expr::BinOp { op: BinOp::Add, .. }
                 if crate::codegen::expr::char_array_chain(e, inits)
                     .is_some_and(|(_, offs)| offs.len() >= 5) => true,
+            // `*a ==/!= *b` (two char-pointer derefs) compares bytes with the
+            // right pointer loaded into SI (see the cond.rs byte-compare path).
+            // Fixture 4163.
+            Expr::BinOp { op: BinOp::Eq | BinOp::Ne, left, right }
+                if matches!(left.as_ref(), Expr::DerefByte { ptr } if matches!(ptr.as_ref(), Expr::Param(_) | Expr::Local(_)))
+                    && matches!(right.as_ref(), Expr::DerefByte { ptr } if matches!(ptr.as_ref(), Expr::Param(_) | Expr::Local(_))) => true,
             Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
             Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
             // `ops[i](args)` — a runtime-indexed fn-ptr array call scales the

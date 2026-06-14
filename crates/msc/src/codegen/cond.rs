@@ -1240,6 +1240,29 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
                 _ => unreachable!(),
             }
         }
+        // `*a OP *b` for two char-pointer derefs (`*charptr ==/!= *charptr`):
+        // MSC compares the bytes directly rather than widening both to int —
+        // `mov bx,[a]; mov si,[b]; mov al,[si]; cmp [bx],al` (left ptr → BX,
+        // right ptr → SI). Result = *a - *b → standard jcc. SI use is reflected
+        // in body_needs_si so the prologue saves it. Fixture 4163 (and the
+        // post-loop `return *a==*b` of the strcmp idiom, 2203). Restricted to
+        // Eq/Ne (the byte ZF is what those read).
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::DerefByte { ptr: lp }, right: Expr::DerefByte { ptr: rp } }
+            if matches!(lp.as_ref(), Expr::Param(_) | Expr::Local(_))
+                && matches!(rp.as_ref(), Expr::Param(_) | Expr::Local(_)) =>
+        {
+            let disp = |e: &Expr| match e {
+                Expr::Param(i) => param_disp(*i),
+                Expr::Local(i) => locals.disp(*i),
+                _ => unreachable!(),
+            };
+            let ld = disp(lp.as_ref());
+            let rd = disp(rp.as_ref());
+            out.push(0x8B); out.push(bp_modrm(0x5E, ld)); push_bp_disp(out, ld); // mov bx,[bp+a]
+            out.push(0x8B); out.push(bp_modrm(0x76, rd)); push_bp_disp(out, rd); // mov si,[bp+b]
+            out.extend_from_slice(&[0x8A, 0x04]); // mov al,[si]   (al = *b)
+            out.extend_from_slice(&[0x38, 0x07]); // cmp [bx],al   (*a - *b)
+        }
         // Generic fallback for two-sided non-literal comparisons:
         // evaluate right into AX, save to BX, evaluate left into AX, cmp ax, bx.
         // Result = left - right → standard jcc semantics.
