@@ -762,7 +762,15 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
 
 fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
     match stmt {
-        Stmt::Return(e) => prop_expr(e, cp),
+        Stmt::Return(e) => {
+            prop_expr(e, cp);
+            // A multi-hop pointer-chain term resolved to `*(&local)` evaluates
+            // first in a `return`-sum so it reuses the live setup address (the
+            // BinOp prop arm bypasses prop_expr's tail reorder). Fixture 1928.
+            if matches!(e, Expr::BinOp { op: BinOp::Add, .. }) {
+                reorder_deref_addrof_first(e);
+            }
+        }
         Stmt::ExprStmt(e) => {
             prop_expr(e, cp);
         }
@@ -2181,6 +2189,39 @@ fn reorder_mul_first(e: &mut Expr) -> bool {
     *e = acc;
     true
 }
+/// In a `+` chain, a `*(&local)` term (a multi-hop pointer chain resolved to a
+/// deref of a live setup address — fixture 1928) is evaluated FIRST, so it can
+/// reuse the address still live in AX before the other terms clobber it.
+pub(crate) fn reorder_deref_addrof_first(e: &mut Expr) -> bool {
+    fn flatten<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            flatten(left, out);
+            out.push(right);
+        } else {
+            out.push(e);
+        }
+    }
+    let mut ops: Vec<&Expr> = Vec::new();
+    flatten(e, &mut ops);
+    if ops.len() < 2 { return false; }
+    let is_da = |x: &Expr| matches!(x,
+        Expr::DerefWord { ptr } | Expr::DerefByte { ptr }
+            if matches!(ptr.as_ref(), Expr::AddrOfLocal(_)));
+    let n = ops.iter().filter(|o| is_da(o)).count();
+    if n == 0 || n == ops.len() { return false; }
+    if !ops.iter().all(|o| crate::codegen::statements::expr_is_pure(o)) { return false; }
+    let mut order: Vec<usize> = (0..ops.len()).collect();
+    order.sort_by_key(|&i| !is_da(ops[i]));
+    if order.iter().enumerate().all(|(pos, &i)| pos == i) { return false; }
+    let reordered: Vec<Expr> = order.iter().map(|&i| ops[i].clone()).collect();
+    let mut it = reordered.into_iter();
+    let mut acc = it.next().unwrap();
+    for nxt in it {
+        acc = Expr::BinOp { op: BinOp::Add, left: Box::new(acc), right: Box::new(nxt) };
+    }
+    *e = acc;
+    true
+}
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     // Reorder a struct-field `+` chain (nested members first) before the rest of
     // const-prop processes it; idempotent, so sub-chain recursion is a no-op.
@@ -2978,6 +3019,24 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                         *e = Expr::GlobalField { global: g, byte_off: *final_off, size: *final_size };
                     }
                     AliasTarget::String(_) => {}
+                }
+            } else if !hops.is_empty()
+                && *final_off == 0 && *final_size == 2
+                && let Expr::LocalField { local, byte_off, .. } = base.as_ref()
+            {
+                // Multi-hop chain `a.next->next->v`: resolve EVERY hop through the
+                // pointer-field alias chain to a final local struct, then keep the
+                // deref of its ADDRESS `*(&c)` — MSC does NOT fold a 2+-hop chain
+                // to the element slot; it reuses the live setup address. Fixture 1928.
+                let mut cur = cp.elem_ptr_alias.get(&(*local, *byte_off)).copied();
+                for &h in hops.iter() {
+                    match cur {
+                        Some(AliasTarget::Local(x)) => cur = cp.elem_ptr_alias.get(&(x, h)).copied(),
+                        _ => { cur = None; break; }
+                    }
+                }
+                if let Some(AliasTarget::Local(x)) = cur {
+                    *e = Expr::DerefWord { ptr: Box::new(Expr::AddrOfLocal(x)) };
                 }
             }
         }

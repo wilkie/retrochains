@@ -1109,10 +1109,16 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     });
                     out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
                 }
-                // `*(&local)` — `lea bx,[bp-disp]; mov ax,[bx]`.
+                // `*(&local)` — `lea bx,[bp-disp]; mov ax,[bx]`. When AX still
+                // holds `&local` (a chain's deepest pointer reusing the setup
+                // lea), use `mov bx,ax` instead of re-lea'ing. Fixture 1928.
                 Expr::AddrOfLocal(li) => {
                     let disp = locals.disp(*li);
-                    out.push(0x8D); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+                    if ax_holds_addr_of_local(out, disp, locals.last_branch_barrier.get()) {
+                        out.extend_from_slice(&[0x8B, 0xD8]); // mov bx,ax
+                    } else {
+                        out.push(0x8D); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+                    }
                     out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
                 }
                 Expr::Local(i) => {
@@ -2117,6 +2123,36 @@ fn ax_holds_slot_over_imm_stores(out: &[u8], disp: i16, barrier: usize) -> bool 
 /// which don't touch AX). Lets `return k` reuse a live constant instead of
 /// re-materializing it (fixtures 901/902). The scan finds the actual establishing
 /// instruction and checks its value, so a different AX value rejects cleanly.
+/// Whether AX provably still holds `&local` (the result of `lea ax,[bp+disp]`),
+/// looking past trailing AX-preserving stores (a struct's field stores after the
+/// address was lea'd into AX). Lets `*(&c)` reuse the live address with
+/// `mov bx,ax` instead of re-lea'ing. Fixture 1928 (the self-ref chain's
+/// deepest deref reuses the setup `lea ax,[bp-c]`).
+pub(crate) fn ax_holds_addr_of_local(out: &[u8], disp: i16, barrier: usize) -> bool {
+    let mut lea = vec![0x8D, bp_modrm(0x46, disp)];
+    push_bp_disp(&mut lea, disp);
+    let mut n = out.len();
+    loop {
+        if n >= lea.len() && out[n - lea.len()..n] == lea[..] {
+            return n - lea.len() >= barrier;
+        }
+        // Strip one trailing AX-preserving store (to ANOTHER slot/global).
+        let strip = if n >= 3 && out[n - 3] == 0x89 && (out[n - 2] == 0x46 || out[n - 2] == 0x56) {
+            3 // mov [bp+d8],ax / dx
+        } else if n >= 4 && out[n - 4] == 0x89 && (out[n - 3] == 0x86 || out[n - 3] == 0x96 || out[n - 3] == 0x16) {
+            4 // mov [bp+d16],ax/dx / mov [o16],dx
+        } else if n >= 3 && out[n - 3] == 0xA3 {
+            3 // mov [o16],ax
+        } else if n >= 5 && out[n - 5] == 0xC7 && out[n - 4] == 0x46 {
+            5 // mov word [bp+d8],imm16
+        } else if n >= 6 && out[n - 6] == 0xC7 && (out[n - 5] == 0x86 || out[n - 5] == 0x06) {
+            6 // mov word [bp+d16],imm16 / mov word [o16],imm16
+        } else {
+            return false;
+        };
+        n -= strip;
+    }
+}
 pub(crate) fn ax_holds_const(out: &[u8], k: i32, barrier: usize) -> bool {
     let target = (k as u32 & 0xFFFF) as u16;
     let mut n = out.len();
