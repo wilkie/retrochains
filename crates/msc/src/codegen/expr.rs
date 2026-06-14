@@ -2208,10 +2208,30 @@ pub(crate) fn is_ternary_select_operand(cond: &Expr, then_arm: &Expr, else_arm: 
 }
 /// True when both exprs are the same simple variable read (same Param or same
 /// Local index). Used by the ternary select-operand idiom (no PartialEq on Expr).
+/// Structural equality for a simple, side-effect-free index/leaf operand.
+fn same_simple(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::IntLit(i), Expr::IntLit(j)) => i == j,
+        (Expr::Param(i), Expr::Param(j)) => i == j,
+        (Expr::Local(i), Expr::Local(j)) => i == j,
+        (Expr::Global(i), Expr::Global(j)) => i == j,
+        _ => false,
+    }
+}
 fn same_var(a: &Expr, b: &Expr) -> bool {
     match (a, b) {
         (Expr::Param(i), Expr::Param(j)) => i == j,
         (Expr::Local(i), Expr::Local(j)) => i == j,
+        // Array-element reads `arr[i] + arr[i]` (same array, identical pure
+        // index) fold to a single load + `shl ax,1` / `imul ax`, just like a
+        // scalar. The index must be side-effect-free (a bare var/const) so the
+        // single evaluation is faithful. Fixture 4155 (`data[i]+data[i]`).
+        (Expr::Index { array: a1, index: i1 }, Expr::Index { array: a2, index: i2 })
+        | (Expr::IndexByte { array: a1, index: i1 }, Expr::IndexByte { array: a2, index: i2 })
+            => a1 == a2 && same_simple(i1, i2),
+        (Expr::LocalIndex { local: a1, index: i1 }, Expr::LocalIndex { local: a2, index: i2 })
+        | (Expr::LocalIndexByte { local: a1, index: i1 }, Expr::LocalIndexByte { local: a2, index: i2 })
+            => a1 == a2 && same_simple(i1, i2),
         _ => false,
     }
 }
