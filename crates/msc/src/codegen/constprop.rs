@@ -833,6 +833,19 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     AliasTarget::Global(g) => AssignTarget::Global(g),
                     AliasTarget::String(_) => unreachable!(),
                 };
+                // MSC's array-of-pointers alias is SINGLE-USE: only the FIRST
+                // `*arr[K]` store is resolved to a direct store; later ones route
+                // through the pointer (oracle-confirmed by swapping/repeating the
+                // deref). It also treats even the resolved store conservatively for
+                // value-tracking — every OTHER address-taken known value is dropped
+                // (the store could alias them) and all elem aliases are consumed.
+                // The resolved target's new value is re-established by the normal
+                // store path below. Fixtures 2470, 1565.
+                cp.l_known.clear();
+                cp.g_known.clear();
+                cp.la_known.clear();
+                cp.ga_known.clear();
+                cp.elem_ptr_alias.clear();
             }
             // `p[K] = ...` (constant K≠0) where p aliases a base array → a direct
             // element store `base[K] = ...`. byte_off is already in pointee bytes.
@@ -1178,6 +1191,16 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             {
                 cp.g_known.clear();
                 cp.ga_known.clear();
+            }
+            // A store through an unresolved `*arr[K]` (the alias was already
+            // consumed — see the single-use rule above) routes through the
+            // pointer and can hit any address-taken LOCAL, so drop local known
+            // values too. MSC reloads both operands after the second `*arr[J]`
+            // store in fixture 2470. Scoped to DerefExpr (the array-element form)
+            // so scalar-pointer derefs keep their ptr_addr-tracked locals.
+            if matches!(target, AssignTarget::DerefExpr { .. }) {
+                cp.l_known.clear();
+                cp.la_known.clear();
             }
             // A call in the assigned value clobbers ALL known values — handled
             // by the statement-boundary `kill_if_called` (which also marks the

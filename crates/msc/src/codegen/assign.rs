@@ -321,7 +321,24 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             // bx,ax`), then store the value at `[bx]`. A constant value uses the
             // immediate-store form; otherwise the value is computed into AX (the
             // pointer is already parked in BX). Fixture 1322.
-            emit_expr_to_ax(&ptr, locals, out, fixups);
+            // When the pointer is an array-of-pointers element `arr[K]` whose
+            // value is STILL LIVE in AX (the `mov [arr+K],ax` that established it
+            // is reachable past any AX-preserving immediate stores), reuse it via
+            // `mov bx,ax` instead of reloading the slot. Fixture 2470's second
+            // store `*arr[1]=200` after a resolved `*arr[0]=100`.
+            let reused = if let Expr::LocalIndex { local, index } = ptr.as_ref()
+                && let Some(k) = index.fold(locals.inits)
+                && let Ok(disp) = i16::try_from(locals.disp(*local) as i64 + k as i64 * 2)
+            {
+                let load = { let mut v = vec![0x8B, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+                let store = { let mut v = vec![0x89, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+                crate::codegen::expr::ax_holds_word_operand(out, &load, &store, locals.last_branch_barrier.get())
+            } else {
+                false
+            };
+            if !reused {
+                emit_expr_to_ax(&ptr, locals, out, fixups);
+            }
             out.extend_from_slice(&[0x8B, 0xD8]); // mov bx,ax
             if let Some(v) = value.fold(locals.inits) {
                 if is_byte {

@@ -1885,6 +1885,14 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
             // inc/dec word [o16] (global step) — same rule for a global slot.
             if store_self.len() == 3 && store_self[0] == 0xA3 && out[n - 2..n] == store_self[1..] { return false; }
             4
+        } else if n >= 5 && out[n - 5] == 0xC7 && out[n - 4] == 0x46
+            && !(store_self.len() == 3 && out[n - 3] == store_self[2])
+        {
+            // mov word [bp+d8], imm16 (C7 46 d iw) — an immediate store to ANOTHER
+            // bp-relative slot. It doesn't touch AX, so AX still holds the operand
+            // (e.g. a resolved `*arr[0]=100` between `arr[1]=&b` and `*arr[1]`,
+            // fixture 2470). Opaque when it targets the operand's own slot.
+            5
         } else {
             return false;
         };
