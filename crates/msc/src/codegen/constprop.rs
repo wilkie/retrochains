@@ -448,6 +448,25 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
 }
 
 fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
+    // `while (g) { ...; g = g ± 1; }` where the global g is known nonzero at
+    // entry: the body runs at least once, so MSC lowers it to do-while form and
+    // fuses the body's trailing `dec/inc [g]` flag-set into the loop-back jcc
+    // (no entry jmp, no cmp). The local analog is handled at emit time via
+    // entry_inits; a global needs this AST rewrite because emit can't see the
+    // global's entry value. Gated to the flag-fusing shape so we don't reshape
+    // loops MSC would keep in while form. Fixture 922.
+    let do_while_rewrite = if let Stmt::While { cond: Cond::Truthy(Expr::Global(gi)), body } = &*stmt {
+        cp.g_known.get(gi).is_some_and(|&v| v != 0)
+            && crate::codegen::statements::body_sets_flags_for_cond(
+                body, &Cond::Truthy(Expr::Global(*gi)))
+    } else {
+        false
+    };
+    if do_while_rewrite
+        && let Stmt::While { cond, body } = std::mem::replace(stmt, Stmt::Empty)
+    {
+        *stmt = Stmt::DoWhile { body, cond };
+    }
     match stmt {
         Stmt::Return(e) => prop_expr(e, cp),
         Stmt::ExprStmt(e) => {

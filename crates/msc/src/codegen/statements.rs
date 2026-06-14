@@ -5177,15 +5177,26 @@ pub(crate) fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
         Stmt::Block(stmts) if !stmts.is_empty() => stmts.last().unwrap(),
         other => other,
     };
-    let Stmt::Assign { target: AssignTarget::Local(local_idx), value } = body else { return false };
-    let Cond::Truthy(Expr::Local(cond_idx)) = cond else { return false };
-    if local_idx != cond_idx {
+    let Stmt::Assign { target, value } = body else { return false };
+    // The flag-setting store and the cond must name the same storage — either a
+    // local decrement/increment tested by `while (l)`, or the global analog
+    // tested by `while (g)` (fixture 922, reached via the do-while rewrite).
+    let lhs_is_target = |e: &Expr| match (target, e) {
+        (AssignTarget::Local(i), Expr::Local(j)) => i == j,
+        (AssignTarget::Global(i), Expr::Global(j)) => i == j,
+        _ => false,
+    };
+    let target_matches_cond = match (target, cond) {
+        (AssignTarget::Local(i), Cond::Truthy(Expr::Local(j))) => i == j,
+        (AssignTarget::Global(i), Cond::Truthy(Expr::Global(j))) => i == j,
+        _ => return false,
+    };
+    if !target_matches_cond {
         return false;
     }
     let Expr::BinOp { op, left, right } = value else { return false };
     if !matches!(op, BinOp::Add | BinOp::Sub) {
         return false;
     }
-    matches!(left.as_ref(), Expr::Local(li) if li == local_idx)
-        && matches!(right.as_ref(), Expr::IntLit(1))
+    lhs_is_target(left.as_ref()) && matches!(right.as_ref(), Expr::IntLit(1))
 }
