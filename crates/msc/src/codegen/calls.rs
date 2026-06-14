@@ -63,7 +63,11 @@ pub(crate) fn emit_call_inner(
         {
             // A known float/double local promotes to a DOUBLE when passed to a
             // variadic callee — push the f64 from the CONST pool. Fixtures 2198/3999.
-            emit_push_arg_float(bits, 8, out, fixups);
+            // When the prologue left this `double`'s value live on st(0) (coupled
+            // store via `fst`), reuse it instead of reloading. Fixture 2201.
+            let reuse_st0 = locals.fpu_live.get() == Some(*li);
+            if reuse_st0 { locals.fpu_live.set(None); }
+            emit_push_arg_float_inner(bits, 8, reuse_st0, out, fixups);
         } else if is_long_param {
             emit_push_arg_long(arg, locals, out, fixups);
         } else {
@@ -345,15 +349,23 @@ pub(crate) fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<
 /// SP stays low after the call; the caller's WithSlide epilogue (`mov sp,bp`)
 /// reclaims it — there is no `add sp` cleanup.
 pub(crate) fn emit_push_arg_float(bits: u64, width: usize, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    emit_push_arg_float_inner(bits, width, false, out, fixups);
+}
+/// As `emit_push_arg_float`, but when `reuse_st0` the value is already on st(0)
+/// (the prologue stored it with `fst` — fixture 2201), so the leading `fld` is
+/// omitted and the push reuses the live register.
+pub(crate) fn emit_push_arg_float_inner(bits: u64, width: usize, reuse_st0: bool, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
     // fld <width> [$T]
-    fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
-    out.push(0x9B);
-    out.push(op);
-    out.push(0x06);
-    let body_offset = out.len() - 1; // the 06 modrm; off16 at +1
-    out.extend_from_slice(&[0x00, 0x00]);
-    fixups.push(Fixup { body_offset, kind: FixupKind::FloatLoad { bits, width } });
+    if !reuse_st0 {
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+        out.push(0x9B);
+        out.push(op);
+        out.push(0x06);
+        let body_offset = out.len() - 1; // the 06 modrm; off16 at +1
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset, kind: FixupKind::FloatLoad { bits, width } });
+    }
     // sub sp, width
     out.extend_from_slice(&[0x83, 0xEC, width as u8]);
     // mov bx, sp

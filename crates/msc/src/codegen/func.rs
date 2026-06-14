@@ -735,6 +735,17 @@ pub(crate) fn emit_function(
         (Some(r), Some(l)) if r == l => Some(r),
         _ => None,
     };
+    // A `double` local (size 8 — NOT a `float` promoted to double, which needs a
+    // separate 8-byte pool reload) that is the FIRST-pushed (last, right-to-left)
+    // argument of an opening variadic call is coupled to that push: the prologue
+    // stores it with `fst` (keep st(0) live) and the vararg push reuses st(0)
+    // instead of reloading with `fld`. Fixture 2201 (`double d; printf("%f",…,d)`).
+    let vararg_coupled_local = match (last_float_init, body.first()) {
+        (Some(l), Some(Stmt::ExprStmt(Expr::Call { args, .. } | Expr::CallPtr { args, .. })))
+            if func.locals.get(l).map(|x| x.size == 8).unwrap_or(false)
+                && matches!(args.last(), Some(Expr::Local(i)) if *i == l) => Some(l),
+        _ => None,
+    };
     // Whether the first op after the prologue float inits is itself an FP
     // instruction — then no `fwait` is needed after the last float init. True
     // for a coupled `(int)<local>` (→ `call __ftol`) and for a float `return`
@@ -777,7 +788,7 @@ pub(crate) fn emit_function(
             if let Some(bits) = spec.float_bits {
                 let disp = local_disps[i];
                 let op = if spec.size == 4 { 0xD9u8 } else { 0xDDu8 };
-                let coupled = coupled_float_local == Some(i);
+                let coupled = coupled_float_local == Some(i) || vararg_coupled_local == Some(i);
                 // Shared-load peephole: an adjacent preceding float local with
                 // the same (bits, width) already loaded the value onto st(0)
                 // (it used `fst`), so this store reuses it without a new `fld`.
