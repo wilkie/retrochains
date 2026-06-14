@@ -2092,6 +2092,23 @@ fn emit_long_high_word_to_ax(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, f
             out.extend_from_slice(&2u16.to_le_bytes());
             fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *j } });
         }
+        // Long struct/union field high word: `[base + field_off + 2]`. The union
+        // case (`u.whole >> 16` over an `int lo; int hi` overlay) reads `[bp-2]`,
+        // the field's upper word. Fixture 2324.
+        Expr::LocalField { local, byte_off, .. } => {
+            let d = locals.disp(*local) + *byte_off as i16 + 2;
+            out.push(0x8B); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+        }
+        Expr::ParamField { param, byte_off, .. } => {
+            let d = param_disp(*param) + *byte_off as i16 + 2;
+            out.push(0x8B); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+        }
+        Expr::GlobalField { global, byte_off, .. } => {
+            out.push(0xA1); // mov ax, [g + field_off + 2]
+            let off = out.len();
+            out.extend_from_slice(&(*byte_off + 2).to_le_bytes());
+            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
+        }
         _ => unreachable!("long_operand gates these forms"),
     }
 }
