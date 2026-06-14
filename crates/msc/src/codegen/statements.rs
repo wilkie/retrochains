@@ -896,6 +896,48 @@ pub(crate) fn expr_is_pure(e: &Expr) -> bool {
         _ => false,
     }
 }
+/// Whether an expression contains a multiply that MSC lowers to a hardware
+/// `imul` rather than a strength-reduced shift/add chain. `x * K` reduces to
+/// shifts when K is a power of two, 1..=15, or 256; a larger non-power-of-two
+/// constant multiplier emits `imul`. (Runtime×runtime is conservatively NOT
+/// flagged — it could be a long multiply, a helper call, not imul.) Used to
+/// decide whether the LAST cdecl call's `add sp,N` cleanup folds into the
+/// epilogue: it does NOT when an imul follows the call (fixture 1818).
+pub(crate) fn expr_has_imul(e: &Expr) -> bool {
+    fn mul_is_imul(left: &Expr, right: &Expr) -> bool {
+        let shift_ok = |k: i32| k == 256 || (1..=15).contains(&k) || (k > 0 && (k as u32).is_power_of_two());
+        match (left, right) {
+            (_, Expr::IntLit(k)) | (Expr::IntLit(k), _) => !shift_ok(*k),
+            _ => false,
+        }
+    }
+    match e {
+        Expr::BinOp { op: BinOp::Mul, left, right } =>
+            mul_is_imul(left, right) || expr_has_imul(left) || expr_has_imul(right),
+        Expr::BinOp { left, right, .. } => expr_has_imul(left) || expr_has_imul(right),
+        Expr::Ternary { cond, then_arm, else_arm } =>
+            expr_has_imul(cond) || expr_has_imul(then_arm) || expr_has_imul(else_arm),
+        Expr::CastChar { value, .. } | Expr::CastLong { value, .. }
+        | Expr::AssignExpr { value, .. } => expr_has_imul(value),
+        Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => expr_has_imul(ptr),
+        Expr::Index { index, .. } | Expr::IndexByte { index, .. }
+        | Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. }
+        | Expr::ParamIndex { index, .. } => expr_has_imul(index),
+        Expr::Seq { value, .. } => expr_has_imul(value),
+        Expr::Call { args, .. } => args.iter().any(expr_has_imul),
+        Expr::CallPtr { target, args } => expr_has_imul(target) || args.iter().any(expr_has_imul),
+        _ => false,
+    }
+}
+/// Whether a statement's expressions contain an imul-lowered multiply.
+pub(crate) fn stmt_has_imul(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return(e) | Stmt::ExprStmt(e) => expr_has_imul(e),
+        Stmt::Assign { value, .. } => expr_has_imul(value),
+        Stmt::Block(v) => v.iter().any(stmt_has_imul),
+        _ => false,
+    }
+}
 /// True when a condition evaluates with no side effects (so an `if` with an
 /// empty body can be dropped). Mirrors [`expr_is_pure`] across the Cond tree.
 pub(crate) fn cond_is_pure(cond: &Cond) -> bool {

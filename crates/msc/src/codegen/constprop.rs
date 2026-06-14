@@ -2138,6 +2138,49 @@ fn reorder_struct_field_sum(e: &mut Expr, cp: &ConstProp) -> bool {
     *e = acc;
     true
 }
+/// In a left-assoc `+` chain, MSC evaluates all MULTIPLICATIVE terms (`x * y`,
+/// whether lowered to `imul` or a shift chain) before the simple/additive terms,
+/// stable within each group: `a*100 + b + i*10 + j` emits as `a*100 + i*10 + b
+/// + j` (fixture 1818). Only fires when the chain has both a product and a
+/// non-product term and every operand is side-effect-free (the reorder must
+/// preserve evaluation semantics).
+fn reorder_mul_first(e: &mut Expr) -> bool {
+    fn flatten<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            flatten(left, out);
+            out.push(right);
+        } else {
+            out.push(e);
+        }
+    }
+    let mut ops: Vec<&Expr> = Vec::new();
+    flatten(e, &mut ops);
+    if ops.len() < 2 {
+        return false;
+    }
+    let is_mul = |x: &Expr| matches!(x, Expr::BinOp { op: BinOp::Mul, .. });
+    let n_mul = ops.iter().filter(|o| is_mul(o)).count();
+    if n_mul == 0 || n_mul == ops.len() {
+        return false; // need a genuine product/simple mix
+    }
+    if !ops.iter().all(|o| crate::codegen::statements::expr_is_pure(o)) {
+        return false;
+    }
+    // Stable partition: product terms first, source order preserved within each.
+    let mut order: Vec<usize> = (0..ops.len()).collect();
+    order.sort_by_key(|&i| !is_mul(ops[i]));
+    if order.iter().enumerate().all(|(pos, &i)| pos == i) {
+        return false; // already products-first
+    }
+    let reordered: Vec<Expr> = order.iter().map(|&i| ops[i].clone()).collect();
+    let mut it = reordered.into_iter();
+    let mut acc = it.next().unwrap();
+    for nxt in it {
+        acc = Expr::BinOp { op: BinOp::Add, left: Box::new(acc), right: Box::new(nxt) };
+    }
+    *e = acc;
+    true
+}
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     // Reorder a struct-field `+` chain (nested members first) before the rest of
     // const-prop processes it; idempotent, so sub-chain recursion is a no-op.
@@ -2969,5 +3012,11 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
         // Bit-field post-mutate: a self-contained RMW, no sub-expressions to fold.
         Expr::BitFieldPostMutate { .. } => {}
+    }
+    // After substitution settles, hoist product terms ahead of simple ones in a
+    // `+` chain (fixture 1818). Done last so folded-to-constant terms are no
+    // longer seen as products.
+    if matches!(e, Expr::BinOp { op: BinOp::Add, .. }) {
+        reorder_mul_first(e);
     }
 }

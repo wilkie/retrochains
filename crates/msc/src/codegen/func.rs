@@ -1043,6 +1043,12 @@ pub(crate) fn emit_function(
         .filter(|(_, s)| crate::codegen::statements::stmt_call_count(effective_stmt(s, &locals_view)) > 0)
         .last()
         .map(|(i, _)| i);
+    // The cleanup is NOT folded into the epilogue when an `imul` follows the
+    // last call (an imul-bearing return computation keeps the per-call
+    // `add sp,N` — fixture 1818, vs the shift/simple returns that elide it).
+    let imul_after_last_call = last_call_idx.is_some_and(|lc| {
+        body[lc + 1..].iter().any(crate::codegen::statements::stmt_has_imul)
+    });
 
     let mut reachable = true;
     let mut i = 0;
@@ -1057,6 +1063,7 @@ pub(crate) fn emit_function(
         locals_view.elide_call_cleanup.set(
             frame.is_with_slide()
                 && last_call_idx == Some(i)
+                && !imul_after_last_call
                 && crate::codegen::statements::stmt_single_call(effective_stmt(stmt, &locals_view)),
         );
 
