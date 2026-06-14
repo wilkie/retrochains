@@ -849,6 +849,43 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         emit_cmp_global_off_imm(array, byte_off, cmp_to, is_byte, out, fixups);
         return;
     }
+    // `if (a.f0 & a.f1)` — AND of two equal-width bit-fields of the SAME unit,
+    // one at bit-offset 0: read the HIGHER field shifted down (no mask), then
+    // `and al,[unit]` — the unit's low byte holds the bit-0 field, so the AND
+    // masks one operand against the other — and `test al, lowmask`. The bit-0
+    // field's mask fits a byte (its bits sit at the bottom). Fixture 3452.
+    if let Cond::Truthy(Expr::BinOp { op: BinOp::BitAnd, left, right }) = cond
+        && let (Expr::BitField { base: ba, byte_off: oa, bit_off: offa, bit_width: wa },
+                Expr::BitField { base: bb, byte_off: ob, bit_off: offb, bit_width: wb })
+                = (left.as_ref(), right.as_ref())
+        && ba == bb && oa == ob && wa == wb && *wa <= 8
+        && ((*offa == 0) ^ (*offb == 0))
+        && matches!(ba, BitBase::Local(_) | BitBase::Global(_))
+    {
+        let high_off = if *offa == 0 { *offb } else { *offa };
+        // higher field → AX, shifted down (no mask).
+        crate::codegen::expr::bf_load_word(*ba, *oa, locals, out, fixups); // mov ax,[unit]
+        if high_off == 1 {
+            out.extend_from_slice(&[0xD1, 0xE8]); // shr ax,1
+        } else {
+            out.push(0xB1); out.push(high_off); out.extend_from_slice(&[0xD3, 0xE8]); // mov cl,off; shr ax,cl
+        }
+        match ba {
+            BitBase::Local(l) => {
+                let d = locals.disp(*l) + *oa as i16;
+                out.push(0x22); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // and al,[bp+d]
+            }
+            BitBase::Global(g) => {
+                out.push(0x22); out.push(0x06); // and al,[moffs16]
+                let bo = out.len() - 1;
+                out.extend_from_slice(&oa.to_le_bytes());
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            }
+            _ => unreachable!(),
+        }
+        out.push(0xA8); out.push(((1u32 << *wa) - 1) as u8); // test al, lowmask
+        return;
+    }
     // Bitwise-AND condition: `if (x & K)` and `if ((x & K) == 0 / != 0)` lower to
     // `test byte/word [mem], K`. The caller's jcc (Truthy/Ne → jne, Eq → je) and
     // the skip path's inverted jcc both read ZF after the test consistently.
