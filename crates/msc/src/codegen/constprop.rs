@@ -1959,6 +1959,17 @@ pub(crate) fn eval_const_int(e: &Expr) -> Option<i32> {
         Expr::IntLit(k) => Some(*k),
         Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => eval_const_int(value),
         Expr::BinOp { op, left, right } => {
+            // A `from_var` byte cast (`v & 0xFF`, `(char)v`) is a fold barrier for
+            // arithmetic: even with a const-propagated operand MSC materializes the
+            // byte-extract through AL and runs the surrounding arithmetic at runtime
+            // (`(a & 0xff) << 4`, fixture 1170). Relational/logical ops still fold.
+            let arith = matches!(op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor);
+            if arith && (matches!(left.as_ref(), Expr::CastChar { from_var: true, .. })
+                || matches!(right.as_ref(), Expr::CastChar { from_var: true, .. })) {
+                return None;
+            }
             let a = eval_const_int(left)? as i16;
             let b = eval_const_int(right)? as i16;
             let r: i16 = match op {

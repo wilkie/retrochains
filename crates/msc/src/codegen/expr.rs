@@ -5070,7 +5070,13 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     // its own value), which would spin forever. Also skip an operand that
     // contains an assignment-expression — its `fold()` returns the assigned
     // value but materializing that drops the store side effect. Fixture 1217.
+    // A `from_var` byte cast (`v & 0xff`, `(char)v`) must NOT collapse to an
+    // IntLit operand here: MSC materializes it through AL at runtime even with a
+    // const-propagated value, so leave it for the byte-extract arm below. Fixture
+    // 1170 (`(a & 0xff) << 4`).
+    let is_var_byte_extract = |e: &Expr| matches!(e, Expr::CastChar { from_var: true, .. });
     if !matches!(left, Expr::IntLit(_))
+        && !is_var_byte_extract(left)
         && !contains_assign_expr(left)
         && let Some(k) = left.fold(locals.inits)
     {
@@ -5078,6 +5084,7 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         return;
     }
     if !matches!(right, Expr::IntLit(_))
+        && !is_var_byte_extract(right)
         && !contains_assign_expr(right)
         && let Some(k) = right.fold(locals.inits)
     {
@@ -5240,6 +5247,18 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     {
         emit_expr_to_ax(left, locals, out, fixups);
         return emit_binop_right(op, right, locals, out, fixups);
+    }
+    // `<byte-extract> op K`: a `from_var` byte cast (`(v & 0xff)`, `(char)v`)
+    // materializes through AL at runtime and never folds, so evaluate it into AX
+    // (`mov al,K; sub ah,ah`) and apply the constant op in place — `mov cl,4;
+    // shl ax,cl` for `(a & 0xff) << 4`. Fixture 1170. emit_imm_op covers shifts,
+    // add/sub, and bitwise ops.
+    if matches!(left, Expr::CastChar { from_var: true, .. })
+        && let Expr::IntLit(k) = right
+    {
+        emit_expr_to_ax(left, locals, out, fixups);
+        emit_imm_op(op, *k, out);
+        return;
     }
     // Generic fallback: evaluate RHS first into AX, save to BX, then
     // evaluate LHS into AX and apply the reg-reg op. Works for any

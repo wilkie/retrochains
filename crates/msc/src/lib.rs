@@ -1454,6 +1454,19 @@ impl Expr {
             // Parameters carry an unknown value at compile time.
             Expr::Param(_) => None,
             Expr::BinOp { op, left, right } => {
+                // A `from_var` byte cast (`v & 0xFF`, `(char)v`) is a fold barrier
+                // for ARITHMETIC: MSC materializes the byte-extract through AL and
+                // computes the surrounding arithmetic at runtime rather than folding
+                // it to one constant (`(a & 0xff) << 4` → `mov al,K; sub ah,ah; shl`,
+                // fixture 1170). Relational/logical ops still fold (a branch decision
+                // sees through the cast); a top-level cast store also still folds.
+                let arith = matches!(op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                    | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor);
+                let is_var_byte_extract = |e: &Expr| matches!(e, Expr::CastChar { from_var: true, .. });
+                if arith && (is_var_byte_extract(left) || is_var_byte_extract(right)) {
+                    return None;
+                }
                 let l = left.fold(locals)?;
                 let r = right.fold(locals)?;
                 Some(match op {

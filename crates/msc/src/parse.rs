@@ -5063,9 +5063,14 @@ pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr,
         // `e & 0xFF` is the zero-extended low byte — MSC lowers it exactly like
         // `(unsigned char)e` (`mov al,[e]; sub ah,ah`). Fixtures 2935 / 2539.
         if matches!(op, BinOp::BitAnd) && matches!(right, Expr::IntLit(255)) {
-            // `&0xff` masks keep folding to an immediate (from_var: false) — the
-            // AL-form rule is reserved for explicit `(char)`/`(unsigned char)` casts.
-            left = Expr::CastChar { value: Box::new(left), unsigned: true, from_var: false };
+            // A byte mask of a SIMPLE scalar variable behaves like an explicit
+            // `(unsigned char)<var>` cast: it materializes through AL at runtime
+            // (`mov al,K; sub ah,ah`) and does NOT fold into the surrounding
+            // expression, even when the variable is const-propagated. Fixture 1170
+            // (`(a & 0xff) << 4`). A mask of a compound expression (`(a+1) & 0xff`)
+            // still folds. Mirrors the `from_var` rule for explicit casts below.
+            let from_var = matches!(left, Expr::Local(_) | Expr::Param(_) | Expr::Global(_));
+            left = Expr::CastChar { value: Box::new(left), unsigned: true, from_var };
             continue;
         }
         // Pointer arithmetic on a DECAYED ARRAY (`a + K` / `a - K`): the array
