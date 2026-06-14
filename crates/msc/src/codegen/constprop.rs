@@ -237,6 +237,8 @@ pub(crate) fn const_prop_globals(
     global_array_lens: &[usize],
     struct_is_union: &[bool],
     union_globals: &std::collections::HashSet<usize>,
+    structs: &[StructDef],
+    global_struct_idxs: &[Option<usize>],
 ) -> (
     Vec<Stmt>,
     std::collections::HashSet<usize>,
@@ -255,6 +257,8 @@ pub(crate) fn const_prop_globals(
         global_array_lens: global_array_lens.to_vec(),
         union_locals,
         union_globals: union_globals.clone(),
+        structs: structs.to_vec(),
+        global_struct_idxs: global_struct_idxs.to_vec(),
         ..ConstProp::default()
     };
     for (i, &is_long) in long_globals.iter().enumerate() {
@@ -1499,6 +1503,8 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         global_array_lens: cp.global_array_lens.clone(),
         union_locals: cp.union_locals.clone(),
         union_globals: cp.union_globals.clone(),
+        structs: cp.structs.clone(),
+        global_struct_idxs: cp.global_struct_idxs.clone(),
         la_field_size: cp.la_field_size.clone(),
         la_var_written: cp.la_var_written.clone(),
         ga_field_size: cp.ga_field_size.clone(),
@@ -1812,7 +1818,92 @@ fn clear_arm_assigned_values(e: &Expr, cp: &mut ConstProp) {
         _ => {}
     }
 }
+/// Nesting depth of the member at `byte_off` within struct `sidx`: 1 for a
+/// direct top-level field, 2+ when it falls inside a (non-pointer) struct-typed
+/// field, recursing for deeper nesting. Used to order a struct-field sum.
+fn field_depth(sidx: usize, byte_off: u16, structs: &[StructDef]) -> usize {
+    let Some(s) = structs.get(sidx) else { return 1 };
+    for f in &s.fields {
+        if byte_off >= f.byte_off && byte_off < f.byte_off + f.size as u16 {
+            if let Some(inner) = f.struct_idx
+                && !f.is_pointer
+            {
+                return 1 + field_depth(inner, byte_off - f.byte_off, structs);
+            }
+            return 1;
+        }
+    }
+    1
+}
+/// MSC orders a sum of struct-member reads over ONE base by nesting depth —
+/// deeper-nested members first, source order preserved within a depth (a stable
+/// partition). `o.id + o.inner.a + o.inner.b + o.tail` (offsets 0,2,4,6) loads
+/// 2,4,0,6 (oracle-confirmed N1/N2/N3). Flatten the `+` chain, require every
+/// operand to be a word GlobalField/LocalField of the same struct base, sort
+/// stably by descending depth, and rebuild the left-assoc chain in place.
+/// Returns true iff the order actually changed (so the caller recurses once).
+/// Fixtures 2102, and the 3342/2313 cluster. Addition is associative for ints,
+/// so reordering is value-preserving.
+fn reorder_struct_field_sum(e: &mut Expr, cp: &ConstProp) -> bool {
+    // Flatten a left-assoc `+` chain into its leaf operands.
+    fn flatten<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) -> bool {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            flatten(left, out) && { out.push(right); true }
+        } else {
+            out.push(e);
+            true
+        }
+    }
+    let mut ops: Vec<&Expr> = Vec::new();
+    flatten(e, &mut ops);
+    if ops.len() < 2 {
+        return false;
+    }
+    // Resolve each operand to (base_kind, base_idx, byte_off) and require all to
+    // be word fields of the SAME struct base.
+    let mut base: Option<(bool, usize, usize)> = None; // (is_global, base_idx, struct_idx)
+    let mut depths: Vec<usize> = Vec::with_capacity(ops.len());
+    for op in &ops {
+        let (is_global, base_idx, byte_off) = match op {
+            Expr::GlobalField { global, byte_off, size: 2 } => (true, *global, *byte_off),
+            Expr::LocalField { local, byte_off, size: 2 } => (false, *local, *byte_off),
+            _ => return false,
+        };
+        let sidx = if is_global {
+            cp.global_struct_idxs.get(base_idx).copied().flatten()
+        } else {
+            cp.local_specs.get(base_idx).and_then(|s| s.struct_idx)
+        };
+        let Some(sidx) = sidx else { return false };
+        match base {
+            None => base = Some((is_global, base_idx, sidx)),
+            Some((g, b, _)) if g == is_global && b == base_idx => {}
+            _ => return false,
+        }
+        depths.push(field_depth(sidx, byte_off, &cp.structs));
+    }
+    // Stable sort by descending depth. If already in that order, nothing to do.
+    let mut order: Vec<usize> = (0..ops.len()).collect();
+    order.sort_by(|&i, &j| depths[j].cmp(&depths[i]).then(i.cmp(&j)));
+    if order.iter().enumerate().all(|(pos, &i)| pos == i) {
+        return false;
+    }
+    // Rebuild the left-assoc chain in the new order.
+    let reordered: Vec<Expr> = order.iter().map(|&i| ops[i].clone()).collect();
+    let mut iter = reordered.into_iter();
+    let mut acc = iter.next().unwrap();
+    for nxt in iter {
+        acc = Expr::BinOp { op: BinOp::Add, left: Box::new(acc), right: Box::new(nxt) };
+    }
+    *e = acc;
+    true
+}
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
+    // Reorder a struct-field `+` chain (nested members first) before the rest of
+    // const-prop processes it; idempotent, so sub-chain recursion is a no-op.
+    if matches!(e, Expr::BinOp { op: BinOp::Add, .. }) {
+        reorder_struct_field_sum(e, cp);
+    }
     match e {
         Expr::FloatLit(..) => {} // no int const-prop into float literals
         Expr::CastChar { value, .. } | Expr::CastLong { value, .. } => prop_expr(value, cp),

@@ -3875,6 +3875,11 @@ struct ConstProp {
     union_locals: std::collections::HashSet<usize>,
     /// Global indices whose type is a `union` (same rationale, `ga_field_size`).
     union_globals: std::collections::HashSet<usize>,
+    /// Struct layouts (field offsets + nested struct_idx), used to compute a
+    /// member's nesting depth for the struct-field-sum reorder.
+    structs: Vec<StructDef>,
+    /// Parallel to globals: each global's struct type index (`None` for non-struct).
+    global_struct_idxs: Vec<Option<usize>>,
     /// Size (bytes) of the last write recorded at each `la_known` slot — used
     /// to size-gate union member folding.
     la_field_size: std::collections::HashMap<(usize, u16), u8>,

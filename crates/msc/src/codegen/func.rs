@@ -439,7 +439,7 @@ pub(crate) fn emit_function(
     // and `push_epilogue` emits `retf` (CB) instead of `ret` (C3).
     CUR_FN_FAR.with(|c| c.set(func.is_far));
     set_cur_fn_param_disps(func);
-    let (body, mutated_locals, loop_mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, global_array_lens, struct_is_union, union_globals);
+    let (body, mutated_locals, loop_mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, global_array_lens, struct_is_union, union_globals, structs, global_struct_idxs);
     // Splice top-level blocks that contain a switch into the top-level
     // statement stream, so a switch inside a const-folded outer switch's
     // body reaches the partial-switch continuation machinery below
