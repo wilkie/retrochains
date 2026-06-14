@@ -3684,20 +3684,33 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     // Constant index — use existing byte-offset forms.
                     let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
                         .expect("indexed-store byte offset fits");
-                    let target = if elem_bytes == 1 {
+                    let folded = if elem_bytes == 1 {
                         AssignTarget::IndexedLocalByte { local: local_idx, byte_off }
                     } else {
                         AssignTarget::IndexedLocal { local: local_idx, byte_off }
                     };
-                    let value = if let Some(v) = parse_compound_rhs_for_indexed(
+                    if let Some(v) = parse_compound_rhs_for_indexed(
                         p, local_idx, byte_off, elem_bytes == 1, false,
                     )? {
-                        v
-                    } else {
-                        p.eat(&Tok::Assign)?;
-                        parse_expr(p)?
-                    };
+                        p.eat(&Tok::Semi)?;
+                        return Ok(Stmt::Assign { target: folded, value: v });
+                    }
+                    p.eat(&Tok::Assign)?;
+                    let value = parse_expr(p)?;
                     p.eat(&Tok::Semi)?;
+                    // A plain `=` through a VARIABLE index keeps the var form so
+                    // const-prop can track variable-write forwarding — a later
+                    // `a[i]` read folds only from a variable-indexed write, not a
+                    // literal one (fixtures 144/1620 vs 1090/1428). const-prop
+                    // converts it back to the direct store. A SOURCE-LITERAL index
+                    // stays a direct store.
+                    let target = if matches!(index_expr, Expr::IntLit(_)) {
+                        folded
+                    } else if elem_bytes == 1 {
+                        AssignTarget::IndexedLocalByteVar { local: local_idx, index: Box::new(index_expr) }
+                    } else {
+                        AssignTarget::IndexedLocalVar { local: local_idx, index: Box::new(index_expr) }
+                    };
                     return Ok(Stmt::Assign { target, value });
                 }
                 // Runtime (non-constant) index — `a[i] = expr`.

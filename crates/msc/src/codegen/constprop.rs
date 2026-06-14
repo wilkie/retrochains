@@ -363,6 +363,11 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             // through a pointer, so the element stays unknown (later direct reads
             // must NOT fold). Fixture 1017.
             let mut from_ptr_store = false;
+            // Set when this store's array index was a VARIABLE that folded to a
+            // constant (`a[i] = v`, i known) — vs a source literal (`a[0] = v`).
+            // Drives `la_var_written` so a later variable-indexed read forwards
+            // only from a variable-indexed write. Fixtures 144/1620 vs 1090/1428.
+            let mut var_indexed_write = false;
             // A source-literal-cond ternary RHS (`p = 1 ? &a : &b`) is compile-
             // time — collapse it to the chosen arm NOW, before the pointer-alias
             // and ptr_addr analysis below, so `p = &a` aliasing is recorded (the
@@ -407,6 +412,30 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     && let Ok(byte_off) = u16::try_from(*k as i64 * *stride as i64 + *field_off as i64)
                 {
                     *target = AssignTarget::LocalField { local: *local, byte_off, size: *size };
+                }
+            }
+            // Runtime-indexed local store `a[i] = v` whose index folds: rewrite
+            // to a direct IndexedLocal store (MSC emits a direct store for a known
+            // index) and record that the slot was written via a VARIABLE index, so
+            // a later variable-indexed read may forward from it. A genuine runtime
+            // index stays IndexedLocalVar for SI codegen. Fixtures 144/1620.
+            if let AssignTarget::IndexedLocalVar { local, index } = target {
+                prop_expr(index, cp);
+                if let Expr::IntLit(k) = index.as_ref() {
+                    let esz = cp.local_specs.get(*local).map(|l| l.size as i64).unwrap_or(2);
+                    if let Ok(byte_off) = u16::try_from(*k as i64 * esz) {
+                        var_indexed_write = true;
+                        *target = AssignTarget::IndexedLocal { local: *local, byte_off };
+                    }
+                }
+            }
+            if let AssignTarget::IndexedLocalByteVar { local, index } = target {
+                prop_expr(index, cp);
+                if let Expr::IntLit(k) = index.as_ref()
+                    && let Ok(byte_off) = u16::try_from(*k as i64)
+                {
+                    var_indexed_write = true;
+                    *target = AssignTarget::IndexedLocalByte { local: *local, byte_off };
                 }
             }
             // Pointer-arith init from a known-address pointer: `q = (char*)p + K`
@@ -877,6 +906,13 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                         if let Some(sz) = write_field_size {
                             cp.la_field_size.insert((*local, *byte_off), sz);
                         }
+                        // Record/clear the slot's variable-write status (a literal
+                        // index write clears it, so a later var read won't forward).
+                        if var_indexed_write {
+                            cp.la_var_written.insert((*local, *byte_off));
+                        } else {
+                            cp.la_var_written.remove(&(*local, *byte_off));
+                        }
                     } else {
                         cp.la_known.remove(&(*local, *byte_off));
                         cp.la_field_size.remove(&(*local, *byte_off));
@@ -947,6 +983,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.l_known.clear();
                 cp.g_known.clear();
                 cp.la_known.clear();
+            cp.la_var_written.clear();
                 cp.ga_known.clear();
                 if is_global {
                     cp.mutated_globals.insert(idx);
@@ -967,6 +1004,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.l_known.clear();
                 cp.g_known.clear();
                 cp.la_known.clear();
+            cp.la_var_written.clear();
                 cp.ga_known.clear();
                 // Init-seeded knowledge also lives in the EMIT-time fold view
                 // (locals.inits) — mark the surviving else-if chain's cond
@@ -1007,6 +1045,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.g_known.clear();
             cp.l_known.clear();
             cp.la_known.clear();
+            cp.la_var_written.clear();
             cp.ptr_alias.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
@@ -1024,6 +1063,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.g_known.clear();
             cp.l_known.clear();
             cp.la_known.clear();
+            cp.la_var_written.clear();
             cp.ptr_alias.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
@@ -1072,6 +1112,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+            cp.la_var_written.clear();
             cp.ptr_alias.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
@@ -1085,6 +1126,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+            cp.la_var_written.clear();
             cp.ptr_alias.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
@@ -1122,6 +1164,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+            cp.la_var_written.clear();
             cp.ptr_alias.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
@@ -1133,6 +1176,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.g_known.clear();
                 cp.l_known.clear();
                 cp.la_known.clear();
+            cp.la_var_written.clear();
             cp.ptr_alias.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
@@ -1161,6 +1205,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.g_known.clear();
             cp.l_known.clear();
             cp.la_known.clear();
+            cp.la_var_written.clear();
             cp.ptr_alias.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
@@ -1189,6 +1234,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         union_locals: cp.union_locals.clone(),
         union_globals: cp.union_globals.clone(),
         la_field_size: cp.la_field_size.clone(),
+        la_var_written: cp.la_var_written.clone(),
         ga_field_size: cp.ga_field_size.clone(),
         in_cond: cp.in_cond,
         saw_call: cp.saw_call,
@@ -1370,6 +1416,7 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.g_known.clear();
                     cp.la_known.clear();
+            cp.la_var_written.clear();
                     cp.ga_known.clear();
                     mark_cond_reads(b, cp);
                 }
@@ -1441,6 +1488,7 @@ fn kill_if_called(cp: &mut ConstProp) {
     cp.mutated_globals.extend(cp.ga_known.keys().map(|&(g, _)| g));
     cp.l_known.clear();
     cp.la_known.clear();
+            cp.la_var_written.clear();
     cp.g_known.clear();
     cp.ga_known.clear();
 }
@@ -1865,6 +1913,14 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => {
             // Borrow index and substitute *e with the known element
             // value when the index folds and we've tracked it.
+            // Capture whether the read index was a VARIABLE before prop_expr
+            // folds it to a literal (the write/read index-form must match for
+            // forwarding).
+            let read_was_var = match e {
+                Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. } =>
+                    !matches!(index.as_ref(), Expr::IntLit(_)),
+                _ => false,
+            };
             let (local, elem_size, known_k) = match e {
                 Expr::LocalIndex { local, index } => {
                     prop_expr(index, cp);
@@ -1883,6 +1939,11 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             if let Some(k) = known_k
                 && let Ok(byte_off) = u16::try_from(k as i64 * elem_size as i64)
                 && let Some(&v) = cp.la_known.get(&(local, byte_off))
+                // A variable-indexed read (`a[i]`) forwards only from a
+                // variable-indexed write; a literal-write + variable-read does
+                // not fold (MSC loads the slot). A literal-indexed read folds
+                // from any write. Fixtures 144/1620 (fold) vs 1090/1428 (don't).
+                && (!read_was_var || cp.la_var_written.contains(&(local, byte_off)))
             {
                 *e = Expr::IntLit(v);
             }
@@ -1958,6 +2019,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                         cp.l_known.clear();
                         cp.g_known.clear();
                         cp.la_known.clear();
+            cp.la_var_written.clear();
                         cp.ga_known.clear();
                         // Init-seeded knowledge also lives in the EMIT-time
                         // fold view (locals.inits / globals); mark the

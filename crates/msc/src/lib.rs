@@ -3608,6 +3608,11 @@ struct ConstProp {
     /// Size (bytes) of the last write recorded at each `la_known` slot — used
     /// to size-gate union member folding.
     la_field_size: std::collections::HashMap<(usize, u16), u8>,
+    /// Local-array slots whose `la_known` value was written through a VARIABLE
+    /// index (`a[i] = v`). A variable-indexed READ (`a[i]`) only forwards from a
+    /// variable-indexed write; a literal-write + variable-read (`a[0]=..; a[i]`)
+    /// does NOT fold (MSC loads from the slot). Fixtures 144/1620 vs 1090/1428.
+    la_var_written: std::collections::HashSet<(usize, u16)>,
     /// Size (bytes) of the last write recorded at each `ga_known` slot.
     ga_field_size: std::collections::HashMap<(usize, u16), u8>,
     /// True while propagating a loop/if condition. An assignment-as-expression
