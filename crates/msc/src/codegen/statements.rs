@@ -306,7 +306,7 @@ pub(crate) fn emit_stmt(
         Stmt::Assign { target, value } => emit_assign(target.clone(), value, locals, out, fixups),
         Stmt::Switch { scrutinee, cases } => {
             let known_k = if let Expr::IntLit(k) = scrutinee { Some(*k) } else { None };
-            emit_runtime_switch(scrutinee, known_k, cases, locals, frame, return_int, return_long, out, fixups);
+            emit_runtime_switch(scrutinee, known_k, cases, locals, frame, return_int, return_long, out, fixups, None);
         }
         Stmt::Break => {
             // Emit a forward `jmp short` (eb) placeholder; the enclosing loop
@@ -4742,6 +4742,61 @@ pub(crate) fn switch_has_break(cases: &[SwitchArm]) -> bool {
     cases.iter().any(|a| a.body.iter().any(|s| matches!(s, Stmt::Break)))
 }
 
+/// Whether a statement, as emitted, completes by FALLING THROUGH off its
+/// physical end (the next instruction is reached straight-line), as opposed to
+/// terminating (`return`) or ending in a jump (a loop back-edge, a nested
+/// switch's no-match jmp, an `if` whose physically-last branch leaves). Drives
+/// the partial-switch continuation layout (DIRECT vs FWD): a first case body
+/// that completes normally is placed right before the continuation so it falls
+/// through (FWD); one that always returns/jumps to its break goes after the
+/// continuation (DIRECT). Oracle-probed on no-default nested switches
+/// (fixtures 3277, probes B/C/E/F/G).
+fn stmt_ends_with_fallthrough(s: &Stmt) -> bool {
+    match s {
+        Stmt::ExprStmt(_) | Stmt::Assign { .. } | Stmt::Empty | Stmt::Label(_)
+        | Stmt::Continue => true,
+        Stmt::Return(_) | Stmt::Goto(_) | Stmt::Break => false,
+        // A loop's normal exit fuses to the following break target (its exit
+        // jcc jumps straight there); the physical tail is the back-edge jmp.
+        Stmt::While { .. } | Stmt::For { .. } | Stmt::DoWhile { .. } => false,
+        // A nested switch ends in its no-match jmp / a terminating last body.
+        Stmt::Switch { .. } => false,
+        Stmt::Block(v) => v.last().is_none_or(stmt_ends_with_fallthrough),
+        // An `if` falls through iff its physically-last branch does (no else →
+        // the then-branch; with else → either branch reaches the merge point).
+        Stmt::If { then_branch, else_branch, .. } => match else_branch {
+            None => stmt_ends_with_fallthrough(then_branch),
+            Some(e) => stmt_ends_with_fallthrough(then_branch)
+                || stmt_ends_with_fallthrough(e),
+        },
+    }
+}
+
+/// Whether a case body reaches its trailing `break` (or fall-out) by straight-
+/// line fall-through, i.e. its physically-last statement completes normally.
+fn case_body_falls_through(body: &[Stmt]) -> bool {
+    let main = match body.last() {
+        Some(Stmt::Break) => &body[..body.len() - 1],
+        _ => body,
+    };
+    main.last().is_none_or(stmt_ends_with_fallthrough)
+}
+
+/// A case body of the shape `[stmt*, Switch, Break]` — a nested switch as the
+/// last statement, ended by a `break`. Returns (leading stmts, the nested
+/// switch's scrutinee+cases). In the partial-switch DIRECT layout MSC fuses
+/// such a nested switch's no-match jmp straight to the outer continuation (RL)
+/// instead of double-jumping through a separate break jmp. Fixture 3277.
+fn switch_tail_body(body: &[Stmt]) -> Option<(&[Stmt], &Expr, &[SwitchArm])> {
+    let (tail, main) = body.split_last()?;
+    if !matches!(tail, Stmt::Break) { return None; }
+    let (last, lead) = main.split_last()?;
+    let Stmt::Switch { scrutinee, cases } = last else { return None };
+    // A jump-table switch lowers differently — leave it on the buffer path.
+    if switch_is_table(cases) { return None; }
+    Some((lead, scrutinee, cases))
+}
+
 /// Whether control entering `cases[start]`'s body always returns before
 /// leaving the switch (walking C fall-through across arms; a `break` — or
 /// running off the end — reaches the post-switch continuation instead).
@@ -4977,10 +5032,33 @@ pub(crate) fn emit_partial_switch_with_continuation(
 
     let has_zero_case = known_k.is_some_and(|k| k != 0)
         && cases.iter().any(|a| a.value == Some(0));
-    // Runtime break-free switches lay the continuation directly at the chain
-    // fall-through (DIRECT), bodies after it — fixture 2641.
+    // Continuation-layout choice for a runtime scrutinee:
+    //   FWD    — the first surviving case body is placed before the continuation
+    //            so it falls through, eliding its break.
+    //   DIRECT — the chain fall-through reaches the continuation inline, all
+    //            case bodies after it (each jumping back).
+    // With a default arm the default body is the chain fall-through, so the
+    // historical break-free rule applies (2641). With NO default, MSC lays the
+    // continuation inline right after the dispatch chain (DIRECT) in exactly two
+    // oracle-confirmed shapes (else it places the continuation after the first
+    // falling-through case body — FWD — 454/4166-a):
+    //   • a break-free switch (its bodies fall to the continuation C-style), or
+    //   • a TWO-body switch whose FIRST body is a "jump-out" — it neither
+    //     returns nor falls through, but reaches the continuation via a jump (a
+    //     nested switch / loop / `if` whose tail leaves). Probed: [J,T] 3277,
+    //     [J,F] / [J,J] DIRECT; vs [T,F] (first terminates) and any 3-body
+    //     shape ([J,T,F]/[J,T,T]/…) → FWD.
+    // The loop-back form keeps FWD: its backward jmp is woven only into FWD (3234).
+    let nfc0_is_jumpout = nfc_idxs.first().is_some_and(|&i|
+        !case_body_falls_through(&cases[i].body)
+            && !arm_body_terminates(cases, i, locals));
     let direct_path = need_cont
-        && (has_zero_case || (known_k.is_none() && !switch_has_break(cases)));
+        && (has_zero_case
+            || (known_k.is_none() && match ft_idx {
+                None => !switch_has_break(cases)
+                    || (nfc_idxs.len() == 2 && nfc0_is_jumpout && loop_back.is_none()),
+                Some(_) => !switch_has_break(cases),
+            }));
     let fwd_path = need_cont && !direct_path;
 
     // arm index → body start offset, filled as bodies are laid out.
@@ -5075,18 +5153,33 @@ pub(crate) fn emit_partial_switch_with_continuation(
         // Alignment nop before first NFC body.
         if out.len() % 2 != 0 { out.push(0x90); }
 
-        // All NFC bodies: each has backward jmp → return_label + nop.
+        // All NFC bodies: each has backward jmp → return_label + nop. A body
+        // ending in a nested switch (`[…, switch, break]`) is re-emitted
+        // DIRECTLY so the nested switch's no-match fall-out targets RL itself
+        // (fallout_override) — MSC fuses that edge instead of double-jumping
+        // through a separate trailing `jmp RL`. Fixture 3277.
         for (bi, (nfc_bytes, nfc_fxs, nfc_term)) in nfc_bufs.iter().enumerate() {
             nfc_starts.push((nfc_idxs[bi], out.len()));
-            let base = out.len();
-            for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
-            out.extend_from_slice(nfc_bytes);
-            if !nfc_term {
-                out.push(0xEB);
-                let p = out.len();
-                out.push(0x00);
-                let rel8 = rl as i32 - (p + 1) as i32;
-                out[p] = rel8 as u8;
+            if !nfc_term
+                && let Some((lead, sub_scrut, sub_cases)) = switch_tail_body(&cases[nfc_idxs[bi]].body)
+            {
+                for s in lead {
+                    emit_stmt(s, locals, frame, return_int, return_long, out, fixups);
+                }
+                let sub_k = if let Expr::IntLit(k) = sub_scrut { Some(*k) } else { None };
+                emit_runtime_switch(sub_scrut, sub_k, sub_cases, locals, frame,
+                                    return_int, return_long, out, fixups, Some(rl));
+            } else {
+                let base = out.len();
+                for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
+                out.extend_from_slice(nfc_bytes);
+                if !nfc_term {
+                    out.push(0xEB);
+                    let p = out.len();
+                    out.push(0x00);
+                    let rel8 = rl as i32 - (p + 1) as i32;
+                    out[p] = rel8 as u8;
+                }
             }
             if out.len() % 2 != 0 { out.push(0x90); }
         }
@@ -5252,6 +5345,7 @@ pub(crate) fn emit_table_switch(
 /// only effect is deletion of resolved-not-taken tests — a `jl` half whose
 /// `cmp` constant equals K (fixtures 1895/2620/3967) and a case-0 `or ax,ax;
 /// je` when K != 0.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_runtime_switch(
     scrutinee: &Expr,
     known_k: Option<i32>,
@@ -5262,6 +5356,12 @@ pub(crate) fn emit_runtime_switch(
     return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
+    // When `Some(rl)`, this switch is the tail of an enclosing partial-switch
+    // case body: its no-match fall-out and its case `break`s target the outer
+    // continuation `rl` (an absolute _TEXT offset) DIRECTLY rather than the
+    // local post-switch position — MSC fuses the two edges, avoiding a
+    // double-jump through a separate break jmp. Fixture 3277.
+    fallout_override: Option<usize>,
 ) {
     if switch_is_table(cases) {
         emit_table_switch(scrutinee, cases, locals, frame, return_int, return_long, out, fixups);
@@ -5411,8 +5511,12 @@ pub(crate) fn emit_runtime_switch(
     // The final emitted body's trailing break jumps to the very next
     // instruction (the post-switch fall-out) — MSC drops the jmp entirely
     // (and the alignment nop with it). Fixture 2369 (nested switch).
+    // (When this switch's fall-out is redirected to an outer continuation, the
+    // last break jumps far to `rl`, not the next instruction, so it can't be
+    // elided.)
     let mut elided_last_break: Option<usize> = None;
-    if let Some(&last) = emission_order.last()
+    if fallout_override.is_none()
+        && let Some(&last) = emission_order.last()
         && let Some(&boff) = case_bufs[last].breaks.last()
         && boff + 2 == case_bufs[last].buf.len()
     {
@@ -5448,7 +5552,10 @@ pub(crate) fn emit_runtime_switch(
             TestOp::JlDefault { v } => (
                 v,
                 0x7C,
-                default_idx.map(|d| body_offsets[d]).unwrap_or(switch_end),
+                default_idx.map(|d| start + body_offsets[d])
+                    .or(fallout_override)
+                    .unwrap_or(start + switch_end)
+                    - start,
             ),
         };
         if v == 0 && matches!(op, TestOp::JeBody { .. }) {
@@ -5471,7 +5578,7 @@ pub(crate) fn emit_runtime_switch(
         let jmp_target = if let Some(d) = default_idx {
             start + body_offsets[d]
         } else {
-            start + switch_end
+            fallout_override.unwrap_or(start + switch_end)
         };
         out.push(0xEB);
         let here_end = out.len() + 1;
@@ -5480,7 +5587,7 @@ pub(crate) fn emit_runtime_switch(
     }
 
     // Emit bodies in emission_order; each gets an alignment nop if needed.
-    let break_target = start + switch_end;
+    let break_target = fallout_override.unwrap_or(start + switch_end);
     let mut case_bufs_indexed: Vec<Option<CaseBuf>> = case_bufs.into_iter().map(Some).collect();
     for &case_idx in &emission_order {
         let cb = case_bufs_indexed[case_idx].take().unwrap();
