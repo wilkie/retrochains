@@ -35,13 +35,28 @@ cargo build --workspace --bins
 target/debug/xfix verify-all --toolchain ours
 ```
 
-The current baseline is **4104 pass, 0 fail** out of 4104 BCC fixtures — the
+The current baseline is **4129 pass, 0 fail** out of 4129 BCC fixtures — the
 BCC pool is fully green. Any refactor — especially pure code moves — must
-reproduce this result exactly (all 4104 passing). `verify-all` exits non-zero
+reproduce this result exactly (all 4129 passing). `verify-all` exits non-zero
 whenever any fixture fails, so check the printed summary, not just the exit
 code.
 
 The MSC toolchain has its own pool — `verify-all --toolchain ours --compiler
-msc` — currently **3969 pass / 10 fail** out of 3979. (A fixture can be
-MSC-only when our BCC can't yet match real BCC; capture both with `xfix
-capture --compiler {bcc,msc}` and add both `invocation.{bcc,msc}.toml`.)
+msc` — currently **4004 pass / 0 fail** out of 4004 — also fully green. (A
+fixture can be MSC-only when our BCC can't yet match real BCC; capture both
+with `xfix capture --compiler {bcc,msc}` and add both
+`invocation.{bcc,msc}.toml`.)
+
+## Goldens are a hash-pinned, reproducible cache
+
+Compiler binary outputs (`.OBJ`, `.ASM`, `.EXE`, `.MAP`) are **not** tracked in
+git. The byte-exact contract is the `sha256` recorded for each output in the
+tracked `expected/<compiler>/manifest.toml`, and `verify-all` gates on that
+hash — it passes/fails identically whether or not the golden bytes are on disk.
+The bytes themselves are gitignored to keep the repo lean as compilers and
+fixtures multiply; regenerate them locally with `xfix materialize <fixture>`
+(re-drives the oracle, refuses to write unless the reproduction matches the
+recorded hash). So on a fresh checkout, `verify-all` works immediately, and you
+only `materialize` a fixture when you want its byte-level diff for debugging.
+They were purged from history once (see git log) — never re-track them; the
+`.gitignore` keeps captures from re-adding them.

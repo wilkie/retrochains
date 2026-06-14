@@ -1,9 +1,16 @@
 //! `xfix` — drive the fixture corpus from the shell. Three subcommands:
 //!
 //!     xfix capture <fixture>                       # run the oracle, write expected/
+//!     xfix materialize <fixture>                   # regenerate gitignored golden bytes,
+//!                                                  #   asserting they match recorded hashes
 //!     xfix verify [--toolchain T] <fixture>        # diff a fresh run against expected/
 //!     xfix verify-all [--toolchain T] [--jobs N]   # verify every fixture in parallel
 //!     xfix dashboard [--jobs N] [--out PATH]       # cross-compiler coverage HTML
+//!
+//! Compiler binary outputs (.OBJ/.ASM/.EXE/…) are NOT tracked in git; only
+//! their sha256 in `expected/<compiler>/manifest.toml` is. `materialize`
+//! rebuilds the local byte cache from the oracle and proves the recorded hash
+//! still reproduces — the way a fresh checkout repopulates goldens for diffing.
 //!
 //! `--toolchain oracle` (default) re-runs the oracle (a determinism check
 //! on the capture itself). `--toolchain ours` runs our host-side
@@ -15,7 +22,10 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fixtures::{Diff, FileDiffKind, Fixture, ManifestDiff, ToolPaths, capture, verify_oracle, verify_ours};
+use fixtures::{
+    Diff, FileDiffKind, Fixture, ManifestDiff, ToolPaths, capture, materialize, verify_oracle,
+    verify_ours,
+};
 
 fn main() -> ExitCode {
     match try_main() {
@@ -38,7 +48,7 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut it = argv.iter();
     let sub = it
         .next()
-        .ok_or("usage: xfix <capture|verify|verify-all> [flags] [<fixture>]")?;
+        .ok_or("usage: xfix <capture|materialize|verify|verify-all|dashboard> [flags] [<fixture>]")?;
 
     let mut toolchain = Toolchain::Oracle;
     let mut fixture_path: Option<PathBuf> = None;
@@ -95,6 +105,13 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let fixture = Fixture::load(&fixture_path, &compiler)?;
             capture(&workspace_root, &fixture)?;
             eprintln!("[xfix] captured {}", fixture.name);
+            Ok(ExitCode::from(0))
+        }
+        "materialize" => {
+            let fixture_path = fixture_path.ok_or("missing <fixture> path")?;
+            let fixture = Fixture::load(&fixture_path, &compiler)?;
+            materialize(&workspace_root, &fixture)?;
+            eprintln!("[xfix] materialized {} (reproduction matches recorded hashes)", fixture.name);
             Ok(ExitCode::from(0))
         }
         "verify" => {

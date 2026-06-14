@@ -135,6 +135,71 @@ fn is_asm_diff(d: &ManifestDiff) -> bool {
     }
 }
 
+/// Regenerate a fixture's **gitignored golden bytes** from the oracle and
+/// prove they reproduce the recorded hashes.
+///
+/// The repo tracks only each output's `sha256`/`size` in
+/// `expected/<compiler>/manifest.toml` — the multi-megabyte `.OBJ`/`.ASM`/etc.
+/// bytes are a reproducible cache, not version-controlled. `materialize`
+/// re-drives the oracle, **gates every output's sha256 (and size, exit code)
+/// against the tracked manifest**, and only then writes the bytes back into
+/// `expected/`. A mismatch means the installed oracle drifted from the one
+/// that captured the fixture (wrong distro, wrong faketime), so we refuse to
+/// write rather than silently desync the cache from its manifest.
+///
+/// Stdout/stderr sha differences are **not** gating here (mirroring
+/// [`verify_ours`]): BCC's "Available memory N" banner reflects DOSBox-emulated
+/// RAM and can vary across hosts. The manifest itself is left untouched — this
+/// only repopulates the cache a fresh checkout doesn't carry.
+///
+/// # Errors
+/// Returns [`HarnessError`] if the oracle fails, the fixture has no tracked
+/// `manifest.toml`, the reproduction doesn't match the recorded hashes
+/// ([`HarnessError::ReproductionMismatch`]), or the bytes can't be written.
+pub fn materialize(workspace_root: &Path, fixture: &Fixture) -> Result<(), HarnessError> {
+    let expected_manifest = load_expected_manifest(fixture)?;
+    let run = run_oracle(workspace_root, fixture)?;
+    let actual_manifest = build_manifest(fixture, &run, oracle_summary(fixture));
+
+    let mismatches: Vec<_> = diff_manifests(&expected_manifest, &actual_manifest)
+        .into_iter()
+        .filter(|d| {
+            !matches!(d, ManifestDiff::StdoutSha { .. } | ManifestDiff::StderrSha { .. })
+        })
+        .collect();
+    if let Some(first) = mismatches.first() {
+        return Err(HarnessError::ReproductionMismatch {
+            fixture: fixture.name.clone(),
+            detail: describe_manifest_diff(first),
+        });
+    }
+
+    let expected = fixture.expected_dir();
+    fs::create_dir_all(&expected)?;
+    fs::write(expected.join("stdout"), &run.stdout)?;
+    fs::write(expected.join("stderr"), &run.stderr)?;
+    for (name, output) in &run.outputs {
+        fs::write(expected.join(name), &output.bytes)?;
+    }
+    Ok(())
+}
+
+/// One-line description of a manifest mismatch, for [`materialize`] errors.
+fn describe_manifest_diff(d: &ManifestDiff) -> String {
+    match d {
+        ManifestDiff::ExitCode { expected, actual } => {
+            format!("exit_code {expected} -> {actual}")
+        }
+        ManifestDiff::StdoutSha { .. } => "stdout sha differs".to_owned(),
+        ManifestDiff::StderrSha { .. } => "stderr sha differs".to_owned(),
+        ManifestDiff::OutputMissing { name } => format!("output {name} not reproduced"),
+        ManifestDiff::OutputUnexpected { name } => format!("unexpected output {name}"),
+        ManifestDiff::OutputMetadata { name, field, expected, actual } => {
+            format!("{name}.{field}: recorded {expected}, reproduced {actual}")
+        }
+    }
+}
+
 /// Verify by re-running the **oracle** against the fixture. Useful as a
 /// determinism check on the oracle itself — two captures of the same
 /// fixture must produce identical goldens.
@@ -417,6 +482,9 @@ pub enum HarnessError {
     ManifestParse(PathBuf, String),
     #[error("no captured expected/ at {0}: {1}")]
     MissingExpected(PathBuf, String),
+    #[error("reproduction of {fixture} does not match recorded manifest hash ({detail}); \
+             the installed oracle has drifted from the capture")]
+    ReproductionMismatch { fixture: String, detail: String },
     #[error("tool not yet implemented in our toolchain: {0}")]
     ToolNotImplemented(String),
     #[error("could not run tool {0}: {1}")]

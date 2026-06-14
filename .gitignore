@@ -28,8 +28,25 @@ pkg/
 .lattice2/
 .lattice3/
 
-# Stray Borland-built artifacts at the repo root (fixture outputs belong under
-# fixtures/ and ARE tracked, so we don't blanket-ignore these extensions).
+# Compiler binary build artifacts are NOT tracked. A fixture's
+# `expected/<compiler>/manifest.toml` records the SHA-256 (and size) of every
+# output, and that hash is the byte-exact contract the harness gates on. The
+# multi-megabyte .OBJ/.ASM/.EXE/.MAP bytes are a reproducible cache: regenerate
+# them on demand with `xfix materialize <fixture>`, which re-runs the oracle and
+# asserts each reproduction matches the recorded hash. They were purged from
+# history (see git log); never re-add them. Only the artifacts under
+# `expected/` are ignored, so future hand-written tasm-input `.ASM` fixtures
+# (which live at the fixture root, like `HELLO.C`) stay trackable.
+fixtures/**/expected/**/*.OBJ
+fixtures/**/expected/**/*.obj
+fixtures/**/expected/**/*.ASM
+fixtures/**/expected/**/*.asm
+fixtures/**/expected/**/*.EXE
+fixtures/**/expected/**/*.exe
+fixtures/**/expected/**/*.MAP
+fixtures/**/expected/**/*.map
+
+# Stray Borland-built artifacts at the repo root and the `w/` scratch dir.
 /*.OBJ
 /*.obj
 /*.EXE
@@ -38,12 +55,10 @@ pkg/
 /*.map
 /*.ASM
 /*.asm
-fixtures/*/*.OBJ
-fixtures/*/*.obj
-fixtures/*/*.EXE
-fixtures/*/*.exe
-fixtures/*/*.MAP
-fixtures/*/*.map
+/w/*.OBJ
+/w/*.obj
+/w/*.EXE
+/w/*.exe
 
 # OS / editor
 .DS_Store
