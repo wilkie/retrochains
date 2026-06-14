@@ -24,6 +24,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         param_pointee_sizes: Vec::new(),
         global_names: Vec::new(),
         globals: Vec::new(),
+        local_static_idxs: Vec::new(),
         global_dims: std::collections::HashMap::new(),
         local_dims: std::collections::HashMap::new(),
         param_dims: std::collections::HashMap::new(),
@@ -2061,7 +2062,24 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 j += 1;
             }
             if has_static {
+                let before = p.global_names.len();
                 parse_global_decl(p)?;
+                // Mark the lifted globals as function-local statics, and rename
+                // any EARLIER local static of the same name so this function's
+                // body (parsed next) binds `name` to its own static via
+                // first-match resolution. Earlier statics were already baked as
+                // `Expr::Global(old_idx)` in their function's body, so renaming
+                // the (PUBDEF-less, offset-referenced) name is purely cosmetic.
+                // Fixture 2264 (two functions, each `static int counter`).
+                for new_idx in before..p.global_names.len() {
+                    let name = p.global_names[new_idx].clone();
+                    for old_idx in p.local_static_idxs.clone() {
+                        if p.global_names[old_idx] == name {
+                            p.global_names[old_idx] = format!("{name}@{old_idx}");
+                        }
+                    }
+                    p.local_static_idxs.push(new_idx);
+                }
                 continue;
             }
         }

@@ -1644,6 +1644,12 @@ struct Parser<'a> {
     global_names: Vec<String>,
     /// Same source order, used to materialize the `Unit::globals`.
     globals: Vec<Global>,
+    /// Indices into `global_names`/`globals` of function-local `static`
+    /// declarations (lifted to TU-private globals). When a later function
+    /// declares a local static with the SAME source name, the earlier one is
+    /// renamed so first-match name resolution binds each function's body to ITS
+    /// own static rather than an earlier function's. Fixture 2264.
+    local_static_idxs: Vec<usize>,
     /// Multidimensional array shapes, keyed by global / local index.
     /// `[2,3]` for `int a[2][3]`. Absent for scalars and 1-D arrays.
     /// Lets `a[i][j]` with constant indices fold to a flat element offset
