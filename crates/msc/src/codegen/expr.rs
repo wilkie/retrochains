@@ -1628,12 +1628,12 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
         }
         Expr::LocalIndex { local, index } => {
             if let Some(k) = index.fold(locals.inits) {
-                // Constant K → `mov ax, [bp+disp+2K]`.
+                // Constant K → `mov ax, [bp+disp+2K]`. (An int-array variable index
+                // also folds to this direct form — fixture 1090.)
                 let disp = locals.disp(*local) + (k as i16) * 2;
                 out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             } else {
                 // Runtime index: load into SI, scale, load element.
-                // Requires Frame::WithSlideSi (push si in prologue).
                 emit_index_to_si(index, locals, out, fixups);
                 out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
                 let base_disp = locals.disp(*local);
@@ -1641,13 +1641,21 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             }
         }
         Expr::LocalIndexByte { local, index } => {
-            if let Some(k) = index.fold(locals.inits) {
+            // A bare CHAR-array VARIABLE index uses SI-indexed addressing even when
+            // `i` is a known constant (MSC keeps it runtime — `mov si,imm`); only a
+            // literal index folds to a direct `[bp+disp+K]`. Fixture 1428.
+            if matches!(index.as_ref(), Expr::Local(_) | Expr::Param(_)) {
+                emit_var_index_to_si(index, locals, out, fixups);
+                let base_disp = locals.disp(*local);
+                out.push(0x8A); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov al,[bp+si+base]
+                out.push(0x98); // cbw
+            } else if let Some(k) = index.fold(locals.inits) {
                 // Constant K → `mov al, [bp+disp+K]; cbw`.
                 let disp = locals.disp(*local) + (k as i16);
                 out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
                 out.push(0x98);
             } else {
-                // Runtime index: load into SI (no scale for bytes), load byte, cbw.
+                // Computed runtime index: build into SI (no scale for bytes).
                 emit_index_to_si(index, locals, out, fixups);
                 let base_disp = locals.disp(*local);
                 out.push(0x8A); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov al,[bp+si+base]

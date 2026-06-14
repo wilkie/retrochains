@@ -1584,6 +1584,10 @@ pub(crate) fn emit_return(
             return;
         } else if let Expr::LocalIndexByte { local: l, index } = expr
             && index.fold(locals.inits).is_some()
+            // A bare VARIABLE index uses runtime SI addressing (handled by the
+            // emit_expr_to_ax fallthrough); only a literal index folds to a direct
+            // slot load here. Fixture 1428.
+            && !matches!(index.as_ref(), Expr::Local(_) | Expr::Param(_))
         {
             let k = index.fold(locals.inits).unwrap();
             let byte_disp = locals.disp(*l) + k as i16;

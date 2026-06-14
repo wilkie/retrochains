@@ -1921,6 +1921,19 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                     !matches!(index.as_ref(), Expr::IntLit(_)),
                 _ => false,
             };
+            // A CHAR-array `a[i]` (i a bare local/param) whose value does NOT fold
+            // is left with its variable index so codegen emits a runtime SI-indexed
+            // byte load — captured before prop_expr rewrites `i` to a literal. An
+            // int-array read folds the index to a direct `[bp+base+2K]` instead, so
+            // it is NOT restored. Fixture 1428 (char, SI) vs 1090 (int, direct).
+            let simple_var_index = match e {
+                Expr::LocalIndexByte { index, .. } =>
+                    match index.as_ref() {
+                        Expr::Local(_) | Expr::Param(_) => Some((**index).clone()),
+                        _ => None,
+                    },
+                _ => None,
+            };
             let (local, elem_size, known_k) = match e {
                 Expr::LocalIndex { local, index } => {
                     prop_expr(index, cp);
@@ -1946,6 +1959,15 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 && (!read_was_var || cp.la_var_written.contains(&(local, byte_off)))
             {
                 *e = Expr::IntLit(v);
+            } else if read_was_var && let Some(orig) = simple_var_index {
+                // Value didn't fold — restore the bare variable index so codegen
+                // emits a runtime SI-indexed load rather than a folded direct one
+                // (MSC keeps `a[i]` runtime even when `i` is known). Fixture 1428.
+                match e {
+                    Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. } =>
+                        **index = orig,
+                    _ => {}
+                }
             }
         }
         Expr::DerefByte { .. } | Expr::DerefWord { .. } => {

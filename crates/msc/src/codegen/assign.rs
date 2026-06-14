@@ -3424,6 +3424,16 @@ pub(crate) fn emit_index_to_si(index: &Expr, locals: &Locals<'_>, out: &mut Vec<
         }
     }
 }
+/// Load a bare variable array index into SI for a runtime-indexed READ. A KNOWN
+/// constant value materializes as `mov si,imm` (MSC keeps `a[i]` runtime but
+/// folds the index value), otherwise the index slot is loaded. Fixture 1428.
+pub(crate) fn emit_var_index_to_si(index: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    if let Some(k) = index.fold(locals.inits) {
+        out.push(0xBE); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov si,imm16
+    } else {
+        emit_index_to_si(index, locals, out, fixups);
+    }
+}
 /// Emit a byte-sized RHS into AL. For simple locals/params, use
 /// an explicit byte load (`8a 46 disp`) so MSC's `mov al, [bp+d]`
 /// form is matched. For other expressions evaluate into AX (AL is

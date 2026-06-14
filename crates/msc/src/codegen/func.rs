@@ -115,8 +115,13 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
     }
     fn expr_si(e: &Expr, inits: &[Option<i32>]) -> bool {
         match e {
-            Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. } => {
-                index.fold(inits).is_none()
+            Expr::LocalIndex { index, .. } => index.fold(inits).is_none(),
+            Expr::LocalIndexByte { index, .. } => {
+                // A bare CHAR-array variable index uses runtime SI addressing even
+                // when it folds (MSC keeps `a[i]` runtime); only a literal index
+                // avoids SI. Survives const-prop only for a non-forwarded read (1428).
+                matches!(index.as_ref(), Expr::Local(_) | Expr::Param(_))
+                    || index.fold(inits).is_none()
             }
             // `a[i]` on a pointer/array PARAM with a runtime index loads the
             // pointer into SI (`mov si,[bp+p]; mov ax,[bx+si]`).
