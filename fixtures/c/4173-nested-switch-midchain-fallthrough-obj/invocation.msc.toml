@@ -1,0 +1,4 @@
+description = "no-default switch; case1 nested-switch (jump-out), case2 return, case3 fall-through: continuation goes at the END (FWD after last body)"
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

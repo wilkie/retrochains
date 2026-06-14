@@ -306,7 +306,7 @@ pub(crate) fn emit_stmt(
         Stmt::Assign { target, value } => emit_assign(target.clone(), value, locals, out, fixups),
         Stmt::Switch { scrutinee, cases } => {
             let known_k = if let Expr::IntLit(k) = scrutinee { Some(*k) } else { None };
-            emit_runtime_switch(scrutinee, known_k, cases, locals, frame, return_int, return_long, out, fixups, None);
+            emit_runtime_switch(scrutinee, known_k, cases, locals, frame, return_int, return_long, out, fixups, None, &mut Vec::new());
         }
         Stmt::Break => {
             // Emit a forward `jmp short` (eb) placeholder; the enclosing loop
@@ -5076,8 +5076,16 @@ pub(crate) fn emit_partial_switch_with_continuation(
             if out.len() % 2 != 0 { out.push(0x90); }
         }
     } else if fwd_path {
-        // CASE 2 FWD: ft body jumps forward past NFC[0] to RL; NFC[0] falls
-        // through. A terminating ft body needs no jmp (fixture 520).
+        // CASE 2 FWD: the continuation (RL) sits right after the FIRST case body
+        // that falls through to it (or after the last body when none does).
+        // Bodies BEFORE RL reach it by falling through (the fall-through body
+        // itself) or by a forward jump (a terminating body just returns; a
+        // jump-out body — nested switch / loop / `if` whose tail leaves —
+        // jumps forward, with nested switches fused straight to RL). Bodies
+        // AFTER RL jump back to it. With NFC[0] the fall-through body this is
+        // the classic 454/4166-a / loop (3234) shape; a later fall-through body
+        // pushes RL toward the end (fixture 4173). A terminating ft body needs
+        // no chain jmp (fixture 520).
         let ft_jmp_patch = if !ft_term {
             out.push(0xEB);
             let p = out.len();
@@ -5088,12 +5096,41 @@ pub(crate) fn emit_partial_switch_with_continuation(
         };
         if out.len() % 2 != 0 { out.push(0x90); }
 
-        // NFC[0]: between ft body and return_label. Falls through — no explicit jmp.
-        if let Some((b, f, _)) = nfc_bufs.first() {
-            nfc_starts.push((nfc_idxs[0], out.len()));
-            let base = out.len();
-            for mut fx in f.iter().cloned() { fx.body_offset += base; fixups.push(fx); }
-            out.extend_from_slice(b);
+        let n = nfc_idxs.len();
+        let ff = nfc_idxs.iter().position(|&i| case_body_falls_through(&cases[i].body));
+        let rl_after = ff.unwrap_or(n.saturating_sub(1));
+
+        // Forward fall-out jumps (the chain jmp, and the fall-out jumps of
+        // bodies emitted BEFORE the continuation) are recorded and patched to RL
+        // once it is known — RL is simply the offset reached after the last
+        // before-RL body, so no size pre-computation is needed.
+        let mut fwd_patches: Vec<usize> = ft_jmp_patch.into_iter().collect();
+
+        // Bodies before RL (0..=rl_after). The fall-through body (rl_after, when
+        // some body falls through) is placed last with no jmp and no trailing
+        // nop — RL follows it directly.
+        for bi in 0..if n > 0 { rl_after + 1 } else { 0 } {
+            nfc_starts.push((nfc_idxs[bi], out.len()));
+            let term = nfc_bufs[bi].2;
+            let falls_through = bi == rl_after && ff.is_some();
+            if !term
+                && let Some((lead, ss, sc)) = switch_tail_body(&cases[nfc_idxs[bi]].body)
+            {
+                for s in lead { emit_stmt(s, locals, frame, return_int, return_long, out, fixups); }
+                let sk = if let Expr::IntLit(k) = ss { Some(*k) } else { None };
+                // Placeholder fall-out target; positions land in fwd_patches.
+                emit_runtime_switch(ss, sk, sc, locals, frame, return_int, return_long, out, fixups, Some(0), &mut fwd_patches);
+            } else {
+                let base = out.len();
+                for mut f in nfc_bufs[bi].1.iter().cloned() { f.body_offset += base; fixups.push(f); }
+                out.extend_from_slice(&nfc_bufs[bi].0);
+                if !term && !falls_through {
+                    out.push(0xEB);
+                    fwd_patches.push(out.len());
+                    out.push(0x00);
+                }
+            }
+            if bi != rl_after && out.len() % 2 != 0 { out.push(0x90); }
         }
 
         // return_label: emit continuation.
@@ -5114,27 +5151,34 @@ pub(crate) fn emit_partial_switch_with_continuation(
             out[p] = (l_top as i32 - (p + 1) as i32) as u8;
         }
 
-        // NFC[1..]: after continuation; each starts even (a continuation
-        // ending odd gets a leading nop — fixture 454) and has a backward
-        // jmp → return_label + trailing alignment nop.
-        for (bi, (nfc_bytes, nfc_fxs, nfc_term)) in nfc_bufs.iter().enumerate().skip(1) {
+        // Bodies after RL (rl_after+1..): each starts even and jumps back to RL
+        // (RL now known, so switch-tail fusion bakes its jumps directly).
+        for bi in (rl_after + 1)..n {
             if out.len() % 2 != 0 { out.push(0x90); }
             nfc_starts.push((nfc_idxs[bi], out.len()));
-            let base = out.len();
-            for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
-            out.extend_from_slice(nfc_bytes);
-            if !nfc_term {
-                out.push(0xEB);
-                let p = out.len();
-                out.push(0x00);
-                let rel8 = rl as i32 - (p + 1) as i32;
-                out[p] = rel8 as u8;
+            let term = nfc_bufs[bi].2;
+            if !term
+                && let Some((lead, ss, sc)) = switch_tail_body(&cases[nfc_idxs[bi]].body)
+            {
+                for s in lead { emit_stmt(s, locals, frame, return_int, return_long, out, fixups); }
+                let sk = if let Expr::IntLit(k) = ss { Some(*k) } else { None };
+                emit_runtime_switch(ss, sk, sc, locals, frame, return_int, return_long, out, fixups, Some(rl), &mut Vec::new());
+            } else {
+                let base = out.len();
+                for mut f in nfc_bufs[bi].1.iter().cloned() { f.body_offset += base; fixups.push(f); }
+                out.extend_from_slice(&nfc_bufs[bi].0);
+                if !term {
+                    out.push(0xEB);
+                    let p = out.len();
+                    out.push(0x00);
+                    out[p] = (rl as i32 - (p + 1) as i32) as u8;
+                }
             }
             if out.len() % 2 != 0 { out.push(0x90); }
         }
 
-        // Patch ft_jmp → return_label.
-        if let Some(p) = ft_jmp_patch {
+        // Patch all forward fall-out jumps → return_label.
+        for p in fwd_patches {
             out[p] = (rl as i32 - (p + 1) as i32) as u8;
         }
     } else {
@@ -5168,7 +5212,7 @@ pub(crate) fn emit_partial_switch_with_continuation(
                 }
                 let sub_k = if let Expr::IntLit(k) = sub_scrut { Some(*k) } else { None };
                 emit_runtime_switch(sub_scrut, sub_k, sub_cases, locals, frame,
-                                    return_int, return_long, out, fixups, Some(rl));
+                                    return_int, return_long, out, fixups, Some(rl), &mut Vec::new());
             } else {
                 let base = out.len();
                 for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
@@ -5360,8 +5404,13 @@ pub(crate) fn emit_runtime_switch(
     // case body: its no-match fall-out and its case `break`s target the outer
     // continuation `rl` (an absolute _TEXT offset) DIRECTLY rather than the
     // local post-switch position — MSC fuses the two edges, avoiding a
-    // double-jump through a separate break jmp. Fixture 3277.
+    // double-jump through a separate break jmp. Fixture 3277. The rel8 byte of
+    // every such fall-out jump is recorded in `fallout_jmps` so a caller that
+    // doesn't yet know `rl` (a FORWARD reference, e.g. a body emitted before the
+    // continuation in the FWD layout) can pass a placeholder and patch them
+    // afterwards (fixture 4173).
     fallout_override: Option<usize>,
+    fallout_jmps: &mut Vec<usize>,
 ) {
     if switch_is_table(cases) {
         emit_table_switch(scrutinee, cases, locals, frame, return_int, return_long, out, fixups);
@@ -5571,6 +5620,13 @@ pub(crate) fn emit_runtime_switch(
         let here_end = out.len() + 1;
         let rel8 = (start + target_off) as i32 - here_end as i32;
         out.push(rel8 as u8);
+        // A `jl` with no default targets the fall-out (continuation/override).
+        if fallout_override.is_some()
+            && matches!(op, TestOp::JlDefault { .. })
+            && default_idx.is_none()
+        {
+            fallout_jmps.push(out.len() - 1);
+        }
     }
 
     // Jmp after chain + alignment nop when not using default-fallthrough.
@@ -5581,8 +5637,11 @@ pub(crate) fn emit_runtime_switch(
             fallout_override.unwrap_or(start + switch_end)
         };
         out.push(0xEB);
-        let here_end = out.len() + 1;
-        out.push((jmp_target as i32 - here_end as i32) as u8);
+        let rel8_pos = out.len();
+        out.push((jmp_target as i32 - (rel8_pos + 1) as i32) as u8);
+        if fallout_override.is_some() && default_idx.is_none() {
+            fallout_jmps.push(rel8_pos);
+        }
         if jmp_nop_len == 3 { out.push(0x90); } // alignment nop
     }
 
@@ -5598,6 +5657,7 @@ pub(crate) fn emit_runtime_switch(
             let after_jmp = body_base + off + 2;
             let rel8 = break_target as i32 - after_jmp as i32;
             body[off + 1] = rel8 as u8;
+            if fallout_override.is_some() { fallout_jmps.push(body_base + off + 1); }
         }
         out.extend_from_slice(&body);
         if body_has_nop[case_idx] { out.push(0x90); }
