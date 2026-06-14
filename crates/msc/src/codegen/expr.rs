@@ -2234,6 +2234,15 @@ fn char_deref_ptr_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
         _ => None,
     }
 }
+/// `*p` where `p` is a near WORD-pointer (`int *`) PARAM or LOCAL → its bp-disp.
+fn word_deref_ptr_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
+    let Expr::DerefWord { ptr } = e else { return None };
+    match ptr.as_ref() {
+        Expr::Param(p) => Some(param_disp(*p)),
+        Expr::Local(l) => Some(locals.disp(*l)),
+        _ => None,
+    }
+}
 fn signed_byte_load(e: &Expr, locals: &Locals<'_>) -> bool {
     match e {
         Expr::IndexByte { .. } | Expr::LocalIndexByte { .. } | Expr::DerefByte { .. } => true,
@@ -4292,6 +4301,23 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
         };
         out.push(opc); out.push(0xC1); // op ax, cx
+        return;
+    }
+    // `*a OP *b` — both word (int-pointer) derefs. MSC loads the LHS deref into
+    // AX and folds the RHS as a memory operand: `mov bx,[a]; mov ax,[bx]; mov
+    // bx,[b]; sub ax,[bx]`. The int-pointer string-compare epilogue (`*a - *b`).
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(lp) = word_deref_ptr_disp(left, locals)
+        && let Some(rp) = word_deref_ptr_disp(right, locals)
+    {
+        out.push(0x8B); out.push(bp_modrm(0x5E, lp)); push_bp_disp(out, lp); // mov bx,[a]
+        out.extend_from_slice(&[0x8B, 0x07]);                               // mov ax,[bx]
+        out.push(0x8B); out.push(bp_modrm(0x5E, rp)); push_bp_disp(out, rp); // mov bx,[b]
+        let opc = match op {
+            BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
+            BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
+        };
+        out.push(opc); out.push(0x07); // op ax,[bx]
         return;
     }
     // Two SIGNED byte (char) operands (`a OP b`, both byte loads): MSC loads the

@@ -2140,102 +2140,161 @@ pub(crate) fn body_has_char_accum(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| matches!(s, Stmt::While { cond, body }
         if while_char_accum(cond, body).is_some()))
 }
-/// A `while (X && Y)` string-compare loop where one conjunct is `*p` (truthy) and
-/// the other is `*p == *q` / `*p != *q`, both dereferencing the SAME iterator
-/// pointer `p`. MSC loads `*p` ONCE per iteration (at the loop-back A-test),
-/// caches the byte in a 2-byte stack temp, and reuses it for the top-of-loop
-/// B-test — avoiding a reload + double-`cbw` word compare. Fixtures 1352/3418
-/// (`*a && *a==*b`), 2362 (`*p==*q && *p`).
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct StrcmpWhile {
-    pub p_is_param: bool,
-    pub p: usize,
-    pub q_is_param: bool,
-    pub q: usize,
-    /// The FIRST conjunct (A, emitted at the loop-back COND) is the comparison;
-    /// otherwise A is the bare `*p` truthy test and B is the comparison.
-    pub a_is_cmp: bool,
-    /// The comparison is `!=` rather than `==`.
-    pub cmp_ne: bool,
+/// A `while` loop whose `&&` condition shares one iterator-pointer deref `*p`
+/// across all conjuncts: `*p` (a nonzero test) plus any number of `*p ==/!= *q_i`
+/// comparisons (in EITHER operand position). MSC computes `*p` ONCE per iteration
+/// — common-subexpression elimination over the loop condition — and reuses it:
+///   - CHAR (`char *`) → the byte is spilled to a stack temp (no byte-half of SI);
+///   - INT (`int *`)   → the word stays in SI (a `push si` register cache).
+/// Confirmed against the oracle with three discerning variants (`int *`, a 3-way
+/// `*a==*b && *a==*c`, and a swapped `*b==*a`). Fixtures 1352/3418/2362 (char) and
+/// 4145/4146/4147 (the variants). This struct models the byte case; the word case
+/// is detected the same way but emitted via SI.
+#[derive(Clone, Debug)]
+enum CseConj {
+    /// `*p` — the iterator's nonzero test.
+    Truthy,
+    /// `*p ==/!= *q` — `q` is the OTHER pointer (whichever side isn't `p`).
+    Cmp { q_is_param: bool, q: usize, ne: bool },
 }
-fn deref_byte_ptr_id(e: &Expr) -> Option<(bool, usize)> {
-    let Expr::DerefByte { ptr } = e else { return None };
+#[derive(Clone, Debug)]
+pub(crate) struct CseDerefWhile {
+    p_is_param: bool,
+    p: usize,
+    /// `*p` is a word (int) deref → cache in SI; otherwise a byte (char) → temp.
+    pub(crate) is_word: bool,
+    /// Conjuncts in SOURCE order: `[0]` is tested at the loop-back COND (and loads
+    /// + caches `*p`); `[1..]` are tested at the top of the loop body.
+    conjuncts: Vec<CseConj>,
+}
+fn deref_ptr_id(e: &Expr) -> Option<(bool, usize, bool)> {
+    let (ptr, is_word) = match e {
+        Expr::DerefByte { ptr } => (ptr, false),
+        Expr::DerefWord { ptr } => (ptr, true),
+        _ => return None,
+    };
     match ptr.as_ref() {
-        Expr::Param(i) => Some((true, *i)),
-        Expr::Local(i) => Some((false, *i)),
+        Expr::Param(i) => Some((true, *i, is_word)),
+        Expr::Local(i) => Some((false, *i, is_word)),
         _ => None,
     }
 }
-pub(crate) fn strcmp_while(cond: &Cond) -> Option<StrcmpWhile> {
-    let Cond::And(a, b) = cond else { return None };
-    let truthy = |c: &Cond| -> Option<(bool, usize)> {
-        if let Cond::Truthy(e) = c { deref_byte_ptr_id(e) } else { None }
-    };
-    // `*p == *q` / `*p != *q` over two char derefs; returns (p, q, is_ne).
-    let cmp = |c: &Cond| -> Option<((bool, usize), (bool, usize), bool)> {
-        if let Cond::Cmp { op: op @ (RelOp::Eq | RelOp::Ne), left, right } = c {
-            Some((deref_byte_ptr_id(left)?, deref_byte_ptr_id(right)?, matches!(op, RelOp::Ne)))
-        } else { None }
-    };
-    // A=truthy(*p), B=cmp(*p OP *q): the truthy ptr must be the cmp's LEFT ptr.
-    if let (Some(tp), Some((lp, qp, ne))) = (truthy(a), cmp(b))
-        && tp == lp
-    {
-        return Some(StrcmpWhile { p_is_param: tp.0, p: tp.1, q_is_param: qp.0, q: qp.1, a_is_cmp: false, cmp_ne: ne });
+fn flatten_and<'a>(c: &'a Cond, out: &mut Vec<&'a Cond>) {
+    if let Cond::And(l, r) = c {
+        flatten_and(l, out);
+        out.push(r);
+    } else {
+        out.push(c);
     }
-    // A=cmp(*p OP *q), B=truthy(*p).
-    if let (Some((lp, qp, ne)), Some(tp)) = (cmp(a), truthy(b))
-        && tp == lp
-    {
-        return Some(StrcmpWhile { p_is_param: tp.0, p: tp.1, q_is_param: qp.0, q: qp.1, a_is_cmp: true, cmp_ne: ne });
-    }
-    None
 }
-/// True when any top-level `while` is a [`strcmp_while`] loop — used by the
+pub(crate) fn cse_deref_while(cond: &Cond) -> Option<CseDerefWhile> {
+    if !matches!(cond, Cond::And(..)) { return None; }
+    let mut conjs: Vec<&Cond> = Vec::new();
+    flatten_and(cond, &mut conjs);
+    // The cached iterator `p` is the (single) bare `*p` truthy test's pointer.
+    let mut piw: Option<(bool, usize, bool)> = None;
+    for c in &conjs {
+        if let Cond::Truthy(e) = c {
+            let pid = deref_ptr_id(e)?;
+            if piw.is_some() { return None; } // a second truthy → not this shape
+            piw = Some(pid);
+        }
+    }
+    let (p_is_param, p, is_word) = piw?;
+    // Every conjunct must be `*p` (truthy) or a `==/!=` of `*p` against `*q`,
+    // all of the same width as `p`.
+    let mut conjuncts = Vec::with_capacity(conjs.len());
+    for c in &conjs {
+        match c {
+            Cond::Truthy(e) => {
+                if deref_ptr_id(e)? != (p_is_param, p, is_word) { return None; }
+                conjuncts.push(CseConj::Truthy);
+            }
+            Cond::Cmp { op: op @ (RelOp::Eq | RelOp::Ne), left, right } => {
+                let l = deref_ptr_id(left)?;
+                let r = deref_ptr_id(right)?;
+                if l.2 != is_word || r.2 != is_word { return None; }
+                let other = if (l.0, l.1) == (p_is_param, p) { (r.0, r.1) }
+                    else if (r.0, r.1) == (p_is_param, p) { (l.0, l.1) }
+                    else { return None };
+                conjuncts.push(CseConj::Cmp { q_is_param: other.0, q: other.1, ne: matches!(op, RelOp::Ne) });
+            }
+            _ => return None,
+        }
+    }
+    Some(CseDerefWhile { p_is_param, p, is_word, conjuncts })
+}
+/// True when any top-level `while` is a BYTE [`cse_deref_while`] loop — used by the
 /// prologue to reserve the cache temp and force a slide frame even with no locals.
-pub(crate) fn body_has_strcmp_while(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| matches!(s, Stmt::While { cond, .. } if strcmp_while(cond).is_some()))
+/// (The word case caches in SI and reserves no temp.)
+pub(crate) fn body_has_cse_byte_while(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| matches!(s, Stmt::While { cond, .. }
+        if cse_deref_while(cond).is_some_and(|w| !w.is_word)))
 }
-/// `mov bx,[p]; mov al,[bx]; mov [temp],al` — load `*p` and cache the byte.
-fn emit_strcmp_load_cache(sc: &StrcmpWhile, temp: i16, locals: &Locals<'_>, out: &mut Vec<u8>) {
-    let pd = if sc.p_is_param { param_disp(sc.p) } else { locals.disp(sc.p) };
-    out.push(0x8B); out.push(bp_modrm(0x5E, pd)); push_bp_disp(out, pd); // mov bx,[bp+pd]
-    out.extend_from_slice(&[0x8A, 0x07]);                                // mov al,[bx]
-    out.push(0x88); out.push(bp_modrm(0x46, temp)); push_bp_disp(out, temp); // mov [bp+temp],al
+fn ptr_disp(is_param: bool, idx: usize, locals: &Locals<'_>) -> i16 {
+    if is_param { param_disp(idx) } else { locals.disp(idx) }
 }
-/// `mov bx,[q]; cmp [bx],al` — compare `*q` against the cached `*p` (in AL).
-fn emit_strcmp_cmp_q(sc: &StrcmpWhile, locals: &Locals<'_>, out: &mut Vec<u8>) {
-    let qd = if sc.q_is_param { param_disp(sc.q) } else { locals.disp(sc.q) };
-    out.push(0x8B); out.push(bp_modrm(0x5E, qd)); push_bp_disp(out, qd); // mov bx,[bp+qd]
-    out.extend_from_slice(&[0x38, 0x07]);                                // cmp [bx],al
-}
-/// Emit the loop-back A-test (no back-jcc — that is appended by the caller).
-fn emit_strcmp_a(sc: &StrcmpWhile, temp: i16, locals: &Locals<'_>, out: &mut Vec<u8>) {
-    emit_strcmp_load_cache(sc, temp, locals, out);
-    if sc.a_is_cmp {
-        emit_strcmp_cmp_q(sc, locals, out);
-    } else {
-        out.extend_from_slice(&[0x0A, 0xC0]); // or al,al
+/// The back-edge jcc for the COND conjunct (loop when it is TRUE).
+fn cse_back_jcc(c: &CseConj) -> u8 {
+    match c {
+        CseConj::Truthy => 0x75,                                  // jne (nonzero)
+        CseConj::Cmp { ne, .. } => if *ne { 0x75 } else { 0x74 }, // == → je, != → jne
     }
 }
-/// Emit the top-of-loop B-test plus its forward exit-jcc (taken when the loop
-/// should END). Reuses the cached `*p` byte rather than reloading it.
-fn emit_strcmp_b(sc: &StrcmpWhile, temp: i16, exit_disp: i8, locals: &Locals<'_>, out: &mut Vec<u8>) {
-    let exit_jcc = if sc.a_is_cmp {
-        // B is the truthy `*p` test → exit when the cached byte is zero.
-        out.push(0x80); out.push(bp_modrm(0x7E, temp)); push_bp_disp(out, temp); out.push(0x00); // cmp byte [temp],0
-        0x74 // jz EXIT
+/// Emit the loop-back COND test (conjunct 0): load+cache `*p`, then test it. The
+/// back-jcc is appended by the caller.
+fn emit_cse_cond(cw: &CseDerefWhile, temp: i16, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let pd = ptr_disp(cw.p_is_param, cw.p, locals);
+    out.push(0x8B); out.push(bp_modrm(0x5E, pd)); push_bp_disp(out, pd); // mov bx,[bp+p]
+    if cw.is_word {
+        out.extend_from_slice(&[0x8B, 0x37]); // mov si,[bx]   (SI is the cache)
     } else {
-        // B is the comparison → reuse cached *p (AL), compare with *q.
-        let qd = if sc.q_is_param { param_disp(sc.q) } else { locals.disp(sc.q) };
-        out.push(0x8B); out.push(bp_modrm(0x5E, qd)); push_bp_disp(out, qd); // mov bx,[bp+qd]
-        out.push(0x8A); out.push(bp_modrm(0x46, temp)); push_bp_disp(out, temp); // mov al,[bp+temp]
-        out.extend_from_slice(&[0x38, 0x07]); // cmp [bx],al
-        // exit when the comparison is FALSE: `==` exits on != (jnz), `!=` on jz.
-        if sc.cmp_ne { 0x74 } else { 0x75 }
-    };
-    out.push(exit_jcc);
-    out.push(exit_disp as u8);
+        out.extend_from_slice(&[0x8A, 0x07]); // mov al,[bx]
+        out.push(0x88); out.push(bp_modrm(0x46, temp)); push_bp_disp(out, temp); // mov [temp],al
+    }
+    match &cw.conjuncts[0] {
+        CseConj::Truthy => out.extend_from_slice(if cw.is_word { &[0x0B, 0xF6] } else { &[0x0A, 0xC0] }), // or si,si | or al,al
+        CseConj::Cmp { q_is_param, q, .. } => {
+            let qd = ptr_disp(*q_is_param, *q, locals);
+            out.push(0x8B); out.push(bp_modrm(0x5E, qd)); push_bp_disp(out, qd); // mov bx,[bp+q]
+            out.extend_from_slice(if cw.is_word { &[0x39, 0x37] } else { &[0x38, 0x07] }); // cmp [bx],si | cmp [bx],al
+        }
+    }
+}
+/// Emit the top-of-loop tests (conjuncts 1..) with placeholder forward exit-jccs,
+/// reusing the cached `*p`. Records each exit-jcc disp-byte position for patching.
+fn emit_cse_loop(cw: &CseDerefWhile, temp: i16, locals: &Locals<'_>, out: &mut Vec<u8>, exits: &mut Vec<usize>) {
+    let mut al_loaded = false; // (byte only) whether AL currently holds the cache
+    for c in &cw.conjuncts[1..] {
+        let exit_jcc = match c {
+            CseConj::Cmp { q_is_param, q, ne } => {
+                let qd = ptr_disp(*q_is_param, *q, locals);
+                out.push(0x8B); out.push(bp_modrm(0x5E, qd)); push_bp_disp(out, qd); // mov bx,[bp+q]
+                if cw.is_word {
+                    out.extend_from_slice(&[0x39, 0x37]); // cmp [bx],si
+                } else {
+                    if !al_loaded {
+                        out.push(0x8A); out.push(bp_modrm(0x46, temp)); push_bp_disp(out, temp); // mov al,[temp]
+                        al_loaded = true;
+                    }
+                    out.extend_from_slice(&[0x38, 0x07]); // cmp [bx],al
+                }
+                // exit when the comparison is FALSE: `==` exits on != (jne), `!=` on je.
+                if *ne { 0x74 } else { 0x75 }
+            }
+            CseConj::Truthy => {
+                if cw.is_word {
+                    out.extend_from_slice(&[0x0B, 0xF6]); // or si,si
+                } else {
+                    out.push(0x80); out.push(bp_modrm(0x7E, temp)); push_bp_disp(out, temp); out.push(0x00); // cmp byte [temp],0
+                }
+                0x74 // jz EXIT (exit when zero)
+            }
+        };
+        out.push(exit_jcc);
+        exits.push(out.len());
+        out.push(0x00); // placeholder disp, patched by the caller
+    }
 }
 /// Emit the char-deref accumulate loop (see [`while_char_accum`]). `*s` is cached
 /// in a 2-byte stack temp at `min(local disp) - 2` (one slot below the locals,
@@ -3910,24 +3969,29 @@ pub(crate) fn emit_loop(
     // exit-jcc, and A (left) after the body as the loop-back cmp section.
     // Layout: jmp→A_check; [nop]; B_check+exit_jcc; body; A_check; jcc_back→B_check.
     if let Cond::And(cond_a, cond_b) = cond {
-        // String-compare loops cache the shared `*p` byte in a stack temp and
-        // reuse it across the A and B tests (see [`strcmp_while`]). Otherwise the
-        // generic split emits each conjunct with its own deref/widen.
-        let strcmp = strcmp_while(cond);
-        if let Some(sc) = strcmp {
-            let temp = body_locals.deepest_local_disp() - 2;
-            emit_strcmp_a(&sc, temp, &body_locals, &mut cmp_buf);
-        } else {
-            emit_cond_cmp(cond_a, &body_locals, &mut cmp_buf, &mut cmp_fixups);
-        }
-        let b_exit_disp = i8::try_from(body_buf.len() + cmp_buf.len() + 2)
-            .expect("&&-while B exit disp fits in i8");
+        // CSE-deref loops cache the shared `*p` (byte → stack temp) and reuse it
+        // across ALL conjuncts (see [`cse_deref_while`]). Conjunct 0 → COND
+        // (loop-back), conjuncts 1.. → the top-of-loop exit tests. The generic
+        // split below emits exactly two conjuncts, each with its own deref/widen.
+        let cse = cse_deref_while(cond);
         let mut b_cond_buf: Vec<u8> = Vec::new();
         let mut b_cond_fixups: Vec<Fixup> = Vec::new();
-        if let Some(sc) = strcmp {
+        if let Some(cw) = &cse {
             let temp = body_locals.deepest_local_disp() - 2;
-            emit_strcmp_b(&sc, temp, b_exit_disp, &body_locals, &mut b_cond_buf);
+            emit_cse_cond(cw, temp, &body_locals, &mut cmp_buf);
+            let mut exits: Vec<usize> = Vec::new();
+            emit_cse_loop(cw, temp, &body_locals, &mut b_cond_buf, &mut exits);
+            // Each top-of-loop exit-jcc targets EXIT (loop_end), which sits past
+            // b_cond_buf + body + cmp_buf + the 2-byte back-jcc.
+            let to_exit = b_cond_buf.len() + body_buf.len() + cmp_buf.len() + 2;
+            for pos in exits {
+                let disp = i8::try_from(to_exit - (pos + 1)).expect("cse exit disp fits in i8");
+                b_cond_buf[pos] = disp as u8;
+            }
         } else {
+            emit_cond_cmp(cond_a, &body_locals, &mut cmp_buf, &mut cmp_fixups);
+            let b_exit_disp = i8::try_from(body_buf.len() + cmp_buf.len() + 2)
+                .expect("&&-while B exit disp fits in i8");
             emit_cond_skip(cond_b, b_exit_disp, &body_locals, &mut b_cond_buf, &mut b_cond_fixups);
         }
         let b_cond_len = b_cond_buf.len();
@@ -3989,6 +4053,9 @@ pub(crate) fn emit_loop(
     let jcc_opcode = match cond {
         Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
         Cond::Cmp { op, .. } => back_jcc(cond, *op),
+        // A CSE-deref loop's COND is conjunct 0 of the flattened `&&` chain.
+        Cond::And(..) if let Some(cw) = cse_deref_while(cond) =>
+            cse_back_jcc(&cw.conjuncts[0]),
         Cond::And(cond_a, _) => match cond_a.as_ref() {
             Cond::Truthy(_) => 0x75,
             Cond::Cmp { op, .. } => back_jcc(cond_a, *op),
