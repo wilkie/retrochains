@@ -802,6 +802,41 @@ impl<'a> super::FunctionEmitter<'a> {
         dest_hi: &str,
         dest_lo: &str,
     ) -> bool {
+        // Algebraic identity simplification — BCC's frontend folds these before
+        // codegen, so a long value combining an lvalue with an op's identity
+        // element collapses to a plain copy (and `* 0` to a zero store) rather
+        // than emitting the full long arithmetic. Confirmed against the oracle:
+        // `a+0`, `a-0`, `a*1`, `a/1`, `a|0`, `a^0` and the commutative `0+a` /
+        // `1*a` fold to a copy; `a*0` / `0*a` to zero. NOT folded (left to their
+        // own paths): shifts `a<<0` / `a>>0` (keep the shift shape) and a
+        // const-on-LEFT bitwise `0|a` / `0^a`. Fixture 4186 (`long r = a + 0L`).
+        if let ExprKind::BinOp { op, left, right } = &value.kind {
+            let identity_copy: Option<&Expr> = if try_const_eval(right) == Some(0)
+                && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitOr | BinOp::BitXor)
+            {
+                Some(left)
+            } else if try_const_eval(right) == Some(1)
+                && matches!(op, BinOp::Mul | BinOp::Div)
+            {
+                Some(left)
+            } else if try_const_eval(left) == Some(0) && matches!(op, BinOp::Add) {
+                Some(right)
+            } else if try_const_eval(left) == Some(1) && matches!(op, BinOp::Mul) {
+                Some(right)
+            } else {
+                None
+            };
+            if let Some(inner) = identity_copy {
+                return self.try_emit_long_value_to_dest(inner, dest_hi, dest_lo);
+            }
+            if matches!(op, BinOp::Mul)
+                && (try_const_eval(right) == Some(0) || try_const_eval(left) == Some(0))
+            {
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},0\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_lo},0\r\n");
+                return true;
+            }
+        }
         // `<dest> = -<long-lvalue>` — neg ax / neg dx / sbb ax, 0
         // shape. Mirrors the assign path (fixture 331).
         if let ExprKind::Unary { op: UnaryOp::Neg, operand } = &value.kind

@@ -1470,10 +1470,11 @@ pub(crate) fn init_is_zero_const_identity(e: &Expr) -> bool {
 }
 /// For a `long` local init: true when the value reduces to a known constant via
 /// a literal, a copy of another foldable-const long, or an identity op (`a * 1L`,
-/// `a + 0L`, `a << 0`). MSC const-propagates such a long through an `(int)`
-/// truncation (`return (int)r;` → `mov ax,K`). Real long arithmetic/cast/shift
+/// `a + 0L`, `a << 0`, `a | 0L`). MSC const-propagates such a long through an
+/// `(int)` truncation (`return (int)r;` → `mov ax,K`). Real long arithmetic/cast
 /// (`a + b`, `(long)i`, `a >> 1`) is NOT foldable — its `(int)` read stays a slot
-/// load. Fixture 1783 (vs 1037 / 1638 / 2183).
+/// load. Fixture 1783 (vs 1037 / 1638 / 2183); the bitwise identities (`| 0`,
+/// `^ 0`) were surfaced by BCC fixture 4187 (both compilers fold them).
 pub(crate) fn long_init_int_foldable(e: &Expr, locals: &[LocalSpec]) -> bool {
     match e {
         Expr::IntLit(_) => true,
@@ -1481,7 +1482,8 @@ pub(crate) fn long_init_int_foldable(e: &Expr, locals: &[LocalSpec]) -> bool {
         Expr::BinOp { op, left, right } => {
             let ident_right = matches!((op, right.as_ref()),
                 (BinOp::Mul | BinOp::Div, Expr::IntLit(1))
-                | (BinOp::Add | BinOp::Sub | BinOp::Shl | BinOp::Shr, Expr::IntLit(0)));
+                | (BinOp::Add | BinOp::Sub | BinOp::Shl | BinOp::Shr
+                    | BinOp::BitOr | BinOp::BitXor, Expr::IntLit(0)));
             let ident_left = matches!((op, left.as_ref()),
                 (BinOp::Mul, Expr::IntLit(1)) | (BinOp::Add, Expr::IntLit(0)));
             (ident_right && long_init_int_foldable(left, locals))
