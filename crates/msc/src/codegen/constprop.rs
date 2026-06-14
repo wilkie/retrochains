@@ -363,6 +363,24 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             // through a pointer, so the element stays unknown (later direct reads
             // must NOT fold). Fixture 1017.
             let mut from_ptr_store = false;
+            // A source-literal-cond ternary RHS (`p = 1 ? &a : &b`) is compile-
+            // time — collapse it to the chosen arm NOW, before the pointer-alias
+            // and ptr_addr analysis below, so `p = &a` aliasing is recorded (the
+            // generic Ternary collapse in prop_expr runs too late, after those
+            // checks). The arm is left un-prop'd so an `&a`/`&g` arm reaches the
+            // tracked-alias path (which keeps a's value) rather than escaping it.
+            // Fixture 2318.
+            if let Expr::Ternary { cond, then_arm, else_arm } = value
+                && let Expr::IntLit(k) = cond.as_ref()
+            {
+                let chosen = if *k != 0 { (**then_arm).clone() } else { (**else_arm).clone() };
+                let mut dropped = if *k != 0 { (**else_arm).clone() } else { (**then_arm).clone() };
+                // The DEAD arm still has its source-level escape effect — `&b` in
+                // `1 ? &a : &b` escapes b even though that arm is dropped, so a
+                // later read of b must reload (not fold its init). Fixture 2318.
+                prop_expr(&mut dropped, cp);
+                *value = chosen;
+            }
             // Runtime 2-D store `a[i][j] = v`: fold the indices; when both are
             // known, rewrite to a flat IndexedGlobal/IndexedLocal store (matching
             // MSC's const folding). Otherwise it stays Index2D for SI/BX codegen.
