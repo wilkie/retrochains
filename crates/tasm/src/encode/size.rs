@@ -406,6 +406,7 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         | Instr::MovAxFromBxPtr
         | Instr::MovBxFromBxPtr
         | Instr::SubAxFromSiPtr
+        | Instr::SubAxFromDiPtr
         | Instr::AddAxFromSiPtr
         | Instr::AddAxFromDiPtr
         | Instr::AddReg16FromBxPtr { .. }

@@ -357,6 +357,12 @@ pub(crate) fn emit_instr(
             out.push(0x2B);
             out.push(0x04);
         }
+        Instr::SubAxFromDiPtr => {
+            // `sub ax,word ptr [di]` → 2B 05. ModR/M 05 = mod=00 reg=AX
+            // r/m=101 ([di]).
+            out.push(0x2B);
+            out.push(0x05);
+        }
         Instr::AddAxFromSiPtr => {
             // `add ax,word ptr [si]` → 03 04. Same ModR/M as the
             // `sub` sibling, opcode 03 (add r16,r/m16).

@@ -452,6 +452,9 @@ pub enum Instr {
     /// rm=100([si]). Used when the right operand of a non-commutative
     /// op is a deref of a register-resident pointer (fixture 201).
     SubAxFromSiPtr,
+    /// `sub ax,word ptr [di]` — 2B 05 (mod=00 reg=000(ax) rm=101([di])). The
+    /// `sub` companion to `AddAxFromDiPtr`, no displacement. Fixture 4147.
+    SubAxFromDiPtr,
     /// `add ax,word ptr [si]` — 03 04. Same ModR/M as the `sub`
     /// sibling; opcode 03 vs 2B. Fixture 202 uses this when the
     /// commutative-swap rule can't fire because LHS isn't a constant.

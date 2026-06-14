@@ -1,0 +1,4 @@
+description = "experiment: probe MSC's strcmp/CSE generalization boundary"
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
