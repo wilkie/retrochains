@@ -68,6 +68,17 @@ pub(crate) fn emit_call_inner(
             let reuse_st0 = locals.fpu_live.get() == Some(*li);
             if reuse_st0 { locals.fpu_live.set(None); }
             emit_push_arg_float_inner(bits, 8, reuse_st0, out, fixups);
+        } else if let Expr::Local(li) = arg
+            && locals.is_float_local(*li)
+            && locals.size(*li) == 4
+            && locals.float_param_funcs.get(&sym).and_then(|v| v.get(i)).copied().unwrap_or(0) == 8
+            && let Some(bits) = locals.local_float_bits(*li)
+        {
+            // A known `float` local passed to a `double` PARAM promotes to a
+            // double: MSC reloads the f64 representation of the constant from a
+            // separate CONST pool slot. `bits` is already the f64 pattern.
+            // Fixture 2146 (`scale(f)` with float f).
+            emit_push_arg_float(bits, 8, out, fixups);
         } else if is_long_param {
             emit_push_arg_long(arg, locals, out, fixups);
         } else {
@@ -94,6 +105,10 @@ pub(crate) fn emit_call_inner(
         else if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } }
         else if is_variadic && matches!(a, Expr::Local(li)
             if locals.is_float_local(*li) && locals.local_float_bits(*li).is_some()) { 8 }
+        else if matches!(a, Expr::Local(li)
+            if locals.is_float_local(*li) && locals.size(*li) == 4
+                && locals.float_param_funcs.get(&sym).and_then(|v| v.get(i)).copied().unwrap_or(0) == 8
+                && locals.local_float_bits(*li).is_some()) { 8 }
         else if push_long_at(i) { 4 } else { 2 }
     }).sum();
     // The single last call before a slide-frame epilogue elides its cleanup

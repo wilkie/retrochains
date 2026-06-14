@@ -589,6 +589,10 @@ pub struct Locals<'a> {
     /// sizes (0 for non-struct params). Used by emit_call_inner to push a
     /// struct argument as its words (high address first).
     pub struct_param_funcs: &'a std::collections::HashMap<String, Vec<usize>>,
+    /// Map of function symbol names to their per-param float/double widths
+    /// (4/8/0). Used by emit_call_inner to promote a `float` argument to a
+    /// `double` when the callee expects one. Fixture 2146.
+    pub float_param_funcs: &'a std::collections::HashMap<String, Vec<usize>>,
     /// Map of function symbol names that RETURN a struct by value to its
     /// even-padded byte size. A caller storing the result writes AX (<=2) or
     /// DX:AX (3-4) into the destination struct.
@@ -751,6 +755,7 @@ impl Locals<'_> {
             di_local: self.di_local,
             long_param_funcs: self.long_param_funcs,
             struct_param_funcs: self.struct_param_funcs,
+            float_param_funcs: self.float_param_funcs,
             struct_return_funcs: self.struct_return_funcs,
             float_returners: self.float_returners,
             loop_stack: self.loop_stack,
@@ -2037,6 +2042,77 @@ fn collect_vararg_float_local_stmt(
         _ => {}
     }
 }
+/// Collect the promoted-double f64 of every constant `float` LOCAL (size 4)
+/// passed to a NON-variadic callee whose param at that position is a `double` —
+/// MSC reloads the value's f64 representation from a separate CONST slot.
+/// Fixture 2146.
+fn collect_promoted_double_arg_expr(
+    e: &Expr, locals: &[LocalSpec],
+    float_params: &std::collections::HashMap<String, Vec<usize>>,
+    pascal: &std::collections::HashSet<String>,
+    statics: &std::collections::HashSet<String>,
+    out: &mut Vec<(u64, usize)>,
+) {
+    if let Expr::Call { name, args } = e {
+        let sym = crate::codegen::callee_symbol_full(name, pascal.contains(name), statics.contains(name));
+        if let Some(widths) = float_params.get(&sym) {
+            for (i, a) in args.iter().enumerate() {
+                if let Expr::Local(li) = a
+                    && locals.get(*li).map(|l| l.is_float && l.size == 4).unwrap_or(false)
+                    && widths.get(i).copied().unwrap_or(0) == 8
+                    && let Some(bits) = locals.get(*li).and_then(|l| l.float_bits)
+                {
+                    // `float_bits` is already the f64 bit pattern.
+                    out.push((bits, 8));
+                }
+            }
+        }
+    }
+    match e {
+        Expr::Call { args, .. } | Expr::CallPtr { args, .. } =>
+            for a in args { collect_promoted_double_arg_expr(a, locals, float_params, pascal, statics, out); },
+        Expr::BinOp { left, right, .. } => {
+            collect_promoted_double_arg_expr(left, locals, float_params, pascal, statics, out);
+            collect_promoted_double_arg_expr(right, locals, float_params, pascal, statics, out);
+        }
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            collect_promoted_double_arg_expr(cond, locals, float_params, pascal, statics, out);
+            collect_promoted_double_arg_expr(then_arm, locals, float_params, pascal, statics, out);
+            collect_promoted_double_arg_expr(else_arm, locals, float_params, pascal, statics, out);
+        }
+        Expr::CastChar { value, .. } | Expr::CastLong { value, .. } =>
+            collect_promoted_double_arg_expr(value, locals, float_params, pascal, statics, out),
+        _ => {}
+    }
+}
+fn collect_promoted_double_arg_stmt(
+    s: &Stmt, locals: &[LocalSpec],
+    float_params: &std::collections::HashMap<String, Vec<usize>>,
+    pascal: &std::collections::HashSet<String>,
+    statics: &std::collections::HashSet<String>,
+    out: &mut Vec<(u64, usize)>,
+) {
+    let mut e = |x: &Expr, out: &mut Vec<(u64, usize)>| collect_promoted_double_arg_expr(x, locals, float_params, pascal, statics, out);
+    match s {
+        Stmt::Return(x) | Stmt::ExprStmt(x) => e(x, out),
+        Stmt::Assign { value, .. } => e(value, out),
+        Stmt::If { then_branch, else_branch, .. } => {
+            collect_promoted_double_arg_stmt(then_branch, locals, float_params, pascal, statics, out);
+            if let Some(eb) = else_branch { collect_promoted_double_arg_stmt(eb, locals, float_params, pascal, statics, out); }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } =>
+            collect_promoted_double_arg_stmt(body, locals, float_params, pascal, statics, out),
+        Stmt::For { init, step, body, .. } => {
+            collect_promoted_double_arg_stmt(init, locals, float_params, pascal, statics, out);
+            collect_promoted_double_arg_stmt(step, locals, float_params, pascal, statics, out);
+            collect_promoted_double_arg_stmt(body, locals, float_params, pascal, statics, out);
+        }
+        Stmt::Block(ss) => for x in ss { collect_promoted_double_arg_stmt(x, locals, float_params, pascal, statics, out); },
+        Stmt::Switch { cases, .. } =>
+            for c in cases { for x in &c.body { collect_promoted_double_arg_stmt(x, locals, float_params, pascal, statics, out); } },
+        _ => {}
+    }
+}
 fn collect_call_float_args_stmt(s: &Stmt, out: &mut Vec<(u64, usize)>) {
     match s {
         Stmt::Return(e) | Stmt::ExprStmt(e) => collect_call_float_args_expr(e, out),
@@ -2343,6 +2419,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .filter(|f| f.param_struct_bytes.iter().any(|&b| b > 0))
         .map(|f| (fn_symbol(f), f.param_struct_bytes.clone()))
         .collect();
+    // Per-function float/double param widths (4/8/0), so a call can promote a
+    // `float` argument to a `double` when the callee expects one. Fixture 2146.
+    let float_param_funcs: std::collections::HashMap<String, Vec<usize>> = unit.functions.iter()
+        .filter(|f| f.param_float_width.iter().any(|&w| w != 0))
+        .map(|f| (fn_symbol(f), f.param_float_width.clone()))
+        .collect();
     for (name, bytes) in &unit.proto_struct_params {
         struct_param_funcs.entry(name.clone()).or_insert_with(|| bytes.clone());
     }
@@ -2387,7 +2469,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .functions
         .iter()
         .enumerate()
-        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &global_array_lens, &unit.structs, &global_struct_idxs, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &unit.variadic_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &global_array_lens, &unit.structs, &global_struct_idxs, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &unit.variadic_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &float_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -2559,6 +2641,13 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             collect_vararg_float_local_stmt(s, &f.locals, &unit.variadic_fns, &pascal_fns, &static_fns, &mut v);
         }
         for e in v { intern(&mut float_pool, e); }
+        // …and the promoted f64 of a constant `float` local passed to a `double`
+        // PARAM of a non-variadic callee (`scale(f)`). Fixture 2146.
+        let mut pv: Vec<(u64, usize)> = Vec::new();
+        for s in &f.body {
+            collect_promoted_double_arg_stmt(s, &f.locals, &float_param_funcs, &pascal_fns, &static_fns, &mut pv);
+        }
+        for e in pv { intern(&mut float_pool, e); }
     }
     if !float_pool.is_empty() && const_cursor % 2 != 0 {
         const_cursor += 1;
@@ -3626,17 +3715,28 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             b.write_fixupp(&payload);
         }
         // Interleave the CONST float temps introduced by the function that
-        // starts the next run.
+        // starts the next run — packed into contiguous-offset LEDATA runs (like
+        // the pre-text floats above), so adjacent temps share one record (2146).
         if end < n_funcs {
-            for (k, &(bits, width)) in float_pool.iter().enumerate() {
-                if float_intro_fn[k] == end {
-                    let off = u16::try_from(float_offsets[k]).expect("CONST float offset fits");
+            let mut here: Vec<usize> = (0..float_pool.len())
+                .filter(|&k| float_intro_fn[k] == end).collect();
+            here.sort_by_key(|&k| float_offsets[k]);
+            let mut i = 0;
+            while i < here.len() {
+                let start_off = float_offsets[here[i]];
+                let mut buf: Vec<u8> = Vec::new();
+                let mut expect = start_off;
+                while i < here.len() && float_offsets[here[i]] == expect {
+                    let (bits, width) = float_pool[here[i]];
                     if width == 4 {
-                        b.write_ledata16(3, off, &(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
+                        buf.extend_from_slice(&(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
                     } else {
-                        b.write_ledata16(3, off, &bits.to_le_bytes());
+                        buf.extend_from_slice(&bits.to_le_bytes());
                     }
+                    expect += width;
+                    i += 1;
                 }
+                b.write_ledata16(3, u16::try_from(start_off).expect("CONST float offset fits"), &buf);
             }
         }
     }

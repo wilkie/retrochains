@@ -426,6 +426,7 @@ pub(crate) fn emit_function(
     float_returners_arg: &std::collections::HashMap<String, usize>,
     long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
     struct_param_funcs: &std::collections::HashMap<String, Vec<usize>>,
+    float_param_funcs: &std::collections::HashMap<String, Vec<usize>>,
     struct_return_funcs: &std::collections::HashMap<String, usize>,
     struct_is_union: &[bool],
     union_globals: &std::collections::HashSet<usize>,
@@ -759,7 +760,10 @@ pub(crate) fn emit_function(
     // init defers its `fwait` into that `9B` rather than emitting `90 9B`.
     // Fixtures 2198, 3999.
     let body_starts_float_push = match body.first() {
-        Some(Stmt::ExprStmt(Expr::Call { args, .. } | Expr::CallPtr { args, .. })) => {
+        Some(Stmt::ExprStmt(Expr::Call { args, .. } | Expr::CallPtr { args, .. }))
+        // `return (int)<float-returning call>` emits the arg push first, so its
+        // leading `fld` (`9B`) absorbs the prologue's deferred fwait. Fixture 2146.
+        | Some(Stmt::Return(Expr::Call { args, .. } | Expr::CallPtr { args, .. })) => {
             match args.last() {
                 Some(Expr::FloatLit(..)) => true,
                 Some(Expr::Local(i)) => func.locals.get(*i).map(|l| l.is_float).unwrap_or(false),
@@ -957,6 +961,7 @@ pub(crate) fn emit_function(
         di_local,
         long_param_funcs,
         struct_param_funcs,
+        float_param_funcs,
         struct_return_funcs,
         float_returners: float_returners_arg,
         loop_stack: &loop_stack,
