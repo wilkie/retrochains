@@ -3157,6 +3157,31 @@ pub(crate) fn bf_read_into_dx(base: BitBase, byte_off: u16, bit_off: u8, bit_wid
     }
     true
 }
+/// Read a WORD bit-field into CX, shifted down by `bit_off` and masked to
+/// `bit_width`. Unlike the DX reader, the shift uses repeated `shr cx,1` (CL is
+/// part of CX, so `mov cl,n; shr cx,cl` can't be used), and a `0xFF` low byte of
+/// the mask collapses to `and ch,hi`. Used as the RHS of `<expr> + <bit-field>`.
+/// Returns false for bases we don't handle (DerefParam). Fixture 2105.
+pub(crate) fn bf_read_into_cx_masked(base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) -> bool {
+    if !bf_load_word_cx(base, byte_off, locals, out, fixups) {
+        return false;
+    }
+    for _ in 0..bit_off {
+        out.extend_from_slice(&[0xD1, 0xE9]); // shr cx,1
+    }
+    if bit_width < 16 {
+        let mask = (1u32 << bit_width) - 1;
+        let (hi, lo) = ((mask >> 8) & 0xFF, mask & 0xFF);
+        if lo == 0xFF {
+            out.extend_from_slice(&[0x80, 0xE5, hi as u8]); // and ch, hi
+        } else if hi == 0 {
+            out.extend_from_slice(&[0x80, 0xE1, lo as u8]); // and cl, lo
+        } else {
+            out.push(0x81); out.push(0xE1); out.extend_from_slice(&(mask as u16).to_le_bytes()); // and cx,mask
+        }
+    }
+    true
+}
 /// Load the byte at `base + off` into AL.
 pub(crate) fn bf_load_byte_al(base: BitBase, off: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match base {
@@ -3201,17 +3226,30 @@ pub(crate) fn bf_store_word(base: BitBase, byte_off: u16, locals: &Locals<'_>, o
 /// AX still holds the unit's value and the load can be skipped (MSC keeps AX
 /// live across consecutive bit-field writes to the same struct). Fixture 1691.
 pub(crate) fn bf_ax_live(base: BitBase, byte_off: u16, locals: &Locals<'_>, out: &[u8], fixups: &[Fixup]) -> bool {
+    // The store that left the unit in AX may be separated from the read by an
+    // AX-preserving setup instruction (e.g. `mov cx,K` before `<bf> * K`), so
+    // skip one such trailing instruction before matching the store. Only a strict
+    // whitelist is skipped, so the reuse can never trigger on the wrong AX.
+    let end = {
+        let n = out.len();
+        if n >= 3 && matches!(out[n - 3], 0xB9 | 0xBA | 0xBB | 0xBE | 0xBF) {
+            n - 3 // mov cx/dx/bx/si/di, imm16
+        } else {
+            n
+        }
+    };
+    let tail = &out[..end];
     match base {
         BitBase::Local(l) => {
             let d = locals.disp(l) + byte_off as i16;
             let mut pat = vec![0x89, bp_modrm(0x46, d)];
             push_bp_disp(&mut pat, d);
-            out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat
+            tail.len() >= pat.len() && tail[tail.len() - pat.len()..] == *pat
         }
         BitBase::Global(g) => {
             let mut pat = vec![0xA3];
             pat.extend_from_slice(&byte_off.to_le_bytes());
-            out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat
+            tail.len() >= pat.len() && tail[tail.len() - pat.len()..] == *pat
                 && matches!(fixups.last(), Some(Fixup { kind: FixupKind::GlobalAddr { global_idx }, .. }) if *global_idx == g)
         }
         // BX-based access — no AX-reuse modeled.
@@ -3859,6 +3897,32 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
             return;
         }
+    }
+    // `<non-bit-field expr> + <bit-field>`: emit the LHS into AX, read the RHS
+    // bit-field into CX (shifted + masked), then `add ax,cx` — no push/pop. Pure
+    // all-bit-field chains are handled above. Fixture 2105 (`f1*100 + fl.val`).
+    if matches!(op, BinOp::Add)
+        && let Expr::BitField { base, byte_off, bit_off, bit_width } = right
+        && !matches!(left, Expr::BitField { .. })
+        && matches!(base, BitBase::Local(_) | BitBase::Global(_))
+    {
+        emit_expr_to_ax(left, locals, out, fixups);
+        bf_read_into_cx_masked(*base, *byte_off, *bit_off, *bit_width, locals, out, fixups);
+        out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
+        return;
+    }
+    // `<bit-field> * K`: load K into CX, read the bit-field into AX (reusing the
+    // unit left live in AX by a preceding store to the same unit), then `imul cx`.
+    // Fixture 2105 (`(int)fl.f1 * 100`).
+    if matches!(op, BinOp::Mul)
+        && matches!(left, Expr::BitField { .. })
+        && let Expr::IntLit(k) = right
+    {
+        let kw = (*k as u32 & 0xFFFF) as u16;
+        out.push(0xB9); out.extend_from_slice(&kw.to_le_bytes()); // mov cx,K
+        emit_expr_to_ax(left, locals, out, fixups);               // bit-field → AX
+        out.extend_from_slice(&[0xF7, 0xE9]);                     // imul cx
+        return;
     }
     // `x * 256` over a WORD memory operand: a left-shift by 8 just moves the
     // low byte into the high byte — `mov ah,[x]; sub al,al`. Fixture 3367.

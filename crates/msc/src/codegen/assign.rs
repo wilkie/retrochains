@@ -3767,6 +3767,34 @@ pub(crate) fn emit_assign_bitfield(base: BitBase, byte_off: u16, bit_off: u8, bi
     let val = ((k as u32 & maskw) << bit_off) & 0xFFFF;
     let field_mask = (maskw << bit_off) & 0xFFFF;
     let clear = !field_mask & 0xFFFF;
+    // All-zero field set (`val == 0`, clearing the field) confined to a single
+    // byte: MSC emits a direct memory AND `and byte [unit+b],clearbyte` (no
+    // load/store) — the mirror of the all-ones direct-OR below. Fixture 2105
+    // (`fl.f2 = 0`).
+    if val == 0
+        && (field_mask & 0xFF00 == 0 || field_mask & 0x00FF == 0)
+        && !(bit_width == 8 && bit_off % 8 == 0)
+        && matches!(base, BitBase::Local(_) | BitBase::Global(_))
+        && !bf_ax_live(base, byte_off, locals, out, fixups)
+    {
+        let (byte_idx, imm) = if field_mask & 0x00FF != 0 { (0u16, (clear & 0xFF) as u8) }
+                              else { (1u16, ((clear >> 8) & 0xFF) as u8) };
+        match base {
+            BitBase::Local(l) => {
+                let d = locals.disp(l) + (byte_off + byte_idx) as i16;
+                out.push(0x80); out.push(bp_modrm(0x66, d)); push_bp_disp(out, d); out.push(imm); // and byte [bp+d],imm8
+            }
+            BitBase::Global(g) => {
+                out.push(0x80); out.push(0x26); // and byte [moffs16],imm8
+                let bo = out.len() - 1;
+                out.extend_from_slice(&(byte_off + byte_idx).to_le_bytes());
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+                out.push(imm);
+            }
+            BitBase::DerefParam(_) => unreachable!(),
+        }
+        return;
+    }
     // All-ones field set (`val == field_mask`) confined to a single byte: filling
     // the whole field makes the clear redundant — the result is just `old | mask`,
     // so MSC emits a direct memory OR `or byte [unit+b],byteval` (no load/store).
