@@ -3969,7 +3969,7 @@ struct ConstProp {
 }
 
 /// The lvalue a pointer local currently aliases (`&x`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AliasTarget {
     Local(usize),
     Global(usize),

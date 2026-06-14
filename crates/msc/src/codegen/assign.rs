@@ -25,6 +25,37 @@ fn far_value_in_data_segment(value: &Expr, locals: &Locals<'_>) -> bool {
         _ => false,
     }
 }
+/// For the far|huge duplicate-init CSE: scan backward from the end of `out` over
+/// the store instructions a prior `&local` far-pointer init leaves behind (all of
+/// which preserve AX) to decide whether AX still holds `lea` (the queried offset)
+/// and whether DX already holds SS. Preserving instructions: `mov [bp+d],ax`
+/// (89 46), `mov [bp+d],dx` (89 56), `mov [bp+d],ss` (8C 56) and `mov dx,ss`
+/// (8C D2). Only the i8-displacement encodings are recognized; an i16 disp bails
+/// (returns not-live), keeping the peephole conservative. Fixture 1772.
+fn far_dup_init_live(out: &[u8], lea: &[u8], barrier: usize) -> (bool, bool) {
+    let mut n = out.len();
+    let mut dx_ss = false;
+    loop {
+        if n >= lea.len() && out[n - lea.len()..n] == *lea {
+            return (n - lea.len() >= barrier, dx_ss);
+        }
+        // mov dx,ss (8C D2) — preserves AX, establishes DX = SS.
+        if n >= 2 && out[n - 2] == 0x8C && out[n - 1] == 0xD2 {
+            dx_ss = true;
+            n -= 2;
+            continue;
+        }
+        // 3-byte bp-rel stores from AX/DX/SS (i8 disp) — preserve AX.
+        if n >= 3
+            && ((out[n - 3] == 0x89 && (out[n - 2] == 0x46 || out[n - 2] == 0x56))
+                || (out[n - 3] == 0x8C && out[n - 2] == 0x56))
+        {
+            n -= 3;
+            continue;
+        }
+        return (false, dx_ss);
+    }
+}
 pub(crate) fn cast_rhs_needs_al_form(value: &Expr, target_is_int: bool) -> bool {
     matches!(value, Expr::CastChar { from_var: true, unsigned, .. }
         if target_is_int || !*unsigned)
@@ -732,9 +763,27 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         match value {
             Expr::AddrOfLocal(j) => {
                 let j_disp = locals.disp(*j);
-                out.push(0x8D); out.push(bp_modrm(0x46, j_disp)); push_bp_disp(out, j_disp);
-                out.push(0x89); out.push(bp_modrm(0x46, offset_disp)); push_bp_disp(out, offset_disp);
-                out.push(0x8C); out.push(bp_modrm(0x56, segment_disp)); push_bp_disp(out, segment_disp);
+                // Duplicate-init CSE: a second/third far|huge pointer set to the
+                // SAME `&local` reuses the offset still live in AX from the prior
+                // init and the segment in DX. MSC computes `lea ax` once, loads
+                // `mov dx,ss` once (after the first init's direct `mov [seg],ss`),
+                // then every later identical init is just `mov [off],ax; mov
+                // [seg],dx`. Fixture 1772 (two huge ptrs from `&x`).
+                let mut lea = vec![0x8D, bp_modrm(0x46, j_disp)];
+                push_bp_disp(&mut lea, j_disp);
+                let (ax_live, dx_ss) =
+                    far_dup_init_live(out, &lea, locals.last_branch_barrier.get());
+                if ax_live {
+                    if !dx_ss {
+                        out.extend_from_slice(&[0x8C, 0xD2]); // mov dx,ss
+                    }
+                    out.push(0x89); out.push(bp_modrm(0x46, offset_disp)); push_bp_disp(out, offset_disp);
+                    out.push(0x89); out.push(bp_modrm(0x56, segment_disp)); push_bp_disp(out, segment_disp);
+                } else {
+                    out.extend_from_slice(&lea);
+                    out.push(0x89); out.push(bp_modrm(0x46, offset_disp)); push_bp_disp(out, offset_disp);
+                    out.push(0x8C); out.push(bp_modrm(0x56, segment_disp)); push_bp_disp(out, segment_disp);
+                }
             }
             Expr::Local(j) if locals.is_array_local(*j) => {
                 // Array-to-pointer decay: p = (far *)a → lea not load.

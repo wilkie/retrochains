@@ -1848,6 +1848,22 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
                 *cond = Cond::Truthy(Expr::IntLit(truthy as i32));
                 return;
             }
+            // Two pointer locals aliasing the IDENTICAL address — same base AND
+            // same offset — are provably equal: `p == q` → true / `p != q` →
+            // false. Near and huge pointers both from the same `&x` (fixture
+            // 1772). A different base or offset is NOT folded (it falls to the
+            // runtime substitution below): MSC keeps a runtime compare for a
+            // provably-DISTINCT local-address pair (fixture 1235).
+            if matches!(op, RelOp::Eq | RelOp::Ne)
+                && let (Expr::Local(lp), Expr::Local(rp)) = (&*left, &*right)
+                && let (Some(&(lb, lo)), Some(&(rb, ro))) = (cp.ptr_addr.get(lp), cp.ptr_addr.get(rp))
+                && lb == rb
+                && lo == ro
+            {
+                let truthy = matches!(op, RelOp::Eq);
+                *cond = Cond::Truthy(Expr::IntLit(truthy as i32));
+                return;
+            }
             // `p == 0` / `p != 0` (p a pointer holding `&x`/`&g`): rewrite the
             // pointer to its address so emit lowers it (cmp bp,K / or ax,ax).
             if matches!(op, RelOp::Eq | RelOp::Ne) {
@@ -2364,6 +2380,22 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                     BinOp::Ne => { *e = Expr::IntLit((lo != ro) as i32); return; }
                     _ => {}
                 }
+            }
+            // Two pointer locals that alias the IDENTICAL address — same base AND
+            // same offset — are provably EQUAL, so `p == q` → 1 / `p != q` → 0.
+            // Covers near and huge pointers both initialized from the same `&x`
+            // (fixture 1772). A different base or offset is NOT folded here (it
+            // falls through to the runtime compare below): MSC keeps a runtime
+            // compare for a provably-DISTINCT local-address pair (fixture 1235),
+            // so only the exact-match case collapses.
+            if matches!(op, BinOp::Eq | BinOp::Ne)
+                && let (Expr::Local(lp), Expr::Local(rp)) = (left.as_ref(), right.as_ref())
+                && let (Some(&(lb, lo)), Some(&(rb, ro))) = (cp.ptr_addr.get(lp), cp.ptr_addr.get(rp))
+                && lb == rb
+                && lo == ro
+            {
+                *e = Expr::IntLit(matches!(op, BinOp::Eq) as i32);
+                return;
             }
             // `p == q` / `p != q` over two pointer locals holding `&x`/`&g`
             // (offset 0) whose bases are NOT a foldable same-global pair:
