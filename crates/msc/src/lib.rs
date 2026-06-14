@@ -1408,6 +1408,12 @@ pub enum Expr {
     /// byte-aligned full-byte field reads the byte directly. Fixtures 3207,
     /// 3210, 3216, 3419.
     BitField { base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8 },
+    /// `f.a++` / `f.a--` on a bit-field (postfix). MSC's dedicated read-modify-
+    /// write: load the unit, inc/dec, re-mask to the field, spill the new value
+    /// to a frame temp, then `and byte [unit], clear` + `or [unit], ax`. The
+    /// temp forces a 2-byte WithSlide frame. Only bit_off==0 (the corpus shape).
+    /// Fixture 3445.
+    BitFieldPostMutate { base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8, step: i32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1542,6 +1548,8 @@ impl Expr {
             // A long-cast folds to its inner int value; the long-ness only
             // matters for runtime materialization into DX:AX.
             Expr::CastLong { value, .. } => value.fold(locals),
+            // A bit-field post-mutate has a side effect and no compile-time value.
+            Expr::BitFieldPostMutate { .. } => None,
         }
     }
 }

@@ -2843,5 +2843,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
         }
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
+        // Bit-field post-mutate: a self-contained RMW, no sub-expressions to fold.
+        Expr::BitFieldPostMutate { .. } => {}
     }
 }

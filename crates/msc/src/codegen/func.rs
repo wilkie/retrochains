@@ -530,10 +530,28 @@ pub(crate) fn emit_function(
     // even a frameless (no-locals) function needs a slide frame to size for it.
     // Fixtures 1352/3418 (params only). Fixture 2362 already has locals.
     let has_cse_byte_while = crate::codegen::statements::body_has_cse_byte_while(&body);
+    // A bit-field post-mutate (`f.a++`) spills the new value to a 2-byte frame
+    // temp, so even a no-locals function needs a slide frame sized for it. 3445.
+    fn has_bf_postmutate(stmts: &[Stmt]) -> bool {
+        fn st(s: &Stmt) -> bool {
+            match s {
+                Stmt::ExprStmt(Expr::BitFieldPostMutate { .. }) => true,
+                Stmt::Block(v) => has_bf_postmutate(v),
+                Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => st(body),
+                Stmt::If { then_branch, else_branch, .. } =>
+                    st(then_branch) || else_branch.as_deref().is_some_and(st),
+                Stmt::Switch { cases, .. } => cases.iter().any(|a| has_bf_postmutate(&a.body)),
+                _ => false,
+            }
+        }
+        stmts.iter().any(st)
+    }
+    let has_bitfield_temp = has_bf_postmutate(&body);
     let base_frame = if (has_float_arg_call
             && (!func.locals.is_empty() || func_float_arg_call_result_used(func)))
         || func.struct_field_temp_count > 0
         || has_cse_byte_while
+        || has_bitfield_temp
     {
         Frame::WithSlide
     } else {
@@ -693,6 +711,7 @@ pub(crate) fn emit_function(
         + if has_float_arg_call && !returns_float_call { 2 } else { 0 }
         + if returns_float_call { 8 } else { 0 }
         + if has_char_accum_temp { 2 } else { 0 }
+        + if has_bitfield_temp { 2 } else { 0 } // bit-field post-mutate result temp (3445)
         + 2 * call_chain_temps; // call-chain result spill slots (fixture 1954)
     // The float-call-return temp is the deepest 8-byte slot.
     let float_call_temp_disp: i16 = if returns_float_call {

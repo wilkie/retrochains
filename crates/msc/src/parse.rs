@@ -3587,6 +3587,19 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                // `f.a++` / `f.a--` on a bit-field — a dedicated post-mutate RMW
+                // (the generic `f.a = f.a + 1` desugar emits a different shape).
+                // Fixture 3445.
+                if let Some((bit_off, bit_width)) = p.last_field_bits
+                    && matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus))
+                {
+                    let step = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1 } else { -1 };
+                    p.bump();
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::ExprStmt(Expr::BitFieldPostMutate {
+                        base: BitBase::Global(global_idx), byte_off, bit_off, bit_width, step,
+                    }));
+                }
                 let target = if let Some((bit_off, bit_width)) = p.last_field_bits {
                     AssignTarget::BitField { base: BitBase::Global(global_idx), byte_off, bit_off, bit_width }
                 } else {

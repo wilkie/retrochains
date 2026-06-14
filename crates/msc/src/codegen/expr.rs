@@ -1563,6 +1563,39 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 }
             }
         }
+        Expr::BitFieldPostMutate { base, byte_off, bit_off, bit_width, step } => {
+            // `f.a++` / `f.a--` (bit_off==0): load the unit, inc/dec, re-mask to
+            // the field, spill the new value to the frame temp, then clear the
+            // field's bits in memory (`and byte [unit], clear`) and OR the new
+            // value in (`or [unit], ax`). Fixture 3445.
+            debug_assert_eq!(*bit_off, 0, "bit-field post-mutate only at bit offset 0");
+            let maskw = (1u32 << *bit_width) - 1;
+            bf_load_word(*base, *byte_off, locals, out, fixups);        // unit → AX
+            out.push(if *step >= 0 { 0x40 } else { 0x48 });            // inc/dec ax
+            out.push(0x25); out.extend_from_slice(&(maskw as u16).to_le_bytes()); // and ax, maskw
+            let temp = locals.deepest_local_disp() - 2;
+            out.push(0x89); out.push(bp_modrm(0x46, temp)); push_bp_disp(out, temp); // mov [temp], ax
+            let clearlo = (!maskw & 0xFF) as u8;
+            match base {
+                BitBase::Global(g) => {
+                    out.push(0x80); out.push(0x26); // and byte [moffs], imm8
+                    let bo = out.len() - 1;
+                    out.extend_from_slice(&byte_off.to_le_bytes());
+                    fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                    out.push(clearlo);
+                    out.push(0x09); out.push(0x06); // or [moffs], ax
+                    let bo2 = out.len() - 1;
+                    out.extend_from_slice(&byte_off.to_le_bytes());
+                    fixups.push(Fixup { body_offset: bo2, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                }
+                BitBase::Local(l) => {
+                    let d = locals.disp(*l) + *byte_off as i16;
+                    out.push(0x80); out.push(bp_modrm(0x66, d)); push_bp_disp(out, d); out.push(clearlo); // and byte [bp+d], clear
+                    out.push(0x09); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // or [bp+d], ax
+                }
+                BitBase::DerefParam(_) => panic!("bit-field post-mutate via pointer not supported"),
+            }
+        }
         Expr::GlobalField { global, byte_off, size } => {
             // Word field: `a1 byte_off byte_off` + GlobalAddr FIXUP.
             // Byte field: `a0 byte_off byte_off; 98` + FIXUP.
