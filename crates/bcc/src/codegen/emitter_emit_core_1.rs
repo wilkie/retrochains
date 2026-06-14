@@ -1660,6 +1660,26 @@ impl<'a> super::FunctionEmitter<'a> {
         };
         Some((arr_base, idx_addr?, stride?, field_offs))
     }
+    /// Addressing form for dereferencing a char pointer, staging it through BX
+    /// first when the pointer can't be a base register: SI/DI/BX address memory
+    /// directly (`[si]`), CX/DX copy to BX (`mov bx, cx`), and a stack-resident
+    /// pointer loads from its slot (`mov bx, word ptr [bp+disp]`). Fixtures 4146
+    /// (CX) and 4148 (stack spill).
+    fn char_deref_addr_via_bx(&mut self, loc: LocalLocation) -> String {
+        match loc {
+            LocalLocation::Reg(r) if matches!(r, Reg::Si | Reg::Di | Reg::Bx) => {
+                format!("[{}]", r.name())
+            }
+            LocalLocation::Reg(r) => {
+                let _ = write!(self.out, "\tmov\tbx,{}\r\n", r.name());
+                "[bx]".to_owned()
+            }
+            LocalLocation::Stack(off) => {
+                let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                "[bx]".to_owned()
+            }
+        }
+    }
     pub(crate) fn emit_compare(&mut self, left: &Expr, right: &Expr) {
         // Huge-pointer comparison: both operands are `int huge *`
         // (or another huge-pointer) lvalues. BCC's normalization
@@ -1700,29 +1720,32 @@ impl<'a> super::FunctionEmitter<'a> {
         // are deref of a register-resident char pointer. Emit byte
         // compare `mov al, [reg_l]; cmp al, [reg_r]` directly.
         // Fixture 1352 (`*a == *b` for `char *a, *b` in SI/DI).
+        let char_ptr_local = |this: &Self, name: &str| -> Option<LocalLocation> {
+            if !this.locals.has(name) { return None; }
+            if !this.locals.type_of(name).pointee().is_some_and(|p| p.is_char_like()) { return None; }
+            let loc = this.locals.location_of(name);
+            match loc {
+                LocalLocation::Stack(_) => Some(loc),
+                LocalLocation::Reg(r) if !r.is_byte() => Some(loc),
+                LocalLocation::Reg(_) => None,
+            }
+        };
         if let (ExprKind::Deref(l_inner), ExprKind::Deref(r_inner)) =
             (&left.kind, &right.kind)
             && let (ExprKind::Ident(l_name), ExprKind::Ident(r_name)) =
                 (&l_inner.kind, &r_inner.kind)
-            && self.locals.has(l_name)
-            && self.locals.has(r_name)
-            && let LocalLocation::Reg(l_reg) = self.locals.location_of(l_name)
-            && let LocalLocation::Reg(r_reg) = self.locals.location_of(r_name)
-            && !l_reg.is_byte()
-            && !r_reg.is_byte()
-            && self
-                .locals
-                .type_of(l_name)
-                .pointee()
-                .is_some_and(|p| p.is_char_like())
-            && self
-                .locals
-                .type_of(r_name)
-                .pointee()
-                .is_some_and(|p| p.is_char_like())
+            && let Some(l_loc) = char_ptr_local(self, l_name)
+            && let Some(r_loc) = char_ptr_local(self, r_name)
         {
-            let _ = write!(self.out, "\tmov\tal,byte ptr [{}]\r\n", l_reg.name());
-            let _ = write!(self.out, "\tcmp\tal,byte ptr [{}]\r\n", r_reg.name());
+            // SI/DI/BX address memory directly; a pointer in CX/DX (`mov bx, cx`,
+            // fixture 4146) or on the STACK (`mov bx, [bp+disp]`, fixture 4148 —
+            // the 4th pointer that overflows the SI/DI/CX pool) must be staged
+            // through BX first. The L-side load into AL finishes before the
+            // R-side reuses BX, so both can route through BX without conflict.
+            let l_addr = self.char_deref_addr_via_bx(l_loc);
+            let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
+            let r_addr = self.char_deref_addr_via_bx(r_loc);
+            let _ = write!(self.out, "\tcmp\tal,byte ptr {r_addr}\r\n");
             return;
         }
         // `<stack-char-arr>[<reg-int>] <relop> <stack-char-arr>[<same-reg-int>]`

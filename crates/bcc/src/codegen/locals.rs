@@ -675,9 +675,21 @@ impl Locals {
             // `mov bx, dx` before each deref). Fixture 1808 (`*d++
             // = *s++` with n in SI, d in DI, s in DX).
             &[Reg::Si, Reg::Di, Reg::Dx, Reg::Cx]
+        } else if !function_makes_call && pointer_count >= 2 {
+            // ALL-pointer function (no non-pointer eligibles), no call: BCC
+            // enregisters a THIRD pointer into CX (deref via `mov bx, cx`),
+            // skipping DX/BX. The 4th+ pointers spill to the stack. Probed
+            // against the oracle (3+ char-pointers deref'd in a loop →
+            // SI/DI/CX; fixture 4146). The CX slot is use-count-gated below.
+            &[Reg::Si, Reg::Di, Reg::Cx]
         } else {
             &[Reg::Si, Reg::Di]
         };
+        // The all-pointer (no non-pointer eligible) CX slot is the only one
+        // use-count-gated: a once-used spillover pointer stays on the stack
+        // there (3512), while the mixed DX/CX slots (1808/2208) enregister
+        // regardless of use count.
+        let all_pointer_case = !function_makes_call && pointer_count >= 2 && non_pointer_count == 0;
         let mut non_si_iter = non_si_pool.iter().copied().peekable();
         for &i in &ordered_eligibles {
             if Some(i) == si_pick {
@@ -692,6 +704,18 @@ impl Locals {
                         break;
                     }
                     non_si_iter.next();
+                }
+                // In an all-pointer function, the 3rd (CX) pointer is deref'd via
+                // `mov bx, cx` on every access, which BCC only pays for when the
+                // pointer is used beyond the bare ENREGISTER_THRESHOLD. A
+                // once-deref'd spillover pointer stays stack-resident. (Counts
+                // include a +2 param base, so 3512's `b` = 3 stays on the stack
+                // while 4146's `c` = 5 takes CX.)
+                if all_pointer_case
+                    && matches!(chosen, Some(Reg::Cx | Reg::Dx))
+                    && counts.get(&declared[i].name).copied().unwrap_or(0) <= ENREGISTER_THRESHOLD
+                {
+                    chosen = None;
                 }
                 chosen
             } else {
