@@ -1165,12 +1165,14 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             emit_expr_to_ax(right, locals, out, fixups);
             emit_cmp_ax_imm(*k, out);
         }
-        // COMPUTED LHS (arithmetic) vs a simple word memory RHS (`(a+b) == c`):
-        // evaluate the LHS into AX, then `cmp ax,[rhs]` directly — no BX round-
-        // trip for the RHS. Result = left - right → standard jcc. A memory LHS
-        // (deref/index) uses the opposite `cmp [lhs],ax` form (not handled here);
-        // char/long RHS fall through. Fixture 3596.
-        Cond::Cmp { op: _, left: left @ Expr::BinOp { .. }, right }
+        // COMPUTED or CALL LHS vs a simple word memory RHS (`(a+b) == c`,
+        // `f() < x`): evaluate the LHS into AX, then `cmp ax,[rhs]` directly — no
+        // BX round-trip for the RHS. Result = left - right → standard jcc. The
+        // call case arises from const-prop rewriting `x > f()` so the call (the
+        // first-evaluated operand) lands on the left with the relop swapped.
+        // A memory LHS (deref/index) uses the opposite `cmp [lhs],ax` form (not
+        // handled here); char/long RHS fall through. Fixtures 3596, 2044.
+        Cond::Cmp { op: _, left: left @ (Expr::BinOp { .. } | Expr::Call { .. }), right }
             if matches!(right,
                 Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i))
                 || matches!(right,

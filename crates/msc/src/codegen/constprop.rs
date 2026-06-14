@@ -1275,6 +1275,27 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
                 *right = ra;
                 return;
             }
+            // `<int-word local> OP <call>` — MSC evaluates the call first (into
+            // AX) and compares against the var's SLOT, NOT a folded immediate.
+            // Suppress the var's const-fold (mark it mutated so the emit view
+            // misses it) and rewrite so the call becomes the LEFT (first-
+            // evaluated) operand, swapping the relop. The emitter's `call OP mem`
+            // arm then produces `cmp ax,[var]`. Fixture 2044 (`if (x > f())`).
+            let int_word_local = |e: &Expr, cp: &ConstProp| matches!(e,
+                Expr::Local(i) if cp.local_specs.get(*i)
+                    .is_some_and(|s| s.size == 2 && !s.is_long && !s.is_float));
+            if matches!(right, Expr::Call { .. }) && int_word_local(left, cp) {
+                if let Expr::Local(i) = left { cp.mutated_locals.insert(*i); }
+                prop_expr(right, cp);
+                *op = crate::codegen::statements::swap_relop(*op);
+                std::mem::swap(left, right);
+                return;
+            }
+            if matches!(left, Expr::Call { .. }) && int_word_local(right, cp) {
+                if let Expr::Local(i) = right { cp.mutated_locals.insert(*i); }
+                prop_expr(left, cp);
+                return;
+            }
             prop_expr(left, cp);
             prop_expr(right, cp);
         }
