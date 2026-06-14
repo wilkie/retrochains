@@ -1385,6 +1385,75 @@ pub(crate) fn init_expr_has_matching_literal_leaf(
         _ => false,
     }
 }
+/// CSE normalization: rewrite an init expression into a canonical form so that
+/// value-equivalent expressions compare structurally equal. MSC recognizes a
+/// later init that computes the same value as an earlier scalar local's init and
+/// emits `b = a` (a slot copy) instead of recomputing. We canonicalize the two
+/// algebraic identities MSC folds at this level:
+///   * `x * 2^n`  ≡  `x << n`
+///   * `x % 2`    ≡  `x & 1`   (only for unsigned x — signed % keeps sign)
+/// Fixtures 2216 (`a=x*4; b=x<<2`), 2217 (`a=x%2; b=x&1`, x unsigned).
+fn cse_normalize(e: &Expr, specs: &[LocalSpec]) -> Expr {
+    match e {
+        Expr::BinOp { op: BinOp::Mul, left, right } => {
+            if let Expr::IntLit(k) = right.as_ref() {
+                if *k > 0 && (*k as u32).is_power_of_two() {
+                    return Expr::BinOp {
+                        op: BinOp::Shl,
+                        left: Box::new(cse_normalize(left, specs)),
+                        right: Box::new(Expr::IntLit((*k as u32).trailing_zeros() as i32)),
+                    };
+                }
+            }
+            Expr::BinOp {
+                op: BinOp::Mul,
+                left: Box::new(cse_normalize(left, specs)),
+                right: Box::new(cse_normalize(right, specs)),
+            }
+        }
+        Expr::BinOp { op: BinOp::Mod, left, right } => {
+            if matches!(right.as_ref(), Expr::IntLit(2))
+                && matches!(left.as_ref(), Expr::Local(l)
+                    if specs.get(*l).is_some_and(|s| s.is_unsigned))
+            {
+                return Expr::BinOp {
+                    op: BinOp::BitAnd,
+                    left: Box::new(cse_normalize(left, specs)),
+                    right: Box::new(Expr::IntLit(1)),
+                };
+            }
+            Expr::BinOp {
+                op: BinOp::Mod,
+                left: Box::new(cse_normalize(left, specs)),
+                right: Box::new(cse_normalize(right, specs)),
+            }
+        }
+        Expr::BinOp { op, left, right } => Expr::BinOp {
+            op: *op,
+            left: Box::new(cse_normalize(left, specs)),
+            right: Box::new(cse_normalize(right, specs)),
+        },
+        other => other.clone(),
+    }
+}
+/// True when `e1` and `e2` compute the same value under CSE normalization.
+fn cse_equiv(e1: &Expr, e2: &Expr, specs: &[LocalSpec]) -> bool {
+    expr_struct_eq(&cse_normalize(e1, specs), &cse_normalize(e2, specs))
+}
+/// Structural equality over the scalar Expr subset CSE cares about.
+fn expr_struct_eq(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::IntLit(x), Expr::IntLit(y)) => x == y,
+        (Expr::Local(x), Expr::Local(y)) => x == y,
+        (Expr::Global(x), Expr::Global(y)) => x == y,
+        (Expr::Param(x), Expr::Param(y)) => x == y,
+        (
+            Expr::BinOp { op: o1, left: l1, right: r1 },
+            Expr::BinOp { op: o2, left: l2, right: r2 },
+        ) => o1 == o2 && expr_struct_eq(l1, l2) && expr_struct_eq(r1, r2),
+        _ => false,
+    }
+}
 /// Const-fold a float/double initializer to its f64 value using the locals
 /// declared so far. Handles literals, int/float local references, and `+-*/`
 /// arithmetic — enough for `(float)i`, `double d = f`, and `a + b` inits.
@@ -1957,6 +2026,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // position). Otherwise the hoisted literal would jump ahead of the computed
     // init. Fixture 1849 (`int *p = a; int sum = 0;`).
     let mut seen_computed_init = false;
+    // Scalar-int local init expressions in declaration order, for CSE: a later
+    // init value-equivalent to an earlier one becomes `b = a`. Fixtures 2216/2217.
+    let mut scalar_inits: Vec<(usize, Expr)> = Vec::new();
     loop {
         // A function-local `static` declaration is really a TU-private global:
         // route it through parse_global_decl, which appends it to p.globals
@@ -2571,7 +2643,26 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         // `mov [r],imm`. A cast of a PURE constant expression
                         // (`(int)(5+3)`) still folds. Fixtures 2219 (var) vs 1614 (const).
                         || (init_via_type_cast && init_expr.fold(&[]).is_none());
-                    let fold_k = if skip_fold { None } else { init_expr.fold(&init_view) };
+                    // CSE: `b = E2` (a non-literal expression) value-equivalent to a
+                    // prior scalar local a's init (`x*4 ≡ x<<2`, `x%2 ≡ x&1` for
+                    // unsigned x) → emit `b = a`, reusing the computed value rather
+                    // than re-folding. Fixtures 2216, 2217.
+                    let cse_a = if matches!(init_expr, Expr::BinOp { .. })
+                        && !init_via_cast && !init_via_type_cast
+                    {
+                        scalar_inits.iter().rev()
+                            .find(|(_, e)| cse_equiv(e, &init_expr, &locals))
+                            .map(|(a, _)| *a)
+                    } else { None };
+                    scalar_inits.push((local_idx, init_expr.clone()));
+                    let fold_k = if skip_fold || cse_a.is_some() { None } else { init_expr.fold(&init_view) };
+                    if let Some(a) = cse_a {
+                        prelude.push(Stmt::Assign {
+                            target: AssignTarget::Local(local_idx),
+                            value: Expr::Local(a),
+                        });
+                        seen_computed_init = true;
+                    } else
                     // Declaration-order preservation: if a COMPUTED init already
                     // went to the prelude, a later literal init also stays in the
                     // prelude (its source position) rather than hoisting to the
