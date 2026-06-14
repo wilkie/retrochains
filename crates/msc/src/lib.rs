@@ -2023,6 +2023,25 @@ pub(crate) fn func_has_float_arg_call(func: &Function) -> bool {
     for s in &func.body { collect_call_float_args_stmt(s, &mut v); }
     !v.is_empty()
 }
+/// True when a float-arg call's RESULT is used (return/assignment/sub-expression)
+/// rather than discarded — MSC spills such a result to a frame temp, needing a
+/// slide frame even with no declared locals. A bare `printf(...);` statement
+/// discards its result and stays frameless. Fixtures 1678 (used) vs 2195 (not).
+pub(crate) fn func_float_arg_call_result_used(func: &Function) -> bool {
+    fn used(s: &Stmt) -> bool {
+        // A top-level discarded call statement: its own result is unused (its
+        // args are still scanned by the general case for any NESTED float call).
+        if let Stmt::ExprStmt(Expr::Call { args, .. } | Expr::CallPtr { args, .. }) = s {
+            let mut v = Vec::new();
+            for a in args { collect_call_float_args_expr(a, &mut v); }
+            return !v.is_empty();
+        }
+        let mut v = Vec::new();
+        collect_call_float_args_stmt(s, &mut v);
+        !v.is_empty()
+    }
+    func.body.iter().any(used)
+}
 
 /// The order in which MSC assigns CONST string-pool labels: the order each
 /// string literal is FIRST REFERENCED by the emitted code, not lexical order.
@@ -3211,6 +3230,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // the current LEDATA and opens a new one at the aligned offset.
     // Fixtures: 4110 (1 string), 4128 (2 even-length → 1 LEDATA),
     // 4113 (2 odd-length → 2 LEDATAs with a gap), 4132 (mixed).
+    // Pre-text float temps CONTIGUOUS with the string pool are packed into the
+    // SAME final string LEDATA (MSC emits one CONST LEDATA for adjacent data).
+    // Those merged here are skipped by the float-pool LEDATA block below.
+    // Fixture 2195 (`printf("d=%f\n", 3.14)` — string + double in one LEDATA).
+    let mut merged_pre_floats: std::collections::HashSet<usize> = std::collections::HashSet::new();
     if !unit.strings.is_empty() {
         let mut current_start = string_offsets[str_order[0]];
         let mut current_bytes: Vec<u8> = Vec::new();
@@ -3225,6 +3249,24 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 current_bytes.clear();
                 current_start = string_offsets[str_order[pos + 1]];
             }
+        }
+        // Append any pre-text float temps that sit immediately after this final
+        // string run (offset-contiguous), in offset order.
+        let mut expect = current_start + current_bytes.len();
+        loop {
+            let next = (0..float_pool.len())
+                .filter(|k| float_intro_fn[*k] == 0 && !merged_pre_floats.contains(k)
+                    && float_offsets[*k] == expect)
+                .next();
+            let Some(k) = next else { break; };
+            let (bits, width) = float_pool[k];
+            if width == 4 {
+                current_bytes.extend_from_slice(&(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
+            } else {
+                current_bytes.extend_from_slice(&bits.to_le_bytes());
+            }
+            expect += width;
+            merged_pre_floats.insert(k);
         }
         if !current_bytes.is_empty() {
             let off = u16::try_from(current_start).expect("CONST offset fits");
@@ -3379,7 +3421,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // MSC packs consecutive (adjacent-offset) float temps into a single LEDATA
     // (like strings), so emit them in contiguous-offset runs.
     {
-        let mut pre: Vec<usize> = (0..float_pool.len()).filter(|&k| float_intro_fn[k] == 0).collect();
+        let mut pre: Vec<usize> = (0..float_pool.len())
+            .filter(|&k| float_intro_fn[k] == 0 && !merged_pre_floats.contains(&k)).collect();
         pre.sort_by_key(|&k| float_offsets[k]);
         let mut i = 0;
         while i < pre.len() {

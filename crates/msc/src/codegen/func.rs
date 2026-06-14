@@ -511,12 +511,18 @@ pub(crate) fn emit_function(
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     // A call that passes a float/double literal pushes it via `sub sp,N;
-    // mov bx,sp; fstp [bx]`, sliding SP — so the function needs a WithSlide
-    // frame (cleanup via `mov sp,bp`) plus a 2-byte temp for the call result.
+    // mov bx,sp; fstp [bx]`, sliding SP. With declared LOCALS, MSC uses a
+    // WithSlide frame and cleans SP via `mov sp,bp` (eliding the per-call
+    // `add sp`). With NO locals it stays FRAMELESS and emits an explicit
+    // `add sp,N` cleanup instead (fixture 2195) — so only force the slide frame
+    // when there are locals to slide over.
     let has_float_arg_call = func_has_float_arg_call(func);
     // A `make().field` call spills its result to a frame temp sized by chkstk, so
     // the function needs a WithSlide frame even with no declared locals (2629).
-    let base_frame = if has_float_arg_call || func.struct_field_temp_count > 0 {
+    let base_frame = if (has_float_arg_call
+            && (!func.locals.is_empty() || func_float_arg_call_result_used(func)))
+        || func.struct_field_temp_count > 0
+    {
         Frame::WithSlide
     } else {
         Frame::for_function(func)
