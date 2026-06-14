@@ -1610,6 +1610,49 @@ fn flatten_add(e: &Expr, out: &mut Vec<Expr>) {
         out.push(e.clone());
     }
 }
+/// Strip the statically-known value any assignment inside a runtime ternary
+/// arm would have recorded. A runtime ternary executes only ONE of its arms,
+/// so neither arm's stores yield a value the compiler may substitute into a
+/// later read — that read must reload from the slot. The mutation-marking walk
+/// above (`prop_expr` on the discarded arm clones) ALSO records the assigned
+/// value into `l_known`/`g_known`, which is wrong here, so clear those back
+/// out. The `mutated_locals`/`mutated_globals` marks stay, so the emit-time
+/// fold view still reloads. Fixture 2476 (`r = c ? (a=5,10) : (b=7,20)` must
+/// not fold the untaken arm's `b=7` into a later `r+a+b`).
+fn clear_arm_assigned_values(e: &Expr, cp: &mut ConstProp) {
+    fn clear_target(t: &AssignTarget, cp: &mut ConstProp) {
+        match t {
+            AssignTarget::Local(l) => { cp.l_known.remove(l); }
+            AssignTarget::Global(g) => { cp.g_known.remove(g); }
+            _ => {}
+        }
+    }
+    match e {
+        Expr::Seq { sides, value } => {
+            for s in sides {
+                if let Stmt::Assign { target, value: v } = s {
+                    clear_target(target, cp);
+                    clear_arm_assigned_values(v, cp);
+                }
+            }
+            clear_arm_assigned_values(value, cp);
+        }
+        Expr::AssignExpr { target, value } => {
+            clear_target(target, cp);
+            clear_arm_assigned_values(value, cp);
+        }
+        Expr::BinOp { left, right, .. } => {
+            clear_arm_assigned_values(left, cp);
+            clear_arm_assigned_values(right, cp);
+        }
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            clear_arm_assigned_values(cond, cp);
+            clear_arm_assigned_values(then_arm, cp);
+            clear_arm_assigned_values(else_arm, cp);
+        }
+        _ => {}
+    }
+}
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     match e {
         Expr::FloatLit(..) => {} // no int const-prop into float literals
@@ -2218,6 +2261,12 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 prop_expr(&mut t, cp);
                 let mut e2 = (**else_arm).clone();
                 prop_expr(&mut e2, cp);
+                // Only one arm actually runs at execution time, so neither arm's
+                // assignments yield a statically-known value — strip any that the
+                // mutation walk above recorded into l_known/g_known so later reads
+                // reload from the slot (the mutation marks stay). Fixture 2476.
+                clear_arm_assigned_values(then_arm, cp);
+                clear_arm_assigned_values(else_arm, cp);
             }
         }
         Expr::Seq { sides, value } => {

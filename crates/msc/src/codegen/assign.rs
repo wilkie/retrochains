@@ -66,6 +66,23 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         let unwrapped = Expr::BinOp { op: *op, left: left.clone(), right: inner.clone() };
         return emit_assign(target, &unwrapped, locals, out, fixups);
     }
+    // `t = <known-cond> ? (s, v) : (...)` — const-prop has already proved the
+    // branch (the cond folded to a bare literal, but the ternary survived
+    // because a SUBSTITUTED-literal cond is not collapsed in the AST). When the
+    // taken arm is a COMMA expression, drop the untaken arm and assign the taken
+    // one directly, so its side effects run and a constant value reaches the
+    // immediate-store path above rather than being materialized through AX.
+    // Gated on the taken arm being a `Seq`: a bare-value arm (e.g. `a ? b : c`)
+    // must keep the generic ternary path, which loads the operand from its slot
+    // rather than folding its declared init (fixture 1038 vs 2476).
+    if let Expr::Ternary { cond, then_arm, else_arm } = value
+        && let Expr::IntLit(k) = cond.as_ref()
+    {
+        let taken = if *k != 0 { then_arm } else { else_arm };
+        if matches!(taken.as_ref(), Expr::Seq { .. }) {
+            return emit_assign(target, taken, locals, out, fixups);
+        }
+    }
     // Store INTO a `register` local (SI/DI): the destination is the register,
     // not a stack slot. `x = K` → `mov si,K` (or `sub si,si` for 0); `x = x ± K`
     // → `add/sub si,K` (`inc/dec si` for ±1); any other RHS evaluates to AX then
