@@ -501,6 +501,32 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
         {
             emit_long_high_word_to_ax(left, locals, out, fixups);
         }
+        // `(int)(<long local/param> >> K)` for 0<K<16: load the long into DX:AX
+        // and shift right K times (`sar/shr dx,1; rcr ax,1`), result low word in
+        // AX. Runtime even when the long value is known (long reads go to the
+        // slot, no fold). Fixture 1951 (`(int)(y >> 8)`).
+        Expr::BinOp { op: BinOp::Shr, left, right }
+            if matches!(left.as_ref(), Expr::Local(_) | Expr::Param(_))
+                && long_operand(left, locals)
+                && matches!(right.fold(locals.inits), Some(k) if k > 0 && k < 16) =>
+        {
+            let k = right.fold(locals.inits).unwrap() as u8;
+            let (lo, hi) = match left.as_ref() {
+                Expr::Local(i) => (locals.disp(*i), locals.disp(*i) + 2),
+                Expr::Param(i) => (long_param_disp(*i, locals), long_param_disp(*i, locals) + 2),
+                _ => unreachable!(),
+            };
+            out.push(0x8B); out.push(bp_modrm(0x46, lo)); push_bp_disp(out, lo); // mov ax,[lo]
+            out.push(0x8B); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // mov dx,[hi]
+            out.push(0xB1); out.push(k); // mov cl,K
+            let top = out.len();
+            let hi_shift = if long_operand_unsigned(left, locals) { 0xEA } else { 0xFA }; // shr/sar dx,1
+            out.extend_from_slice(&[0xD1, hi_shift]);
+            out.extend_from_slice(&[0xD1, 0xD8]); // rcr ax,1
+            out.extend_from_slice(&[0xFE, 0xC9]); // dec cl
+            let rel = (top as i32 - (out.len() + 2) as i32) as i8;
+            out.push(0x75); out.push(rel as u8); // jnz top
+        }
         Expr::BinOp { op, left, right } => {
             emit_binop(*op, left, right, locals, out, fixups);
         }

@@ -991,14 +991,15 @@ pub(crate) fn fold_cond(cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
         }
     }
 }
-/// True if `e` contains a `(int)(long >> 16)` high-word extract. MSC reads
-/// the long's high word from its slot for these rather than folding to a
-/// constant, so we must skip the const-fold path and let emit_expr_to_ax
-/// emit the slot read(s). Fixtures 1949, 2189.
+/// True if `e` contains an `(int)(long >> K)` extract (any constant K>0). MSC
+/// reads the long's words from the slot and shifts at runtime rather than
+/// folding to a constant, so we must skip the const-fold path and let
+/// emit_expr_to_ax emit the slot read(s). Fixtures 1949 (>>16), 1951 (>>8), 2189.
 fn expr_has_long_highword(e: &Expr, locals: &Locals<'_>) -> bool {
     match e {
         Expr::BinOp { op: BinOp::Shr, left, right }
-            if long_operand(left, locals) && right.fold(locals.inits) == Some(16) => true,
+            if long_operand(left, locals)
+                && matches!(right.fold(locals.inits), Some(k) if k > 0) => true,
         Expr::BinOp { left, right, .. } =>
             expr_has_long_highword(left, locals) || expr_has_long_highword(right, locals),
         _ => false,
