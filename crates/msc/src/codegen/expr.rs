@@ -1536,14 +1536,23 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 kind: FixupKind::GlobalAddr { global_idx: *global },
             });
             if *size == 1 {
-                out.push(0x98);
+                // `unsigned char` field zero-extends (`sub ah,ah`); signed `cbw`.
+                if locals.global_field_unsigned(*global, *byte_off) {
+                    out.extend_from_slice(&[0x2A, 0xE4]);
+                } else {
+                    out.push(0x98);
+                }
             }
         }
         Expr::LocalField { local, byte_off, size } => {
             let disp = locals.disp(*local) + *byte_off as i16;
             if *size == 1 {
                 out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
-                out.push(0x98); // cbw
+                if locals.local_field_unsigned(*local, *byte_off) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah
+                } else {
+                    out.push(0x98); // cbw
+                }
             } else {
                 // Reuse AX when the field was just stored from it (`b = a` then
                 // `return b.v` — the copy left b.v in AX). Fixture 2892.
@@ -2175,12 +2184,55 @@ fn unsigned_byte_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
         _ => None,
     }
 }
+/// An UNSIGNED-char byte read (zero-extends with `sub ah,ah`): an unsigned char
+/// scalar/field/global. Used to pick the unsigned byte-pair add shape. (3221/2401)
+fn unsigned_byte_load(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::GlobalField { global, byte_off, size: 1 } => locals.global_field_unsigned(*global, *byte_off),
+        Expr::LocalField { local, byte_off, size: 1 } => locals.local_field_unsigned(*local, *byte_off),
+        Expr::Param(i) => locals.is_char_param(*i) && locals.is_unsigned_param(*i),
+        Expr::Local(i) => locals.size(*i) == 1 && locals.is_unsigned_local(*i),
+        Expr::Global(g) => locals.is_char_global(*g) && locals.is_unsigned_global(*g),
+        _ => false,
+    }
+}
+/// Load an unsigned-char byte operand into CX: `mov cl,<byte>; sub ch,ch`.
+fn emit_unsigned_byte_to_cx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match e {
+        Expr::GlobalField { global, byte_off, .. } => {
+            out.push(0x8A); out.push(0x0E); // mov cl,[moffs16]
+            let bo = out.len() - 1;
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global } });
+        }
+        Expr::Global(g) => {
+            out.push(0x8A); out.push(0x0E);
+            let bo = out.len() - 1;
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+        }
+        Expr::LocalField { local, byte_off, .. } => {
+            let d = locals.disp(*local) + *byte_off as i16;
+            out.push(0x8A); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d);
+        }
+        Expr::Local(i) => {
+            let d = locals.disp(*i);
+            out.push(0x8A); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d);
+        }
+        Expr::Param(i) => { out.extend_from_slice(&[0x8A, 0x4E, param_disp(*i) as u8]); }
+        _ => unreachable!("emit_unsigned_byte_to_cx: unexpected operand"),
+    }
+    out.extend_from_slice(&[0x2A, 0xED]); // sub ch,ch
+}
 fn signed_byte_load(e: &Expr, locals: &Locals<'_>) -> bool {
     match e {
         Expr::IndexByte { .. } | Expr::LocalIndexByte { .. } | Expr::DerefByte { .. } => true,
         Expr::PtrArrayDeref { elem_size: 1, .. } => true,
-        Expr::LocalField { size: 1, .. } | Expr::GlobalField { size: 1, .. }
-        | Expr::DerefLocalField { size: 1, .. } | Expr::DerefParamField { size: 1, .. }
+        // A signed `char` field is a signed-byte load; an `unsigned char` field
+        // zero-extends instead, so it is NOT (handled by the unsigned-byte path).
+        Expr::GlobalField { global, byte_off, size: 1 } => !locals.global_field_unsigned(*global, *byte_off),
+        Expr::LocalField { local, byte_off, size: 1 } => !locals.local_field_unsigned(*local, *byte_off),
+        Expr::DerefLocalField { size: 1, .. } | Expr::DerefParamField { size: 1, .. }
         | Expr::DerefGlobalField { size: 1, .. } => true,
         Expr::Param(i) => locals.is_char_param(*i) && !locals.is_unsigned_param(*i),
         Expr::Local(i) => locals.size(*i) == 1 && !locals.is_unsigned_local(*i),
@@ -4188,6 +4240,22 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         emit_expr_to_ax(left, locals, out, fixups);                          // mov al,[s]; cbw
         out.push(0x8A); out.push(bp_modrm(0x4E, udisp)); push_bp_disp(out, udisp); // mov cl,[u]
         out.extend_from_slice(&[0x2A, 0xED]);                                 // sub ch,ch
+        let opc = match op {
+            BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
+            BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
+        };
+        out.push(opc); out.push(0xC1); // op ax, cx
+        return;
+    }
+    // Two UNSIGNED-char byte operands (`g.a + g.b`, both unsigned char fields/
+    // scalars): LEFT into AX (`mov al,..; sub ah,ah`), RIGHT into CX (`mov cl,..;
+    // sub ch,ch`), then `op ax,cx` — left-first, both zero-extended. Fixture 3221.
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && unsigned_byte_load(left, locals)
+        && unsigned_byte_load(right, locals)
+    {
+        emit_expr_to_ax(left, locals, out, fixups);            // mov al,..; sub ah,ah
+        emit_unsigned_byte_to_cx(right, locals, out, fixups);  // mov cl,..; sub ch,ch
         let opc = match op {
             BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
             BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),

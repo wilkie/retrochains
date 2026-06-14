@@ -396,6 +396,9 @@ pub struct StructField {
     /// for member chains like `o->p->v`.
     pub is_pointer: bool,
     pub pointee_size: u8,
+    /// `true` for an `unsigned char` field — a byte read zero-extends with
+    /// `sub ah,ah` instead of `cbw`. Fixtures 3221, 2401.
+    pub is_unsigned: bool,
 }
 
 /// Base storage of a bit-field access — a file-scope global or a stack local.
@@ -474,6 +477,12 @@ pub struct Locals<'a> {
     /// for `char`/`char *`, 2 for `int`/`int *`, …). For pointer globals
     /// this is the pointee width, driving byte-vs-word `p[K]` deref.
     pub global_elem_sizes: &'a [usize],
+    /// Struct/union definitions and each global's/local's struct index — used to
+    /// look up a struct FIELD's signedness (for the byte read widen of an
+    /// `unsigned char` field). Fixtures 3221, 2401.
+    pub structs: &'a [StructDef],
+    pub global_struct_idxs: &'a [Option<usize>],
+    pub local_struct_idxs: &'a [Option<usize>],
     /// Parallel-indexed flags marking `unsigned` globals. Selects
     /// unsigned codegen (SHR vs SAR, ja/jb vs jg/jl for long compares).
     pub unsigned_globals: &'a [bool],
@@ -706,6 +715,9 @@ impl Locals<'_> {
             long_globals: self.long_globals,
             char_globals: self.char_globals,
             global_elem_sizes: self.global_elem_sizes,
+            structs: self.structs,
+            global_struct_idxs: self.global_struct_idxs,
+            local_struct_idxs: self.local_struct_idxs,
             unsigned_globals: self.unsigned_globals,
             float_globals: self.float_globals,
             long_locals: self.long_locals,
@@ -768,6 +780,21 @@ impl Locals<'_> {
     /// Element / pointee byte width of global `idx` (defaults to 2).
     pub fn global_elem_size(&self, idx: usize) -> usize {
         self.global_elem_sizes.get(idx).copied().unwrap_or(2)
+    }
+    /// True when the struct field at `byte_off` of `struct_idx` is `unsigned char`
+    /// (a size-1 unsigned field) — its byte read zero-extends with `sub ah,ah`.
+    fn struct_field_unsigned(&self, struct_idx: Option<usize>, byte_off: u16) -> bool {
+        let Some(si) = struct_idx else { return false; };
+        let Some(sd) = self.structs.get(si) else { return false; };
+        sd.fields.iter().any(|f| f.byte_off == byte_off && f.size == 1 && f.is_unsigned)
+    }
+    /// `g.<byte field>` unsigned? (`g` a global struct.)
+    pub fn global_field_unsigned(&self, global: usize, byte_off: u16) -> bool {
+        self.struct_field_unsigned(self.global_struct_idxs.get(global).copied().flatten(), byte_off)
+    }
+    /// `l.<byte field>` / `l.<byte array elem>` unsigned? (`l` a local struct/union.)
+    pub fn local_field_unsigned(&self, local: usize, byte_off: u16) -> bool {
+        self.struct_field_unsigned(self.local_struct_idxs.get(local).copied().flatten(), byte_off)
     }
     pub fn is_unsigned_global(&self, idx: usize) -> bool {
         self.unsigned_globals.get(idx).copied().unwrap_or(false)
@@ -2168,6 +2195,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let char_globals: Vec<bool> = unit.globals.iter().map(|g| !g.is_pointer && g.element_size == 1 && g.array_len == 1).collect();
     let global_elem_sizes: Vec<usize> = unit.globals.iter().map(|g| g.element_size).collect();
     let global_array_lens: Vec<usize> = unit.globals.iter().map(|g| g.array_len).collect();
+    let global_struct_idxs: Vec<Option<usize>> = unit.globals.iter().map(|g| g.struct_idx).collect();
     let unsigned_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_unsigned).collect();
     let float_globals: Vec<usize> = unit.globals.iter()
         .map(|g| if g.is_float { g.element_size } else { 0 }).collect();
@@ -2258,7 +2286,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .functions
         .iter()
         .enumerate()
-        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &global_array_lens, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &unit.variadic_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &global_array_lens, &unit.structs, &global_struct_idxs, &char_returners, &long_returners, &pascal_fns, &static_fns, &far_fns, &unit.variadic_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.

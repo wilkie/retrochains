@@ -415,6 +415,8 @@ pub(crate) fn emit_function(
     float_globals: &[usize],
     global_elem_sizes: &[usize],
     global_array_lens: &[usize],
+    structs: &[StructDef],
+    global_struct_idxs: &[Option<usize>],
     char_returners: &std::collections::HashSet<String>,
     long_returners: &std::collections::HashSet<String>,
     pascal_fns: &std::collections::HashSet<String>,
@@ -492,6 +494,7 @@ pub(crate) fn emit_function(
     let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
     let local_pointee: Vec<usize> = func.locals.iter().map(|l| if l.array_len > 1 { 0 } else { l.pointee_size as usize }).collect();
     let local_pointee_uns: Vec<bool> = func.locals.iter().map(|l| l.pointee_unsigned).collect();
+    let local_struct_idxs: Vec<Option<usize>> = func.locals.iter().map(|l| l.struct_idx).collect();
     let local_float: Vec<usize> = func.locals.iter().map(|l| if l.is_float { l.size } else { 0 }).collect();
     let fpu_live: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
     let fpu_pending_fwait: std::cell::Cell<bool> = std::cell::Cell::new(false);
@@ -893,6 +896,9 @@ pub(crate) fn emit_function(
         local_pointee_sizes: &local_pointee,
         local_pointee_unsigned: &local_pointee_uns,
         float_locals: &local_float,
+        structs,
+        global_struct_idxs,
+        local_struct_idxs: &local_struct_idxs,
         char_params: &param_is_char,
         param_struct_bytes: &func.param_struct_bytes,
         long_params: &param_is_long,

@@ -554,6 +554,17 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
     let mut bit_unit_off: Option<u16> = None;
     let mut bit_pos: u8 = 0;
     while !matches!(p.peek(), Some(Tok::RBrace)) {
+        // Scan the field's leading modifier run for `unsigned` before consuming it.
+        let had_unsigned = {
+            let mut j = p.pos;
+            let mut found = false;
+            while let Some(Tok::Kw(k)) = p.toks.get(j) {
+                if !is_decl_modifier_kw(k) { break; }
+                if *k == "unsigned" { found = true; }
+                j += 1;
+            }
+            found
+        };
         let had_modifiers = skip_decl_modifiers(p) > 0;
         // A field may be a nested `struct <Name>` (value or pointer).
         let mut field_struct_idx: Option<usize> = None;
@@ -661,6 +672,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 fields.push(StructField {
                     name, byte_off: unit_off, size: 2, struct_idx: None,
                     bit_width: width, bit_off: place_bit, is_pointer: false, pointee_size: 0,
+                    is_unsigned: false,
                 });
             }
             continue;
@@ -706,6 +718,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
             bit_off: 0,
             is_pointer: is_ptr,
             pointee_size: if is_ptr { size } else { 0 },
+            is_unsigned: had_unsigned,
         });
         // Comma-separated declarators of the same base type: `int a, b, c;`.
         // Each may have its own `*` and `[N]`. Fixture 3612. (Bit-field commas
@@ -742,6 +755,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 name: fname2, byte_off: byte_off2, size: elem_size2,
                 struct_idx: field_struct_idx, bit_width: 0, bit_off: 0,
                 is_pointer: is_ptr2, pointee_size: if is_ptr2 { size } else { 0 },
+                is_unsigned: had_unsigned,
             });
         }
         p.eat(&Tok::Semi)?;
