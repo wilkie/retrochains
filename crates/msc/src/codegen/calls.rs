@@ -1145,8 +1145,26 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
                 && long_operand(left, locals)
                 && long_rhs_mem(right, locals) =>
         {
-            emit_long_to_dx_ax(left, locals, out, fixups);
-            emit_long_op_mem(*op, right, locals, out, fixups);
+            // For a COMMUTATIVE op whose BOTH operands are static (global /
+            // struct-field / global-array) long memory, MSC loads the operand
+            // with the LOWER (global-index, byte-offset) — i.e. the one declared
+            // first — into DX:AX, then combines the other from memory. For most
+            // exprs the left operand is already the earlier one (`a + b`), but
+            // `g + s.x` with `s` declared before `g` reverses it (fixture 367).
+            // Sub/Shl/Shr are non-commutative and excluded.
+            let commutative = matches!(op, BinOp::Add | BinOp::BitOr | BinOp::BitAnd | BinOp::BitXor);
+            let swap = commutative
+                && match (long_global_rhs_addr(left, locals), long_global_rhs_addr(right, locals)) {
+                    (Some(la), Some(ra)) => ra < la,
+                    _ => false,
+                };
+            if swap {
+                emit_long_to_dx_ax(right, locals, out, fixups);
+                emit_long_op_mem(*op, left, locals, out, fixups);
+            } else {
+                emit_long_to_dx_ax(left, locals, out, fixups);
+                emit_long_op_mem(*op, right, locals, out, fixups);
+            }
         }
         // `(long)<int>` — materialize the inner int into AX, then widen to DX:AX:
         // signed → `cwd`, unsigned → `sub dx,dx`. Fixture 1683.
