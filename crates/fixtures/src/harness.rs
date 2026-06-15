@@ -377,6 +377,9 @@ fn run_oracle(workspace_root: &Path, fixture: &Fixture) -> Result<OracleRun, Har
     if let Some(asm_args) = &fixture.invocation.asm_args {
         inv = inv.with_asm_args(asm_args.clone());
     }
+    if let Some(link_args) = &fixture.invocation.link_args {
+        inv = inv.with_link_args(link_args.clone());
+    }
     for (name, bytes) in &inputs {
         inv = inv.input(name.clone(), bytes.as_slice());
     }

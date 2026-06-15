@@ -61,6 +61,11 @@ pub struct OracleInvocation<'a> {
     /// OBJ and an ASM listing (BCC's `-c`/`-S` are mutually exclusive,
     /// so the only way to capture both is two compile commands).
     pub asm_args: Option<Vec<String>>,
+    /// Optional link-pass args, chained after `args` (and `asm_args`) in the
+    /// same DOSBox session. The same family tool runs in compile+link mode
+    /// (BCC/CL emit the EXE by invoking TLINK/LINK internally), so a fixture
+    /// captures its OBJ *and* its linked EXE from one run.
+    pub link_args: Option<Vec<String>>,
     /// Files to materialize in the DOS working directory before running. Keyed
     /// by the DOS-visible filename (e.g. `"FOO.CPP"`).
     pub inputs: BTreeMap<String, &'a [u8]>,
@@ -69,12 +74,24 @@ pub struct OracleInvocation<'a> {
 impl<'a> OracleInvocation<'a> {
     #[must_use]
     pub fn new(tool: Tool) -> Self {
-        Self { tool: Some(tool), args: Vec::new(), asm_args: None, inputs: BTreeMap::new() }
+        Self {
+            tool: Some(tool),
+            args: Vec::new(),
+            asm_args: None,
+            link_args: None,
+            inputs: BTreeMap::new(),
+        }
     }
 
     #[must_use]
     pub fn with_asm_args(mut self, args: Vec<String>) -> Self {
         self.asm_args = Some(args);
+        self
+    }
+
+    #[must_use]
+    pub fn with_link_args(mut self, args: Vec<String>) -> Self {
+        self.link_args = Some(args);
         self
     }
 
@@ -352,8 +369,16 @@ impl Oracle {
     /// invocation (spawn failure, missing exit-code sentinel, etc.).
     pub fn run(&self, invocation: &OracleInvocation<'_>) -> Result<OracleRun, OracleError> {
         let tool = invocation.tool.ok_or(OracleError::MissingTool)?;
+        // Chain any extra passes (ASM listing, then link) into one DOSBox
+        // session after the primary compile.
+        let mut arg_sets = vec![invocation.args.clone()];
         if let Some(asm_args) = &invocation.asm_args {
-            let arg_sets = vec![invocation.args.clone(), asm_args.clone()];
+            arg_sets.push(asm_args.clone());
+        }
+        if let Some(link_args) = &invocation.link_args {
+            arg_sets.push(link_args.clone());
+        }
+        if arg_sets.len() > 1 {
             dosbox::run_chained(
                 &self.cfg.dosbox,
                 self.cfg.fake_time.as_ref(),

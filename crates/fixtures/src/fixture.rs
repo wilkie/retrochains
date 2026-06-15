@@ -74,6 +74,12 @@ pub struct Invocation {
     /// primary args instead.
     #[serde(default)]
     pub asm_args: Option<Vec<String>>,
+    /// Optional link pass that produces the linked `.EXE` alongside the `.OBJ`,
+    /// chained after `args`/`asm_args` in the same DOSBox session. The same
+    /// family tool runs in compile+link mode (e.g. `bcc -LC:\LIB HELLO.C`,
+    /// `cl HELLO.C`). Only meaningful for complete programs (with `main`).
+    #[serde(default)]
+    pub link_args: Option<Vec<String>>,
     /// Which files at the fixture root to materialize into the DOS work
     /// directory. Defaults to every file at the fixture root that isn't
     /// an `invocation.*.toml` or the `expected/` directory.
