@@ -53,11 +53,27 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "bcc"
 version = "0.0.0"
 dependencies = [
+ "bcc-tasm",
  "obj",
- "tasm",
  "thiserror",
  "time",
  "x86",
+]
+
+[[package]]
+name = "bcc-tasm"
+version = "0.0.0"
+dependencies = [
+ "obj",
+ "thiserror",
+ "x86",
+]
+
+[[package]]
+name = "bcc-tlink"
+version = "0.0.0"
+dependencies = [
+ "obj",
 ]
 
 [[package]]
@@ -65,8 +81,8 @@ name = "bcc-wasm"
 version = "0.0.0"
 dependencies = [
  "bcc",
- "tasm",
- "tlink",
+ "bcc-tasm",
+ "bcc-tlink",
 ]
 
 [[package]]
@@ -786,15 +802,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tasm"
-version = "0.0.0"
-dependencies = [
- "obj",
- "thiserror",
- "x86",
-]
-
-[[package]]
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -843,13 +850,6 @@ checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",
-]
-
-[[package]]
-name = "tlink"
-version = "0.0.0"
-dependencies = [
- "obj",
 ]
 
 [[package]]

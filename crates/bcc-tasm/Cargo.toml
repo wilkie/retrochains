@@ -1,5 +1,5 @@
 [package]
-name = "tasm"
+name = "bcc-tasm"
 description = "Reimplementation of Turbo Assembler, the Borland C++ 2.0 assembler (TASM.EXE)"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
-name = "tasm"
+name = "bcc_tasm"
 path = "src/lib.rs"
 
 [[bin]]

@@ -56,7 +56,7 @@ pub fn emit_dash_c(
 ///
 /// Pipeline:
 ///   1. Compile the source to ASM text (same path as `bcc -S`).
-///   2. Assemble that text via [`tasm::assemble`] to produce OMF bytes.
+///   2. Assemble that text via [`bcc_tasm::assemble`] to produce OMF bytes.
 ///
 /// # Errors
 /// Returns [`EmitError`] on any lex/parse/assemble failure.
@@ -78,5 +78,5 @@ pub fn build_obj(
     // plus the trailing 0x1A EOF byte). Convert to a &str for tasm.
     let asm_text =
         std::str::from_utf8(&asm_bytes).map_err(|e| EmitError::AsmNotUtf8(e.to_string()))?;
-    tasm::assemble_with_model(asm_text, memory_model.marker_byte()).map_err(EmitError::Assemble)
+    bcc_tasm::assemble_with_model(asm_text, memory_model.marker_byte()).map_err(EmitError::Assemble)
 }

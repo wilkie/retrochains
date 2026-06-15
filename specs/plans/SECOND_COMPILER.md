@@ -167,7 +167,7 @@ compiler: `--toolchain ours --compiler bcc` runs `crates/bcc`,
 
 ## What forks
 
-- **`crates/tasm` vs `crates/masm`**: MASM and TASM share a heritage
+- **`crates/bcc-tasm` vs `crates/msc-masm`**: MASM and TASM share a heritage
   but have meaningful syntactic differences (segment ordering rules,
   `OPTION` directive, `ASSUME` semantics, `dup (?)` vs `dup ?`,
   procedure scoping). Trying to make one parser handle both is a
@@ -322,7 +322,7 @@ compiler work whenever we're ready.
   running it under N compilers multiplies the time. Worth thinking
   about parallel oracle invocations or compiler-conditioned subsets.
 - **Tooling overlap**: does the second compiler want its own version
-  of `crates/tlink` for linking, or do we just trust the vendor's
+  of `crates/bcc-tlink` for linking, or do we just trust the vendor's
   `LINK.EXE` until we have a reason to reimplement it?
 - **Inline asm dialects**: BCC's `asm { ... }` block and MSC's
   `__asm { ... }` block differ. Should the fixture C source be

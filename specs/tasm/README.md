@@ -1,10 +1,10 @@
 # TASM — the assembler
 
 Discoveries about `TASM.EXE` go here. The actual Rust reimplementation
-lives in `crates/tasm/`, with the public API `tasm::assemble(asm_text)
--> Result<Vec<u8>, AsmError>`.
+lives in `crates/bcc-tasm/` (crate `bcc-tasm`, imported as `bcc_tasm`),
+with the public API `bcc_tasm::assemble(asm_text) -> Result<Vec<u8>, AsmError>`.
 
-The `bcc -c` pipeline goes: source → `build_asm` (text) → `tasm::assemble`
+The `bcc -c` pipeline goes: source → `build_asm` (text) → `bcc_tasm::assemble`
 (OMF bytes). Every byte-exactness fix that lands for `-S` propagates
 into `-c` automatically.
 
@@ -43,7 +43,7 @@ into `-c` automatically.
 ## Suggested follow-on files
 
 - `INPUT_DIALECT.md` — the exact subset of MASM syntax our
-  `crates/tasm` accepts, and where it diverges from Borland's full
+  `crates/bcc-tasm` accepts, and where it diverges from Borland's full
   TASM 2.0.
 - `OMF_EMISSION.md` — TASM directive → OMF record table, with fixture
   citations.

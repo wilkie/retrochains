@@ -1,5 +1,5 @@
 [package]
-name = "tlink"
+name = "bcc-tlink"
 description = "Reimplementation of Turbo Link 4.0, the Borland C++ 2.0 linker (TLINK.EXE)"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
-name = "tlink"
+name = "bcc_tlink"
 path = "src/lib.rs"
 
 [[bin]]

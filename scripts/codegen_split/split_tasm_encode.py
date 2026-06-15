@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Split crates/tasm/src/encode.rs (4409 lines) into an encode/ directory.
+"""Split crates/bcc-tasm/src/encode.rs (4409 lines) into an encode/ directory.
 PURE CODE MOVE.
 
 The file is free functions + a few structs. The orchestration entry
@@ -19,8 +19,8 @@ import re
 import sys
 from pathlib import Path
 
-SRCFILE = Path("crates/tasm/src/encode.rs")
-DESTDIR = Path("crates/tasm/src/encode")
+SRCFILE = Path("crates/bcc-tasm/src/encode.rs")
+DESTDIR = Path("crates/bcc-tasm/src/encode")
 KEEP = {"encode_module", "build_extern_idx", "build_symbols",
         "build_group_idx", "build_segment_idx"}
 

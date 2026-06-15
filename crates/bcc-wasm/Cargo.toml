@@ -1,6 +1,6 @@
 [package]
 name = "bcc-wasm"
-description = "WASM entry points wrapping the bcc/tlink/tasm crates for the @retrochains/bcc TypeScript package"
+description = "WASM entry points wrapping the bcc/bcc-tlink/bcc-tasm crates for the @retrochains/bcc TypeScript package"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,8 +15,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bcc = { path = "../bcc" }
-tlink = { path = "../tlink" }
-tasm = { path = "../tasm" }
+bcc-tlink = { path = "../bcc-tlink" }
+bcc-tasm = { path = "../bcc-tasm" }
 
 [lints]
 workspace = true

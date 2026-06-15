@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 obj = { path = "../obj" }
-tasm = { path = "../tasm" }
+bcc-tasm = { path = "../bcc-tasm" }
 x86 = { path = "../x86" }
 thiserror = "2"
 time = { version = "0.3", default-features = false, features = ["formatting"] }

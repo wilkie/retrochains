@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Split crates/tasm/src/parse.rs (4943 lines) into a parse/ directory of
+"""Split crates/bcc-tasm/src/parse.rs (4943 lines) into a parse/ directory of
 concern modules. PURE CODE MOVE.
 
 The file is mostly free functions (instruction + operand parsers). Strategy
@@ -18,8 +18,8 @@ import re
 import sys
 from pathlib import Path
 
-SRCFILE = Path("crates/tasm/src/parse.rs")
-DESTDIR = Path("crates/tasm/src/parse")
+SRCFILE = Path("crates/bcc-tasm/src/parse.rs")
+DESTDIR = Path("crates/bcc-tasm/src/parse")
 KEEP = {"parse"}  # public entry fn stays in mod.rs
 
 INSTR = {"parse_instr", "parse_segment_attrs"}

@@ -29,7 +29,7 @@ pub enum EmitError {
     #[error("internal: ASM output is not valid UTF-8: {0}")]
     AsmNotUtf8(String),
     #[error("assemble: {0}")]
-    Assemble(tasm::AsmError),
+    Assemble(bcc_tasm::AsmError),
 }
 
 /// Compile one `.C` source to `.ASM` next to it in the current directory.
