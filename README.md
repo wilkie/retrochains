@@ -11,6 +11,38 @@ Currently, this is targetting mostly x86 compiler toolchains from the 1980s and
 * Borland C++ 2.0 compiler toolchain
 * Microsoft C++ 5.0 compiler toolchain
 
+## Getting started
+
+```sh
+# Build the workspace — the `xfix` and `oracle` binaries land in target/debug/.
+cargo build --workspace --bins
+
+# Smoke test: verify our reimplementation against every recorded golden hash.
+# Needs no compiler archives (it gates on the tracked manifests); should pass.
+target/debug/xfix verify-all --toolchain ours
+```
+
+### One-time git tuning (recommended)
+
+The fixture corpus is large (tens of thousands of files across thousands of
+directories), so a default `git status` spends most of its time walking the
+worktree. Enable git's large-repo optimizations once per clone:
+
+```sh
+git config feature.manyFiles true    # index v4 + untracked cache
+```
+
+On **git ≥ 2.37**, also turn on the filesystem monitor — it skips the worktree
+walk entirely and makes `git status` near-instant regardless of corpus size:
+
+```sh
+git config core.fsmonitor true
+```
+
+For rebuilding the oracle compilers see
+[specs/PROVISIONING.md](specs/PROVISIONING.md); for the fixture and golden-cache
+layout see [specs/FIXTURES.md](specs/FIXTURES.md).
+
 ## Reproducibility
 
 The real compilers themselves are not made available in this repository. Instead,

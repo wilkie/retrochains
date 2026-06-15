@@ -84,6 +84,11 @@ pnpm -r run test
 pnpm -r run lint
 pnpm format          # prettier --write .
 pnpm format:check
+
+# Git (one-time per clone — the large fixture corpus makes a default
+# `git status` slow; these speed up worktree scanning)
+git config feature.manyFiles true    # index v4 + untracked cache
+git config core.fsmonitor true       # git >= 2.37 only: filesystem monitor
 ```
 
 ## Repository layout (short form)
