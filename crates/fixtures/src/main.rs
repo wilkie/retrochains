@@ -351,11 +351,13 @@ fn hex_window(bytes: &[u8]) -> String {
     s
 }
 
+// Walk up from cwd to the workspace root, identified by the tracked `oracles/`
+// directory (the oracle archives live under it, e.g. `oracles/bcc/BC2.zip`).
 fn find_workspace_root() -> std::io::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let mut dir: &Path = cwd.as_path();
     loop {
-        if dir.join("BC2.zip").is_file() {
+        if dir.join("oracles").is_dir() {
             return Ok(dir.to_path_buf());
         }
         match dir.parent() {

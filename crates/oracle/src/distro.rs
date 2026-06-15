@@ -31,7 +31,8 @@ pub struct DistroSpec {
     /// Identifier — matches the `--compiler` flag in xfix and the
     /// `invocation.<name>.toml` filename.
     pub name: &'static str,
-    /// Where the archive lives on disk (e.g. `BC2.zip`, `MSC500.zip`).
+    /// Where the archive lives on disk (e.g. `oracles/bcc/BC2.zip`,
+    /// `oracles/msc/MSC500.zip`).
     pub archive_path: PathBuf,
     /// Where to lazy-extract on first use (e.g. `.bc2/`, `.msc500/`).
     /// Per-vendor so distributions don't collide.
@@ -52,7 +53,7 @@ impl DistroSpec {
     pub fn bc2(workspace_root: &Path) -> Self {
         Self {
             name: "bcc",
-            archive_path: workspace_root.join("BC2.zip"),
+            archive_path: workspace_root.join("oracles/bcc/BC2.zip"),
             extract_root: workspace_root.join(".bc2"),
             root_subdir: PathBuf::from("BC2"),
             sentinel: PathBuf::from("BIN/BCC.EXE"),
@@ -66,7 +67,7 @@ impl DistroSpec {
     pub fn msc500(workspace_root: &Path) -> Self {
         Self {
             name: "msc",
-            archive_path: workspace_root.join("MSC500.zip"),
+            archive_path: workspace_root.join("oracles/msc/MSC500.zip"),
             extract_root: workspace_root.join(".msc500"),
             root_subdir: PathBuf::new(),
             sentinel: PathBuf::from("BIN/CL.EXE"),

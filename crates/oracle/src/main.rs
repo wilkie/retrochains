@@ -90,14 +90,15 @@ fn try_main() -> Result<i32, Box<dyn std::error::Error>> {
     Ok(run.exit_code)
 }
 
-/// Find the workspace root by walking up from cwd looking for BC2.zip. Falls
-/// back to cwd if not found so the error path can still surface a useful
-/// "BC2.zip not found at <X>" message from the library layer.
+/// Find the workspace root by walking up from cwd looking for the tracked
+/// `oracles/` directory (the oracle archives live under it, e.g.
+/// `oracles/bcc/BC2.zip`). Falls back to cwd if not found so the error path can
+/// still surface a useful "archive not found at <X>" message from the library.
 fn find_workspace_root() -> std::io::Result<std::path::PathBuf> {
     let cwd = std::env::current_dir()?;
     let mut dir = cwd.as_path();
     loop {
-        if dir.join("BC2.zip").is_file() {
+        if dir.join("oracles").is_dir() {
             return Ok(dir.to_path_buf());
         }
         match dir.parent() {

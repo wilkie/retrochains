@@ -27,8 +27,8 @@ to match the one the goldens were captured against.
 ```sh
 cargo build --workspace --bins
 
-target/debug/oracle provision bcc   # downloads media, assembles, verifies -> ./BC2.zip   (99 files)
-target/debug/oracle provision msc   # downloads media, assembles, verifies -> ./MSC500.zip (136 files)
+target/debug/oracle provision bcc   # downloads media, assembles, verifies -> ./oracles/bcc/BC2.zip   (99 files)
+target/debug/oracle provision msc   # downloads media, assembles, verifies -> ./oracles/msc/MSC500.zip (136 files)
 ```
 
 Each command prints `provisioned <name> -> <archive> (<N> files verified against
@@ -120,8 +120,9 @@ drivers so the build runs headless.)
 4. **verify** — hash every file in the assembled tree against the `.sha256`
    manifest. **This is the correctness gate** — provisioning fails here if
    anything doesn't reproduce.
-5. **repackage** — zip the verified tree into the canonical archive at the repo
-   root, which the oracle's lazy-extract path consumes unchanged.
+5. **repackage** — zip the verified tree into the canonical archive beside its
+   descriptor (`oracles/<c>/<NAME>.zip`), which the oracle's lazy-extract path
+   consumes unchanged.
 
 Run any subcommand from anywhere inside the repo (the workspace root is located
 by walking up to the `oracles/` directory).
@@ -129,7 +130,7 @@ by walking up to the `oracles/` directory).
 ## Commands
 
 ```sh
-# Full pipeline -> canonical archive at the repo root.
+# Full pipeline -> canonical archive at oracles/<c>/<NAME>.zip.
 oracle provision <bcc|msc>
 
 # Just fetch + unpack the media; print the disk-image paths (no assembly).

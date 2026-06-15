@@ -13,7 +13,7 @@ When a definition refers to another glossary entry, that entry is
 
 ### Oracle
 The original DOS-era toolchain we're reverse-engineering — `BCC.EXE`,
-`TASM.EXE`, `TLINK.EXE` shipped in `BC2.zip` at the repo root, lazily
+`TASM.EXE`, `TLINK.EXE` shipped in `oracles/bcc/BC2.zip`, lazily
 unpacked into `.bc2/` and run under DOSBox by `crates/oracle/`. The
 DOSBox spawn is wrapped in `faketime` and input-file mtimes are
 pinned, for byte-exact determinism. The oracle is the ground truth:

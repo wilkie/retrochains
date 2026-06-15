@@ -220,9 +220,9 @@ pub struct OracleConfig {
 }
 
 impl OracleConfig {
-    /// Defaults for the Borland C++ 2.0 oracle (BC2.zip at the workspace
-    /// root). The historical default — kept under this name so existing
-    /// callers don't break.
+    /// Defaults for the Borland C++ 2.0 oracle (`oracles/bcc/BC2.zip` under the
+    /// workspace root). The historical default — kept under this name so
+    /// existing callers don't break.
     #[must_use]
     pub fn for_workspace(workspace_root: &Path) -> Self {
         Self {
@@ -232,9 +232,9 @@ impl OracleConfig {
         }
     }
 
-    /// Defaults for the Microsoft C 5.0 oracle (MSC500.zip at the
-    /// workspace root). See `oracles/msc/MSC500.md` for the manifest and acquisition
-    /// path; the zip itself is gitignored.
+    /// Defaults for the Microsoft C 5.0 oracle (`oracles/msc/MSC500.zip` under
+    /// the workspace root). See `oracles/msc/MSC500.md` for the manifest and
+    /// acquisition path; the zip itself is gitignored.
     #[must_use]
     pub fn for_msc500_workspace(workspace_root: &Path) -> Self {
         Self {

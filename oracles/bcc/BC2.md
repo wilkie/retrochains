@@ -2,9 +2,17 @@
 
 This file documents the contents of `BC2.zip`, the
 [Borland C++ 2.0][release] DOS toolchain we use as the *primary* oracle —
-the reference whose byte-exact output `crates/bcc` reproduces. The oracle
-crate (`crates/oracle/`) lazily unpacks it into `.bc2/` (gitignored) and
-drives `BCC.EXE`, `TASM.EXE`, and `TLINK.EXE` under DOSBox.
+the reference whose byte-exact output `crates/bcc` reproduces. The archive
+lives at `oracles/bcc/BC2.zip` (gitignored); the oracle crate
+(`crates/oracle/`) lazily unpacks it into `.bc2/` (gitignored) and drives
+`BCC.EXE`, `TASM.EXE`, and `TLINK.EXE` under DOSBox.
+
+The easiest way to obtain it is **`oracle provision bcc`**, which downloads
+the public install media and reassembles this exact tree, verified against
+[`BC2.sha256`](BC2.sha256) — see
+[`../../specs/PROVISIONING.md`](../../specs/PROVISIONING.md). To supply your
+own instead, place it at `oracles/bcc/BC2.zip`; the rest of this document
+covers acquiring and verifying such a copy by hand.
 
 [release]: https://winworldpc.com/product/borland-cpp/2x
 

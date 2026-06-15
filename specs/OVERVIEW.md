@@ -16,10 +16,9 @@ compiler and its peculiarity.
 
 ```
 retrochains/
-├── BC2.zip                 # Borland C++ 2.0 install tree (oracle source; gitignored, supply your own — see oracles/bcc/BC2.md)
-├── oracles/bcc/            # BCC oracle docs: BC2.sha256 (integrity manifest), BC2.md (how to acquire/verify), BC2.toml (descriptor)
-├── oracles/msc/            # MSC oracle docs: MSC500.{sha256,md,toml}
-├── .bc2/                   # Gitignored. Lazily unpacked from BC2.zip on first oracle use.
+├── oracles/bcc/            # BCC oracle: BC2.zip (install tree; gitignored — `oracle provision bcc` or supply your own) + BC2.{sha256,md,toml}
+├── oracles/msc/            # MSC oracle: MSC500.zip (gitignored — `oracle provision msc`) + MSC500.{sha256,md,toml}
+├── .bc2/                   # Gitignored. Lazily unpacked from oracles/bcc/BC2.zip on first oracle use.
 ├── Cargo.toml              # Rust workspace manifest
 ├── rust-toolchain.toml     # Pinned rustup channel + components
 ├── rustfmt.toml
@@ -92,11 +91,12 @@ and use any best practice to structure its build system and testing practices.
 ## The oracle
 
 The original Borland C++ 2.0 binaries (`BCC.EXE`, `TASM.EXE`, `TLINK.EXE`)
-along with their headers and runtime libraries are supplied as `BC2.zip` at the
-repo root. The Borland binaries aren't ours to redistribute, so `BC2.zip` is
-gitignored; we track the [`BC2.sha256`](../oracles/bcc/BC2.sha256) integrity manifest and the
-[`BC2.md`](../oracles/bcc/BC2.md) how-to-acquire doc instead (the same pattern as
-`MSC500.{sha256,md}`). On first use, `crates/oracle/` unpacks the archive into a
+along with their headers and runtime libraries are supplied as
+`oracles/bcc/BC2.zip`. The Borland binaries aren't ours to redistribute, so
+`BC2.zip` is gitignored; we track the [`BC2.sha256`](../oracles/bcc/BC2.sha256)
+integrity manifest and the [`BC2.md`](../oracles/bcc/BC2.md) how-to-acquire doc
+instead (and `oracle provision bcc` rebuilds the zip from them — see
+[`PROVISIONING.md`](PROVISIONING.md); same pattern as `MSC500.{sha256,md}`). On first use, `crates/oracle/` unpacks the archive into a
 gitignored `.bc2/` directory and from then on drives those binaries under DOSBox
 to produce reference outputs.
 

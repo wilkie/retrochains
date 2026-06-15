@@ -2,11 +2,12 @@
 
 The original 1991 Borland C++ 2.0 install tree — `BCC.EXE`, `TASM.EXE`,
 `TLINK.EXE`, all the headers in `INCLUDE/`, and every memory-model variant of
-the runtime libraries in `LIB/` — is supplied as `BC2.zip` at the repository
-root. The Borland binaries aren't ours to redistribute, so `BC2.zip` itself is
+the runtime libraries in `LIB/` — is supplied as `oracles/bcc/BC2.zip`. The
+Borland binaries aren't ours to redistribute, so `BC2.zip` itself is
 gitignored; what lives in version control is the [`BC2.sha256`](../oracles/bcc/BC2.sha256)
-integrity manifest and the [`BC2.md`](../oracles/bcc/BC2.md) how-to-acquire doc. Contributors
-drop their own copy of `BC2.zip` at the repo root and the oracle unpacks it on
+integrity manifest and the [`BC2.md`](../oracles/bcc/BC2.md) how-to-acquire doc.
+Contributors run `oracle provision bcc` (see [`PROVISIONING.md`](PROVISIONING.md))
+or drop their own copy at `oracles/bcc/BC2.zip`, and the oracle unpacks it on
 demand.
 
 We run those original binaries on a modern host with [DOSBox](https://www.dosbox.com/)

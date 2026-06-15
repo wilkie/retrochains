@@ -26,8 +26,8 @@ toolchain, and verifies every file byte-for-byte against the recorded hashes:
 
 ```sh
 cargo build --workspace --bins
-target/debug/oracle provision bcc   # -> ./BC2.zip   (99 files verified)
-target/debug/oracle provision msc   # -> ./MSC500.zip (136 files verified)
+target/debug/oracle provision bcc   # -> ./oracles/bcc/BC2.zip   (99 files verified)
+target/debug/oracle provision msc   # -> ./oracles/msc/MSC500.zip (136 files verified)
 ```
 
 That rebuilds the **compiler toolchains** (binaries, headers, runtime libraries,
