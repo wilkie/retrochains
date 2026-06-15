@@ -2529,6 +2529,30 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         else { out.extend_from_slice(&[0x2B, 0xC0]); }       // sub ax,ax
         return;
     }
+    // Trailing constant fold: `(X ± c1) ± c2` with both c1 and c2 literal and X a
+    // runtime value collapses to `X ± (net)` — a single `add/sub ax,imm`. MSC's
+    // expression folder combines the adjacent constants (e.g. `f() - 54321 + 12345`
+    // → `add ax,0x5c08`). Gated to a non-constant inner operand X (a constant X
+    // would fold whole) and inner/outer ops both Add/Sub. Fixture 4194.
+    if matches!(op, BinOp::Add | BinOp::Sub)
+        && let Some(c2) = right.fold(locals.inits)
+        && let Expr::BinOp { op: inner_op, left: x, right: c1e } = left
+        && matches!(inner_op, BinOp::Add | BinOp::Sub)
+        && let Some(c1) = c1e.fold(locals.inits)
+        && x.fold(locals.inits).is_none()
+    {
+        let s1 = if matches!(inner_op, BinOp::Add) { c1 } else { -c1 };
+        let s2 = if matches!(op, BinOp::Add) { c2 } else { -c2 };
+        let net = (s1 + s2) as i32;
+        emit_expr_to_ax(x, locals, out, fixups);
+        if net != 0 {
+            // MSC carries the combined constant as a signed net and folds it with a
+            // single `add ax,imm16` (the immediate wraps to 16 bits — e.g. net
+            // -41976 → `add ax,0x5c08`). emit_imm_op applies the inc/+ peepholes.
+            emit_imm_op(BinOp::Add, net, out);
+        }
+        return;
+    }
     // `(int)(hp2 - hp1)` for two huge-pointer locals → the far-pointer diff
     // helper `__aNahdiff`: push each pointer's segment+offset (hp1 then hp2),
     // call, then scale the byte result down to elements (`sar ax,1` per log2 of
@@ -2590,6 +2614,23 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
     {
         emit_expr_to_ax(left, locals, out, fixups);
         emit_imm_op(op, *k, out);
+        return;
+    }
+    // Sum-of-products chain `v0*K0 + v1*K1 + ... [+ small/leaf terms]` with TWO
+    // OR MORE `imul`-strength large-K products (K > 15, not a power of two, word
+    // operand). MSC evaluates the large products in REVERSE source order, parking
+    // each running result: the first-evaluated (rightmost large product) lands in
+    // CX, the next in DX, and the deepest/leftmost large product is computed LAST
+    // into AX via `mov ax,K; imul word [v0]`. Because that final imul clobbers DX,
+    // a value parked in DX is relocated to BX just before it. The products are then
+    // combined into AX in source order (`add ax,bx; add ax,cx`), after which the
+    // trailing small-K products and plain leaves fold in source order through the
+    // ordinary per-term path. With a single large product MSC instead leaves it in
+    // AX directly (handled by the leftmost-term path), so this is gated to ≥2.
+    // Fixture 4194 (`a*10000 + b*1000 + c*100 + d*10 + e`).
+    if matches!(op, BinOp::Add)
+        && let Some(()) = try_emit_product_sum_chain(left, right, locals, out, fixups)
+    {
         return;
     }
     // Int `+` chain over scalar globals/params/locals that mixes in 1–2 `char`
@@ -3466,6 +3507,106 @@ fn collect_scalar_add_chain<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
         }
         _ => { out.push(e); true }
     }
+}
+/// A spine term of a sum-of-products chain that strength-reduces to an `imul`:
+/// `var * K` where `var` is a plain word param/local and `K > 15` is not a power
+/// of two (so it goes through the `mov ax,K; imul word [var]` form). Returns the
+/// (disp, K) pair, else None.
+fn large_imul_product(e: &Expr, locals: &Locals<'_>) -> Option<(i16, u16)> {
+    if let Expr::BinOp { op: BinOp::Mul, left, right } = e
+        && let Some(k) = right.fold(locals.inits)
+        && k > 15
+        && !(k as u32).is_power_of_two()
+        && let Some(disp) = simple_word_bp(left, locals)
+    {
+        return Some((disp, (k as u32 & 0xFFFF) as u16));
+    }
+    None
+}
+/// Lower a sum-of-products chain that contains ≥2 large `imul` products. The
+/// large products are computed in reverse source order and parked (CX, then
+/// DX→relocated-to-BX), the deepest one going to AX last; they combine in source
+/// order; then the remaining terms (small products, plain leaves) fold through
+/// `emit_binop_right` in source order. Returns Some(()) when it handled the
+/// expression, None to fall through to the generic paths. Fixture 4194.
+fn try_emit_product_sum_chain(
+    left: &Expr,
+    right: &Expr,
+    locals: &Locals<'_>,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> Option<()> {
+    // Flatten the whole `+` chain in source order.
+    let mut terms: Vec<&Expr> = Vec::new();
+    collect_scalar_add_chain(left, &mut terms);
+    collect_scalar_add_chain(right, &mut terms);
+    // Indices of the large `imul` products, in source order.
+    let large: Vec<usize> = terms
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| large_imul_product(e, locals).is_some())
+        .map(|(i, _)| i)
+        .collect();
+    // Only this multi-large-product shape is handled here; ≤1 large product is
+    // covered by the existing leftmost-term / CX paths.
+    if large.len() < 2 {
+        return None;
+    }
+    // We park non-leftmost large products in CX (1 spare) and DX→BX (a 2nd). More
+    // than three large products would need additional scratch we haven't decoded.
+    if large.len() > 3 {
+        return None;
+    }
+    // The leftmost large product must be the FIRST spine term (it anchors AX); the
+    // tail after the last large product is folded as ordinary terms, so every term
+    // BEFORE the last large product must itself be a large product (the observed
+    // shape groups the imul products contiguously at the head). Bail otherwise so
+    // we don't reorder a chain MSC would evaluate differently.
+    let last_large = *large.last().unwrap();
+    if large[0] != 0 || large != (0..=last_large).collect::<Vec<_>>() {
+        return None;
+    }
+    // Park registers used for the running results, in evaluation order. The final
+    // imul (deepest product) clobbers DX, so a DX-parked value relocates to BX
+    // first. Evaluation order is reverse source order: large[m-1], …, large[1].
+    let m = large.len();
+    // Park slots for large[1..m] (everything except the deepest, which is AX).
+    // First-evaluated → CX, second-evaluated → DX(→BX). Map by source index.
+    // park_combine[j] = combine register for large[j] (j ≥ 1).
+    // Evaluation visits large[m-1] (→CX), large[m-2] (→DX→BX).
+    // So large[m-1] combines from CX, large[m-2] combines from BX.
+    let mut combine_reg = [0u8; 4]; // indexed by source position among large
+    // Emit each non-deepest large product, reverse source order, parking CX then DX.
+    for (slot, &li) in large[1..].iter().rev().enumerate() {
+        let (disp, k) = large_imul_product(terms[li], locals).unwrap();
+        out.push(0xB8); out.extend_from_slice(&k.to_le_bytes());            // mov ax,K
+        out.push(0xF7); out.push(bp_modrm(0x6E, disp)); push_bp_disp(out, disp); // imul word [bp+disp]
+        match slot {
+            0 => { out.extend_from_slice(&[0x8B, 0xC8]); combine_reg[li] = 0xC1; } // mov cx,ax → add ax,cx (03 C1)
+            1 => { out.extend_from_slice(&[0x8B, 0xD0]); combine_reg[li] = 0xC3; } // mov dx,ax → (relocated to bx) add ax,bx (03 C3)
+            _ => return None,
+        }
+    }
+    // Deepest/leftmost large product → AX, evaluated last. MSC loads the constant
+    // first, then — if a value is parked in DX (the second-evaluated large product,
+    // present only when m ≥ 3) — relocates it to BX (since the imul about to run
+    // clobbers DX), then issues the imul.
+    let (d0, k0) = large_imul_product(terms[large[0]], locals).unwrap();
+    out.push(0xB8); out.extend_from_slice(&k0.to_le_bytes());           // mov ax,K
+    if m >= 3 {
+        out.extend_from_slice(&[0x8B, 0xDA]); // mov bx,dx
+    }
+    out.push(0xF7); out.push(bp_modrm(0x6E, d0)); push_bp_disp(out, d0); // imul word [bp+disp]
+    // Combine the parked large products into AX in source order.
+    for &li in &large[1..] {
+        out.push(0x03); out.push(combine_reg[li]); // add ax,<reg>
+    }
+    // Fold the remaining trailing terms (after the last large product) in source
+    // order through the per-term path; AX already holds the large-product sum.
+    for &t in &terms[last_large + 1..] {
+        emit_binop_right(BinOp::Add, t, locals, out, fixups);
+    }
+    Some(())
 }
 /// Flatten a left-assoc `+` chain whose leaves are all `Expr::BitField` into a
 /// source-ordered list of `(base, byte_off, bit_off, bit_width)`. Returns false
