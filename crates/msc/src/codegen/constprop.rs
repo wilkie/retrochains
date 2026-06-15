@@ -2874,10 +2874,19 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::GlobalField { .. } => {
             // Substitute the field's known value via ga_known keyed by
             // (global, byte_off) — works for nested fields too (summed offset).
+            // The size guard blocks a fold when the recorded write width
+            // differs from this read's width — a union (whether the global
+            // itself is a union, or a nested union member of a struct, e.g.
+            // `g.u.c[0]` reading a byte off a word store to `g.u.i`) aliases
+            // the same storage at different types, so a byte read must NOT
+            // pick up an int store. When no size was recorded the legacy
+            // path stands. Fixture 4195.
             if let Expr::GlobalField { global, byte_off, size } = e
                 && let Some(&v) = cp.ga_known.get(&(*global, *byte_off))
-                && (!cp.union_globals.contains(global)
-                    || cp.ga_field_size.get(&(*global, *byte_off)) == Some(size))
+                && match cp.ga_field_size.get(&(*global, *byte_off)) {
+                    Some(stored) => stored == size,
+                    None => !cp.union_globals.contains(global),
+                }
             {
                 *e = Expr::IntLit(v);
             }

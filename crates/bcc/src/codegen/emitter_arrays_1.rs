@@ -328,12 +328,18 @@ impl<'a> super::FunctionEmitter<'a> {
         // \`mov ax, word ptr [reg + total_off]\`. Fixture 2676.
         // `<global-struct>.<arr-field>[i]` / `[K]` — fold the field
         // offset into the global symbol and index from there.
-        // Fixtures 2940, 3422.
-        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } = &array.kind
-            && let ExprKind::Ident(struct_name) = &base.kind
-            && let Some(g_ty) = self.globals.type_of(struct_name)
-            && let Some((field_off, field_ty)) = g_ty.field(field)
+        // Fixtures 2940, 3422. The chain may nest arbitrarily deep
+        // (`g.u.c[K]` where `u` is a union member of struct `g`):
+        // `try_lvalue_chain_addr` resolves the whole Dot chain to the
+        // root ident, accumulated byte offset, and the array leaf
+        // type. Fixture 4195 (array inside a union inside a struct).
+        if let ExprKind::Member { kind: crate::ast::MemberKind::Dot, .. } = &array.kind
+            && let Some((struct_name, field_off_i32, field_ty)) =
+                self.try_lvalue_chain_addr(array)
+            && !self.locals.has(&struct_name)
+            && self.globals.contains(&struct_name)
             && let Some(elem_ty) = field_ty.array_elem()
+            && let Ok(field_off) = u16::try_from(field_off_i32)
         {
             let elem_ty_clone = elem_ty.clone();
             let stride = u32::from(elem_ty_clone.size_bytes());

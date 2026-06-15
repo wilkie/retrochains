@@ -646,7 +646,18 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
         let had_modifiers = skip_decl_modifiers(p) > 0;
         // A field may be a nested `struct <Name>` (value or pointer).
         let mut field_struct_idx: Option<usize> = None;
-        let size: u8 = if matches!(p.peek(), Some(Tok::Kw("struct"))) {
+        let size: u8 = if matches!(p.peek(), Some(Tok::Kw("union")))
+            && matches!(p.toks.get(p.pos + 1), Some(Tok::LBrace))
+        {
+            // Anonymous nested `union { ... } name;` member (fixture
+            // 4195). Same shape as the anon-struct branch below, but
+            // every member sits at offset 0 and the size is the
+            // largest member.
+            p.bump();
+            let inner = parse_anon_struct(p, true)?;
+            field_struct_idx = Some(inner);
+            u8::try_from(p.structs[inner].total_bytes).expect("anon union fits in u8")
+        } else if matches!(p.peek(), Some(Tok::Kw("struct"))) {
             p.bump();
             // Anonymous nested struct member: `struct { ... } name;` (fixtures
             // 3342, 2324). Parse + register the inner struct, then fall through
