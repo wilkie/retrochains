@@ -4946,6 +4946,22 @@ fn case_body_falls_through(body: &[Stmt]) -> bool {
     main.last().is_none_or(stmt_ends_with_fallthrough)
 }
 
+/// True when at least one arm's body falls through into the NEXT arm (no
+/// trailing `break`/`return`), i.e. the cases form a C cascading fall-through
+/// chain rather than self-contained arms. MSC lays such a switch out as one
+/// contiguous source-order block (the plain `emit_runtime_switch`
+/// default-fallthrough layout), not the FWD partial-continuation layout that
+/// each-arm-breaks shapes use. Fixture 4206 (cascading `case HIGH/MID/LOW`)
+/// vs 4167 (each arm has its own break — no cascade).
+pub(crate) fn switch_cases_cascade(cases: &[SwitchArm]) -> bool {
+    cases.iter().take(cases.len().saturating_sub(1)).any(|arm| {
+        // No explicit break and the body completes by falling through →
+        // control reaches the following arm's label.
+        !arm.body.iter().any(|s| matches!(s, Stmt::Break))
+            && case_body_falls_through(&arm.body)
+    })
+}
+
 /// A case body of the shape `[stmt*, Switch, Break]` — a nested switch as the
 /// last statement, ended by a `break`. Returns (leading stmts, the nested
 /// switch's scrutinee+cases). In the partial-switch DIRECT layout MSC fuses
@@ -5720,6 +5736,23 @@ pub(crate) fn emit_runtime_switch(
         if let Some(d) = default_idx { v.push(d); }
         v
     };
+
+    // Default-fallthrough layout places the default body FIRST, ahead of the
+    // value-case bodies. When the default body falls off the end of the switch
+    // (no `break`/`return`) it must NOT run into the value cases that follow —
+    // MSC emits an explicit `jmp <end>` to skip them. We synthesize that as a
+    // break placeholder on the default buffer so it's patched to switch_end
+    // like any other break. Only needed when the default is not the last body
+    // emitted and doesn't already terminate or break. Fixture 4206.
+    if default_fallthrough {
+        let d = default_idx.unwrap();
+        let is_last = emission_order.last() == Some(&d);
+        if !is_last && !case_bufs[d].term && case_bufs[d].breaks.is_empty() {
+            let off = case_bufs[d].buf.len();
+            case_bufs[d].buf.extend_from_slice(&[0xEB, 0x00]);
+            case_bufs[d].breaks.push(off);
+        }
+    }
 
     // The final emitted body's trailing break jumps to the very next
     // instruction (the post-switch fall-out) — MSC drops the jmp entirely

@@ -1124,7 +1124,16 @@ pub(crate) fn emit_function(
                     // keep the plain chain (3084).
                     None => (live_nonterm
                         && !from_block[i]
-                        && crate::codegen::statements::switch_has_break(cases))
+                        && crate::codegen::statements::switch_has_break(cases)
+                        // Cascading fall-through value cases under a default
+                        // (`case A: …; case B: …; default: …` where the
+                        // earlier arms fall into the next) lay out as one
+                        // contiguous source-order block via the plain
+                        // default-fallthrough layout, NOT the FWD partial
+                        // layout that each-arm-breaks shapes use. Fixture
+                        // 4206 vs 4167.
+                        && !(ft.is_some()
+                            && crate::codegen::statements::switch_cases_cascade(cases)))
                         || (from_block[i]
                             && cases.len() == 1
                             && ft.is_none()

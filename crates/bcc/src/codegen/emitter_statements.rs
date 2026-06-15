@@ -685,15 +685,24 @@ impl<'a> super::FunctionEmitter<'a> {
             }
         }
         }
-        // Compare/branch chain: one cmp+je per non-default case in
-        // source order. `case 0` uses `or ax,ax` (cf. fixture 072).
+        // Compare/branch chain: one cmp+je per non-default case.
+        // BCC sorts the chain by ascending (signed) case value, not
+        // source order — the case bodies/labels stay in source order,
+        // only the dispatch comparisons are reordered (fixture 4206,
+        // `case HIGH/MID/LOW` declared 3,2,1 dispatches as 1,2,3).
+        // `case 0` uses `or ax,ax` (cf. fixture 072).
         let default_slot = cases
             .iter()
             .zip(case_slots)
             .find_map(|(c, &s)| c.value.is_none().then_some(s));
-        for (case, &slot) in cases.iter().zip(case_slots) {
-            let Some(v) = case.value else { continue };
-            let v16 = v & 0xFFFF;
+        let mut chain: Vec<(i32, u32)> = cases
+            .iter()
+            .zip(case_slots)
+            .filter_map(|(c, &s)| c.value.map(|v| (v as i16 as i32, s)))
+            .collect();
+        chain.sort_by_key(|&(v, _)| v);
+        for &(v, slot) in &chain {
+            let v16 = v as u32 & 0xFFFF;
             if v16 == 0 {
                 let _ = write!(self.out, "\tor\t{scrut_reg},{scrut_reg}\r\n");
             } else if v16 < 256 && scrut_in_dx {
