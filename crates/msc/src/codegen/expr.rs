@@ -2693,12 +2693,21 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
     // would fold whole) and inner/outer ops both Add/Sub. Fixture 4194.
     if matches!(op, BinOp::Add | BinOp::Sub)
         && let Some(c2) = right.fold(locals.inits)
-        && let Expr::BinOp { op: inner_op, left: x, right: c1e } = left
+        && let Expr::BinOp { op: inner_op, left: il, right: ir } = left
         && matches!(inner_op, BinOp::Add | BinOp::Sub)
-        && let Some(c1) = c1e.fold(locals.inits)
-        && x.fold(locals.inits).is_none()
+        // Split the inner binop into its runtime operand `x` and its signed
+        // constant `s1`. Add is commutative so the constant may sit on EITHER
+        // side (`x + c1` or `c1 + x`); Sub only matches `x - c1` (a `c1 - x`
+        // would negate the runtime value, which this load-then-add shape can't
+        // express). Fixture 4194 (`f() - c1 + c2`), 4230 (`(16 + total) - 4`).
+        && let Some((x, s1)) = (match (il.fold(locals.inits), ir.fold(locals.inits)) {
+            // constant on the right: x + c1  /  x - c1
+            (None, Some(c1)) => Some((il.as_ref(), if matches!(inner_op, BinOp::Add) { c1 } else { -c1 })),
+            // constant on the left of an Add: c1 + x
+            (Some(c1), None) if matches!(inner_op, BinOp::Add) => Some((ir.as_ref(), c1)),
+            _ => None,
+        })
     {
-        let s1 = if matches!(inner_op, BinOp::Add) { c1 } else { -c1 };
         let s2 = if matches!(op, BinOp::Add) { c2 } else { -c2 };
         let net = (s1 + s2) as i32;
         emit_expr_to_ax(x, locals, out, fixups);
