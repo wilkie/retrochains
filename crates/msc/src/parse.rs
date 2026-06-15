@@ -5961,6 +5961,14 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // and a bare identifier (local / global storage size).
             let has_paren = matches!(p.peek(), Some(Tok::LParen));
             if has_paren { p.bump(); }
+            // `sizeof(a, b, c)` — the comma operator's type (and so its
+            // size) is the type of the *last* operand; the earlier ones
+            // are evaluated only for side effects, which `sizeof`
+            // discards. Skip straight to the final operand so the type
+            // resolution below sees only it. Fixture 4203.
+            if has_paren {
+                p.skip_to_after_last_top_comma();
+            }
             let n = if let Some(Tok::Kw("struct")) = p.peek().cloned() {
                 p.bump();
                 let sname = match p.bump().cloned() {

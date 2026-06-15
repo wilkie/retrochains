@@ -1798,6 +1798,34 @@ impl<'a> Parser<'a> {
         }
         t
     }
+    /// If the current parenthesized group (the caller has already
+    /// consumed its opening `(`) contains a top-level comma operator,
+    /// advance `pos` to just past the *last* such comma and return
+    /// `true`. Used by `sizeof`: the type of a comma-expression is the
+    /// type of its final operand, and the earlier operands are never
+    /// evaluated, so they can be skipped wholesale. Returns `false`
+    /// (leaving `pos` unchanged) when there is no top-level comma.
+    fn skip_to_after_last_top_comma(&mut self) -> bool {
+        let mut depth = 0i32;
+        let mut last: Option<usize> = None;
+        let mut i = self.pos;
+        while let Some(t) = self.toks.get(i) {
+            match t {
+                Tok::LParen | Tok::LBrack => depth += 1,
+                Tok::RParen | Tok::RBrack if depth == 0 => break,
+                Tok::RParen | Tok::RBrack => depth -= 1,
+                Tok::Comma if depth == 0 => last = Some(i),
+                _ => {}
+            }
+            i += 1;
+        }
+        if let Some(idx) = last {
+            self.pos = idx + 1;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 

@@ -444,6 +444,11 @@ impl Parser {
             }
             // `sizeof(<cast>)` — cast determines the result type.
             ExprKind::Cast { ty, .. } => Some(ty.size_bytes()),
+            // `sizeof(a, b)` — the comma operator's type (and thus
+            // size) is the type of its *right* operand; the left is
+            // evaluated only for side effects, which `sizeof` discards
+            // entirely. Fixture 4203.
+            ExprKind::Comma { right, .. } => self.expr_static_size(right),
             // `sizeof(<intlit>)` — int.
             ExprKind::IntLit(_) => Some(2),
             // `sizeof(<unary>)` — same width as the operand.
