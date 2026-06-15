@@ -12,6 +12,9 @@ update one of them deliberately.
 - [`RUNNING_BCC.md`](RUNNING_BCC.md) — how the oracle (`crates/oracle/`)
   drives the original BCC/TASM/TLINK binaries under DOSBox, and the clock-
   pinning mechanism that gives us byte-exact reproducibility.
+- [`PROVISIONING.md`](PROVISIONING.md) — how `oracle provision <bcc|msc>`
+  rebuilds the gitignored compiler archives from public install media and
+  verifies every file against the recorded `sha256` manifest.
 - [`FIXTURES.md`](FIXTURES.md) — the fixture corpus layout and the
   capture/verify harness contract.
 - [`GLOSSARY.md`](GLOSSARY.md) — definitions for terms used across
