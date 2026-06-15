@@ -9,6 +9,7 @@
 
 mod distro;
 mod dosbox;
+pub mod provision;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ use std::time::{Duration, SystemTime};
 
 pub use distro::{DistroLayout, DistroSpec};
 pub use dosbox::DosboxError;
+pub use provision::{InstallRecipe, ProvisionError, ProvisionSpec, VerifyReport};
 
 /// One of the original DOS tools we can drive. Each oracle distribution
 /// supports a subset — BC2 ships BCC/TASM/TLINK; MSC500 ships CL/MASM/LINK.

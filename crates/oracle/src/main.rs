@@ -9,8 +9,10 @@
 //! captured stdout from the tool is printed to our stdout verbatim.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use oracle::provision::{self, ProvisionSpec};
 use oracle::{Oracle, OracleConfig, OracleInvocation, Tool};
 
 fn main() -> ExitCode {
@@ -26,6 +28,9 @@ fn main() -> ExitCode {
 fn try_main() -> Result<i32, Box<dyn std::error::Error>> {
     let mut argv = std::env::args().skip(1);
     let tool_arg = argv.next().ok_or("missing <tool>")?;
+    if tool_arg == "provision" {
+        return cmd_provision(argv.collect());
+    }
     let tool = match tool_arg.as_str() {
         "bcc" | "BCC" => Tool::Bcc,
         "tasm" | "TASM" => Tool::Tasm,
@@ -93,6 +98,122 @@ fn find_workspace_root() -> std::io::Result<std::path::PathBuf> {
     let mut dir = cwd.as_path();
     loop {
         if dir.join("BC2.zip").is_file() {
+            return Ok(dir.to_path_buf());
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return Ok(cwd),
+        }
+    }
+}
+
+/// `oracle provision <bcc|msc> [SUBCOMMAND]` — rebuild a gitignored compiler
+/// archive from its tracked descriptor + manifest. Subcommands let the
+/// host-side stages run on their own while the DOSBox-X install step matures:
+///
+///   verify <tree-dir>     hash a tree against the manifest
+///   repackage <tree-dir>  verify, then seal the canonical archive
+///   fetch                 download + unpack the install media, list disk images
+///   (none)                run the full pipeline
+fn cmd_provision(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
+    let mut it = args.into_iter();
+    let usage = "usage: oracle provision <bcc|msc> [verify <dir> | repackage <dir> | fetch]";
+    let name = it.next().ok_or(usage)?;
+    let root = find_provision_root()?;
+    let spec = ProvisionSpec::for_name(&name, &root)
+        .ok_or_else(|| format!("unknown distribution: {name} (expected bcc or msc)"))?;
+
+    match it.next().as_deref() {
+        Some("verify") => {
+            let dir = it.next().ok_or("usage: oracle provision <name> verify <tree-dir>")?;
+            let report = provision::verify_tree(Path::new(&dir), &spec.manifest_path)?;
+            println!("{}", report.summary());
+            Ok(i32::from(!report.is_ok()))
+        }
+        Some("repackage") => {
+            let dir =
+                it.next().ok_or("usage: oracle provision <name> repackage <tree-dir> [out.zip]")?;
+            // Optional explicit output; defaults to the canonical archive path.
+            let out = it.next().map_or_else(|| spec.distro.archive_path.clone(), PathBuf::from);
+            // Never seal an archive we can't vouch for: verify first.
+            let report = provision::verify_tree(Path::new(&dir), &spec.manifest_path)?;
+            if !report.is_ok() {
+                eprintln!("{}", report.summary());
+                return Err("refusing to repackage: tree does not match the manifest".into());
+            }
+            provision::repackage(Path::new(&dir), &spec.manifest_path, &out)?;
+            println!("wrote {} ({} files verified)", out.display(), report.checked);
+            Ok(0)
+        }
+        Some("fetch") => {
+            let cache = provision_cache(&root, &spec);
+            let media = fetch_and_unpack(&spec, &cache)?;
+            println!("media: {}", media.display());
+            for img in provision::disk_images(&cache)? {
+                println!("  disk image: {}", img.display());
+            }
+            Ok(0)
+        }
+        Some(other) => Err(format!("unknown provision subcommand: {other}").into()),
+        None => {
+            let cache = provision_cache(&root, &spec);
+            let descriptor = provision::Descriptor::load(&spec.descriptor_path)?;
+            let recipe = descriptor.install.as_ref().ok_or_else(|| {
+                format!("descriptor {} has no [install] recipe", spec.descriptor_path.display())
+            })?;
+            fetch_and_unpack(&spec, &cache)?;
+
+            let staging = cache.join("staging");
+            if staging.exists() {
+                std::fs::remove_dir_all(&staging)?;
+            }
+            std::fs::create_dir_all(&staging)?;
+            eprintln!("[provision] assembling tree from install media …");
+            provision::install_tree(recipe, &cache, &staging)?;
+
+            let tree_base = &staging;
+            let report = provision::verify_tree(tree_base, &spec.manifest_path)?;
+            if !report.is_ok() {
+                eprintln!("{}", report.summary());
+                return Err("assembled tree does not match the manifest".into());
+            }
+            let out = &spec.distro.archive_path;
+            provision::repackage(tree_base, &spec.manifest_path, out)?;
+            println!(
+                "provisioned {} → {} ({} files verified against the manifest)",
+                spec.name,
+                out.display(),
+                report.checked
+            );
+            Ok(0)
+        }
+    }
+}
+
+fn fetch_and_unpack(
+    spec: &ProvisionSpec,
+    cache: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let descriptor = provision::Descriptor::load(&spec.descriptor_path)?;
+    eprintln!("[provision] fetching media for {} …", spec.name);
+    let media = provision::fetch_media(&descriptor, cache)?;
+    eprintln!("[provision] unpacking {} …", media.display());
+    provision::unpack_media(&media, cache)?;
+    Ok(media)
+}
+
+fn provision_cache(root: &Path, spec: &ProvisionSpec) -> PathBuf {
+    root.join(format!(".provision-{}", spec.name))
+}
+
+/// Find the workspace root for provisioning by walking up from cwd looking for
+/// the tracked `oracles/` directory. Unlike `find_workspace_root`, this can't
+/// key off `BC2.zip` — recreating that archive is the whole point.
+fn find_provision_root() -> std::io::Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let mut dir = cwd.as_path();
+    loop {
+        if dir.join("oracles").is_dir() {
             return Ok(dir.to_path_buf());
         }
         match dir.parent() {

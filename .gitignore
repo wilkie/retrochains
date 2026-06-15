@@ -27,6 +27,8 @@ pkg/
 .msc500/
 .lattice2/
 .lattice3/
+# `oracle provision <name>` media cache (downloaded 7z + unpacked floppy images).
+.provision-*/
 
 # Compiler binary build artifacts are NOT tracked. A fixture's
 # `expected/<compiler>/manifest.toml` records the SHA-256 (and size) of every

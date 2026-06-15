@@ -19,6 +19,18 @@ path = "src/main.rs"
 [dependencies]
 thiserror = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Provisioning (`oracle provision`): rebuild a distribution from its original
+# install media. Kept to crates the workspace already vets (serde/toml/sha2)
+# plus a pure-Rust 7z reader so CI needs no system `7z`.
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+sha2 = "0.10"
+sevenz-rust2 = "0.21"
+# FAT12 reader for pulling the archives out of the original install floppy
+# images. The install stage then shells out to Info-ZIP (`unzip`/`zip`) to
+# expand them, because the 1991 archives use Implode/Shrink which the `zip`
+# crate can't read and Borland's own UNZIP can't read the .CAx multi-volume.
+fatfs = "0.3"
 
 [lints]
 workspace = true

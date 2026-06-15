@@ -2,3 +2,52 @@ winworldpc_url = "https://winworldpc.com/product/borland-c/20"
 winworldpc_download = "https://winworldpc.com/download/9d8ab0f6-ffb3-11f0-b330-0200008a0da4"
 name = "Borland C++"
 version = "2.0"
+
+# Integrity anchor for the upstream install media (the WinWorld 7z of the
+# original 3.5"/720K install floppies). `oracle provision bcc` downloads the
+# media, gates on this hash, then assembles + verifies the tree against
+# BC2.sha256. The per-file BC2.sha256 covers the *installed* tree; this covers
+# the *downloaded media* so a corrupt/swapped upstream file fails fast.
+archive_sha256 = "2a201029735897be79b3ac7fcc55c96edf049de2b5052151c59ae173c82594b5"
+media_filename = "Borland CPP 2.0 (1991) (3.5-720k).7z"
+
+# How to assemble the verified tree from the install media. The media is a 7z
+# of the original install floppies; the provisioner reads every file out of the
+# FAT12 disk images, then applies the steps below. Output is byte-identical to
+# what the vendor INSTALL.EXE produces (BC2.sha256 gates every one of the 99
+# files). We extract on the host with Info-ZIP because Borland's own UNZIP 2.00
+# cannot read the multi-volume .CAx archive that holds BCC.EXE, and the
+# decompressed bytes are identical regardless of which unzip does the work.
+[install]
+# Top-level directory of the produced tree; matches the BC2.sha256 path prefix.
+tree_root = "BC2"
+
+# Plain archives → a destination subdir of tree_root. `only` restricts to
+# specific members (an archive may carry tools we don't ship).
+[[install.extract]]
+archives = ["INCLUDE.ZIP", "WINCLUDE.ZIP"]
+into = "INCLUDE"
+
+[[install.extract]]
+archives = ["CLIB.ZIP", "SLIB.ZIP", "MLIB.ZIP", "LLIB.ZIP", "HLIB.ZIP", "XLIB.ZIP", "WINLIB.ZIP"]
+into = "LIB"
+
+[[install.extract]]
+archives = ["TASM.ZIP"]
+into = "BIN"
+only = ["TASM.EXE", "TLINK.EXE"]
+
+# Multi-volume Borland span: concatenate the parts in order, reconstruct the
+# archive with `zip -FF`, then extract the listed members. BCC.EXE spans
+# CMDLINE.CA1 (data) into CMDLINE.CA2 (central directory).
+[[install.span]]
+parts = ["CMDLINE.CA1", "CMDLINE.CA2"]
+into = "BIN"
+only = ["BCC.EXE"]
+
+# Files the installer relocates into a subdirectory after extraction. These
+# ship flat in INCLUDE.ZIP but belong under INCLUDE/SYS in the final tree.
+[[install.relocate]]
+from = "INCLUDE"
+into = "INCLUDE/SYS"
+files = ["STAT.H", "TIMEB.H", "TYPES.H"]
