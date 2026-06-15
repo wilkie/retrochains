@@ -1178,6 +1178,34 @@ impl<'a> super::FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
         self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
     }
+    /// True when `value` is a `<int-var> ± <const>` expression whose
+    /// variable is a register-resident int local. Such a value lowers
+    /// to `mov ax,<reg>; inc/dec/add ax,K`, touching only AX (never BX
+    /// or DX). BCC computes the destination array index into BX before
+    /// such a value, mirroring its stack-array store order. A multiply
+    /// (or any RHS needing DX/BX scratch) does NOT qualify and keeps the
+    /// value-first order.
+    pub(crate) fn value_is_axonly_addsub_const(&self, value: &Expr) -> bool {
+        let ExprKind::BinOp { op, left, right } = &value.kind else {
+            return false;
+        };
+        if !matches!(op, BinOp::Add | BinOp::Sub) {
+            return false;
+        }
+        // `var + K` or `K + var` (Add commutes); for Sub only `var - K`.
+        let var_name = match (&left.kind, try_const_eval(right)) {
+            (ExprKind::Ident(n), Some(_)) => Some(n.as_str()),
+            _ if matches!(op, BinOp::Add) => match (&right.kind, try_const_eval(left)) {
+                (ExprKind::Ident(n), Some(_)) => Some(n.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(name) = var_name else { return false };
+        self.locals.has(name)
+            && self.locals.type_of(name).is_int_like()
+            && matches!(self.locals.location_of(name), LocalLocation::Reg(r) if !r.is_byte())
+    }
     /// `a[<i1>][<i2>]... = <value>;` — write into an array slot. With
     /// all-constant indices we fold to a single `mov <width> ptr
     /// [bp-N], K`. Otherwise (single-dim variable index, fixtures
@@ -1725,6 +1753,20 @@ impl<'a> super::FunctionEmitter<'a> {
                     let _ = write!(
                         self.out,
                         "\tmov\tbyte ptr DGROUP:_{array}[bx],al\r\n",
+                    );
+                } else if self.value_is_axonly_addsub_const(value) {
+                    // Simple `<reg-int> ± const` RHS (lowers to `mov ax,
+                    // <reg>; inc/dec/add ax,K` — touches only AX). BCC
+                    // computes the array INDEX into BX first, then the
+                    // value into AX, matching the stack-array ordering.
+                    // Fixture 4205 (`hours[i] = i + 1` for global int
+                    // array). Contrast `a[i] = i*10` (fixture 1444),
+                    // whose imul forces the value-first order below.
+                    self.emit_index_into_bx(&indices[0], &elem_ty);
+                    self.emit_expr_to_ax(value);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr DGROUP:_{array}[bx],ax\r\n",
                     );
                 } else {
                     self.emit_expr_to_ax(value);
