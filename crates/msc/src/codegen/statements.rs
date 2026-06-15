@@ -830,13 +830,35 @@ pub(crate) fn expr_call_count(e: &Expr) -> usize {
         _ => 0,
     }
 }
+/// Count the OUTERMOST calls in an expression — calls reachable without
+/// descending through another call's arguments. A nested call (`f(g())`) does
+/// not increase the count because it is fully evaluated, with its own cdecl
+/// cleanup, before the enclosing call lands; only the enclosing call's cleanup
+/// is a candidate for last-call elision. By contrast `f() + g()` has two
+/// outermost calls and must keep both cleanups. Fixture 4192.
+pub(crate) fn expr_outer_call_count(e: &Expr) -> usize {
+    match e {
+        Expr::Call { .. } | Expr::CallPtr { .. } | Expr::CallStructField { .. } => 1,
+        Expr::BinOp { left, right, .. } => expr_outer_call_count(left) + expr_outer_call_count(right),
+        Expr::Ternary { cond, then_arm, else_arm } =>
+            expr_outer_call_count(cond) + expr_outer_call_count(then_arm) + expr_outer_call_count(else_arm),
+        Expr::AssignExpr { value, .. } => expr_outer_call_count(value),
+        Expr::Seq { value, .. } => expr_outer_call_count(value),
+        Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => expr_outer_call_count(ptr),
+        Expr::Index { index, .. } | Expr::IndexByte { index, .. } => expr_outer_call_count(index),
+        Expr::CastChar { value, .. } => expr_outer_call_count(value),
+        _ => 0,
+    }
+}
 /// True when this top-level statement is a straight-line statement carrying
-/// exactly one call (the candidate for last-call cleanup elision).
+/// exactly one OUTERMOST call (the candidate for last-call cleanup elision).
+/// Calls nested inside that call's arguments are fine — they clean up their own
+/// args first — so only the enclosing call count matters here.
 pub(crate) fn stmt_single_call(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::ExprStmt(e) => expr_call_count(e) == 1,
-        Stmt::Assign { value, .. } => expr_call_count(value) == 1,
-        Stmt::Return(e) => expr_call_count(e) == 1,
+        Stmt::ExprStmt(e) => expr_outer_call_count(e) == 1,
+        Stmt::Assign { value, .. } => expr_outer_call_count(value) == 1,
+        Stmt::Return(e) => expr_outer_call_count(e) == 1,
         _ => false,
     }
 }

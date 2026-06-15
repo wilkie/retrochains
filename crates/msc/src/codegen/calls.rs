@@ -48,6 +48,13 @@ pub(crate) fn emit_call_inner(
     } else {
         (0..args.len()).rev().collect()
     };
+    // The last-call cleanup elision (signalled by `elide_call_cleanup`) belongs
+    // to the OUTERMOST call of the statement — the one emitted last, whose
+    // result flows straight into the slide-frame epilogue. Any call nested in an
+    // argument is fully evaluated FIRST and must clean up its own cdecl args, so
+    // suppress the flag for the duration of argument emission and restore it for
+    // this call's own cleanup decision. Fixture 4192.
+    let saved_elide = locals.elide_call_cleanup.replace(false);
     for &i in &order {
         let arg = &args[i];
         let is_long_param = push_long_at(i);
@@ -85,6 +92,9 @@ pub(crate) fn emit_call_inner(
             emit_push_arg(arg, locals, out, fixups);
         }
     }
+    // Argument emission (incl. any nested calls) is done — restore the elision
+    // flag so THIS call's cleanup decision below honors it.
+    locals.elide_call_cleanup.set(saved_elide);
     // A same-segment `far` callee is reached with a near call preceded by
     // `push cs`, so its `retf` finds CS:IP on the stack (fixtures 1654/2060/2251).
     if locals.far_fns.contains(name) {
