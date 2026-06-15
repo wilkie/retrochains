@@ -6,9 +6,11 @@ impl<'a> super::FunctionEmitter<'a> {
         // immediate-to-memory store `mov word ptr [bp-N], offset _f`.
         // The init-form already has this peephole; the assignment
         // form needs the same to match BCC's single-instruction
-        // sequence. Fixture 2442.
+        // sequence. The explicit `= &f` address-of form is equivalent
+        // (function designator vs `&function` both yield the address)
+        // and folds the same way. Fixtures 2442, 4198.
         if let LocalLocation::Stack(off) = loc
-            && let ExprKind::Ident(src_name) = &value.kind
+            && let (ExprKind::Ident(src_name) | ExprKind::AddressOf(src_name)) = &value.kind
             && !self.locals.has(src_name)
             && self.globals.type_of(src_name).is_none()
             && self.signatures.ret_ty_of(src_name).is_some()

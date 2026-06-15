@@ -1298,13 +1298,16 @@ impl<'a> super::FunctionEmitter<'a> {
                 // Function-pointer init: `int (*p)(void) = f;` →
                 // `mov word ptr [bp-N],offset _f`. We detect this by
                 // the init being a bare ident that names a function
-                // defined in this TU (fixture 110). In far-code
-                // memory models (medium / large / huge) the slot is
-                // 4 bytes (`FarPointer`) and the segment half takes
-                // CS — the callee lives in the caller's own code
-                // segment, so the runtime CS register supplies the
-                // right paragraph. Fixture 2211.
-                if let ExprKind::Ident(name) = &init.kind
+                // defined in this TU (fixture 110). The explicit
+                // address-of form `= &f` is equivalent — in C a
+                // function designator and `&function` both yield the
+                // function's address — so it folds to the same store
+                // (fixture 4198). In far-code memory models (medium /
+                // large / huge) the slot is 4 bytes (`FarPointer`) and
+                // the segment half takes CS — the callee lives in the
+                // caller's own code segment, so the runtime CS register
+                // supplies the right paragraph. Fixture 2211.
+                if let (ExprKind::Ident(name) | ExprKind::AddressOf(name)) = &init.kind
                     && self.signatures.params_of(name).is_some()
                 {
                     let sym = function_symbol(name);

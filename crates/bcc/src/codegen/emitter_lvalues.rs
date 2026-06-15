@@ -466,6 +466,15 @@ impl<'a> super::FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{name}\r\n");
             return;
         }
+        // `&<function>` — a function designator's address is just the
+        // code-segment offset of its label. In C `&f` and `f` are the
+        // same value, so this matches the bare-function-name form
+        // (fixture 4198). Loaded into AX as `offset _f`.
+        if self.signatures.params_of(name).is_some() {
+            let sym = function_symbol(name);
+            let _ = write!(self.out, "\tmov\tax,offset {sym}\r\n");
+            return;
+        }
         let LocalLocation::Stack(off) = self.locals.location_of(name) else {
             panic!(
                 "`&{name}`: register-resident local cannot have its address taken \

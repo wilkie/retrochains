@@ -6154,11 +6154,19 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             if let Some(idx) = p.resolve_local(&name) {
                 return Ok(Expr::AddrOfLocal(idx));
             }
-            let idx = p.global_names.iter().position(|n| *n == name)
-                .ok_or_else(|| EmitError::Unsupported(format!(
-                    "address-of unknown identifier `{name}`"
-                )))?;
-            Ok(Expr::AddrOfGlobal(idx))
+            if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+                return Ok(Expr::AddrOfGlobal(idx));
+            }
+            // `&<function>` — a function designator and `&function`
+            // denote the same value in C, so the explicit address-of
+            // form folds to the same `OFFSET _f` as the bare name.
+            // Fixture 4198.
+            if p.fn_names.contains(&name) {
+                return Ok(Expr::FuncAddr(name));
+            }
+            Err(EmitError::Unsupported(format!(
+                "address-of unknown identifier `{name}`"
+            )))
         }
         Some(Tok::Star) => {
             // Unary deref `*<expr>`. Pick the byte- vs word-sized
