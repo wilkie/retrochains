@@ -2034,7 +2034,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         }
         (names, struct_idxs, is_chars, is_longs, is_unsigned_ints, float_widths, pointee_sizes)
     };
-    let (mut params, param_struct_idxs, mut param_is_char, mut param_is_long, mut param_is_unsigned, mut param_float_width, mut param_pointee_size) = params;
+    let (mut params, mut param_struct_idxs, mut param_is_char, mut param_is_long, mut param_is_unsigned, mut param_float_width, mut param_pointee_size) = params;
     // Struct-by-value params: total_bytes (even-padded) when the param has a
     // struct type AND is not a pointer (pointee_size == 0). 0 otherwise.
     let mut param_struct_bytes: Vec<usize> = param_struct_idxs.iter().zip(param_pointee_size.iter())
@@ -2063,6 +2063,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     if is_knr {
         while !matches!(p.peek(), Some(Tok::LBrace) | None) {
             skip_decl_modifiers(p);
+            // K&R declarator type. `kr_struct_idx` is set for a `struct`/`union`
+            // tag type so a pointer declarator (`struct U *p;`) patches the
+            // param's struct metadata (the common K&R aggregate-pointer getter).
+            let mut kr_struct_idx: Option<usize> = None;
             let (is_char, is_long, elem) = match p.peek() {
                 Some(Tok::Kw("char")) => { p.bump(); (true, false, 1usize) }
                 Some(Tok::Kw("int")) => { p.bump(); (false, false, 2) }
@@ -2070,6 +2074,24 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     p.bump();
                     if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
                     (false, true, 4)
+                }
+                Some(Tok::Kw("struct")) | Some(Tok::Kw("union")) => {
+                    p.bump(); // struct / union
+                    let sname = match p.bump().cloned() {
+                        Some(Tok::Ident(s)) => s,
+                        other => {
+                            return Err(EmitError::Unsupported(format!(
+                                "expected struct/union tag in K&R param type, got {other:?}"
+                            )));
+                        }
+                    };
+                    let sidx = p.structs.iter().position(|s| s.name == sname);
+                    let sbytes = sidx
+                        .and_then(|i| p.structs.get(i))
+                        .map(|s| s.total_bytes)
+                        .unwrap_or(2);
+                    kr_struct_idx = sidx;
+                    (false, false, sbytes)
                 }
                 other => {
                     return Err(EmitError::Unsupported(format!(
@@ -2100,9 +2122,19 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         param_pointee_size[idx] = elem;
                         param_is_char[idx] = false;
                         param_is_long[idx] = false;
+                        // A `struct/union <Tag> *p;` K&R declarator carries the
+                        // tag's struct_idx so body member access (`p->field`)
+                        // resolves the layout. The struct-pointer-byte vector is
+                        // recomputed after the K&R block.
+                        if kr_struct_idx.is_some() {
+                            param_struct_idxs[idx] = kr_struct_idx;
+                        }
                     } else {
                         param_is_char[idx] = is_char;
                         param_is_long[idx] = is_long;
+                        if kr_struct_idx.is_some() {
+                            param_struct_idxs[idx] = kr_struct_idx;
+                        }
                     }
                 }
                 if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
@@ -2110,6 +2142,27 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             }
             p.eat(&Tok::Semi)?;
         }
+        // K&R patching may have introduced struct/union-pointer params after the
+        // initial struct-byte vectors were computed. Recompute them from the now
+        // up-to-date struct_idx + pointee_size pairs.
+        param_struct_bytes = param_struct_idxs.iter().zip(param_pointee_size.iter())
+            .map(|(si, &pointee)| match si {
+                Some(sidx) if pointee == 0 => {
+                    let n = p.structs.get(*sidx).map(|s| s.total_bytes).unwrap_or(0);
+                    (n + 1) & !1
+                }
+                _ => 0,
+            })
+            .collect();
+        param_struct_ptr_bytes = param_struct_idxs.iter().zip(param_pointee_size.iter())
+            .map(|(si, &pointee)| match si {
+                Some(sidx) if pointee != 0 => {
+                    let n = p.structs.get(*sidx).map(|s| s.total_bytes).unwrap_or(0);
+                    (n + 1) & !1
+                }
+                _ => 0,
+            })
+            .collect();
     }
     p.eat(&Tok::LBrace)?;
 
