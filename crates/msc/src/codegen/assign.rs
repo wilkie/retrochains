@@ -103,14 +103,17 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
     // taken arm is a COMMA expression, drop the untaken arm and assign the taken
     // one directly, so its side effects run and a constant value reaches the
     // immediate-store path above rather than being materialized through AX.
-    // Gated on the taken arm being a `Seq`: a bare-value arm (e.g. `a ? b : c`)
-    // must keep the generic ternary path, which loads the operand from its slot
-    // rather than folding its declared init (fixture 1038 vs 2476).
+    // Same for a FUNCTION-ADDRESS taken arm (`fp = k ? f : g`, k known): MSC
+    // stores `OFFSET _f` with the `c7` immediate form, so collapse to the arm to
+    // reach the FuncAddr direct-store path rather than loading via AX (4200).
+    // Gated to those arms: a bare-value arm (e.g. `a ? b : c`) must keep the
+    // generic ternary path, which loads the operand from its slot rather than
+    // folding its declared init (fixture 1038 vs 2476).
     if let Expr::Ternary { cond, then_arm, else_arm } = value
         && let Expr::IntLit(k) = cond.as_ref()
     {
         let taken = if *k != 0 { then_arm } else { else_arm };
-        if matches!(taken.as_ref(), Expr::Seq { .. }) {
+        if matches!(taken.as_ref(), Expr::Seq { .. } | Expr::FuncAddr(_)) {
             return emit_assign(target, taken, locals, out, fixups);
         }
     }
