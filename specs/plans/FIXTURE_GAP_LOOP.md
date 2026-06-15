@@ -82,16 +82,17 @@ batch is committing.
   `startNumber`; agents are told to use the exact dir verbatim and never invent a
   number.
 
-## Known debt
+## Numbering (and the one-time cleanup, now done)
 
-- **Duplicate fixture numbers.** Runs 2–3 both numbered fresh fixtures from 4213
-  (a `startNumber` arg didn't take effect), so ~7 numbers collided
-  (4213, 4214, 4220, 4222–4224, 4226); a further ~16 (4145–4164) pre-date this
-  work (curated vs bulk overlap). The global namespace is no longer unique. A
-  cleanup pass should renumber the newer of each colliding pair to fresh numbers
-  above the current max and update any code comments that cite them. The harness
-  now assigns numbers centrally to stop *new* collisions, but a one-time cleanup
-  of the existing 23 is still outstanding.
+The harness assigns numbers centrally from `startNumber` and tells agents to use
+the exact dir verbatim, so runs don't create collisions. A one-time cleanup of
+the 23 pre-existing/early-run duplicates was completed (renumbered to 4231–4253):
+8 uncited ones were pure renames; the other 15 were each a collision between two
+*legitimately code-documented* fixtures (e.g. 4146 = a bitfield-sum fixture in
+MSC comments and a char-pointer-deref register-allocation fixture in BCC
+comments), resolved by keeping the number on the more-documented fixture and
+updating the comments that referred to the moved one. Global per-language
+numbering is unique again; keep it that way (always assign above the current max).
 
 ## Recovering sources from a run transcript
 
