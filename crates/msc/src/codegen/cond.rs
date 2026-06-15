@@ -1064,7 +1064,7 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
             // When AX still holds this local's value (e.g. `n = n + tries` left
             // `tries` in AX), MSC compares the register — `cmp ax,K` — instead of
-            // reloading from memory. Fixture 4214.
+            // reloading from memory. Fixture 4251.
             if word_local_value_in_ax(*idx, locals, out) {
                 emit_cmp_ax_imm(*k, out);
             } else {
@@ -1409,7 +1409,7 @@ fn word_local_live_in_ax(idx: usize, locals: &Locals<'_>, out: &[u8]) -> bool {
 /// (`01 46 d2`) — `n = n + tries` leaves `tries` in AX, so a later
 /// `if (tries < K)` compares the register instead of reloading. Gated to the
 /// straight-line region (no assumed-live AX across a branch merge) and to plain
-/// word locals. Fixture 4214.
+/// word locals. Fixture 4251.
 fn word_local_value_in_ax(idx: usize, locals: &Locals<'_>, out: &[u8]) -> bool {
     if locals.size(idx) != 2 || locals.is_long_local(idx) || locals.is_float_local(idx) {
         return false;

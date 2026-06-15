@@ -4034,7 +4034,7 @@ struct ConstProp {
     /// are parked in SI/DI). MSC loads that call's leaf arguments from memory
     /// rather than const-propagating them — only the later, parked calls take
     /// the immediate form. Suppresses Local/Global substitution while set.
-    /// Fixtures 2042, 2452 (and probes 4151/4152).
+    /// Fixtures 2042, 2452 (and probes 4245/4246).
     suppress_subst: bool,
     /// True while recursing into the LEFT (parked) sub-chain of a multi-call
     /// add/sub chain. Prevents an inner chain binop from re-arming the

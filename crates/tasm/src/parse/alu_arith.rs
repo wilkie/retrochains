@@ -18,7 +18,7 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // `sub ax,word ptr [di]` — deref through DI as RHS, no displacement (the
     // no-disp `mod=00` form `2b 05`, not `SubAxDiDisp{disp:0}` which would emit a
-    // redundant `[di+0]`). Mirrors `AddAxFromDiPtr`. Fixture 4147 (`*a - *b` of
+    // redundant `[di+0]`). Mirrors `AddAxFromDiPtr`. Fixture 4241 (`*a - *b` of
     // int pointers held in SI/DI).
     if lhs == "ax" && rhs == "word ptr [di]" {
         return Ok(Instr::SubAxFromDiPtr);

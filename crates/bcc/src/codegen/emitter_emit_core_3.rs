@@ -138,7 +138,7 @@ impl<'a> super::FunctionEmitter<'a> {
                         if let LocalLocation::Reg(reg) = self.locals.location_of(name) {
                             // SI/DI/BX address memory directly; CX/DX cannot be
                             // a base register, so materialize the pointer into BX
-                            // first (`mov bx, cx`). Fixture 4146 (3rd pointer in
+                            // first (`mov bx, cx`). Fixture 4240 (3rd pointer in
                             // CX, deref'd as a binop operand).
                             if matches!(reg, Reg::Si | Reg::Di | Reg::Bx) {
                                 return OperandSource::DerefReg(reg);

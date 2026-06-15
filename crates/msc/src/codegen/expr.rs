@@ -2345,7 +2345,7 @@ fn same_var(a: &Expr, b: &Expr) -> bool {
         // Array-element reads `arr[i] + arr[i]` (same array, identical pure
         // index) fold to a single load + `shl ax,1` / `imul ax`, just like a
         // scalar. The index must be side-effect-free (a bare var/const) so the
-        // single evaluation is faithful. Fixture 4155 (`data[i]+data[i]`).
+        // single evaluation is faithful. Fixture 4249 (`data[i]+data[i]`).
         (Expr::Index { array: a1, index: i1 }, Expr::Index { array: a2, index: i2 })
         | (Expr::IndexByte { array: a1, index: i1 }, Expr::IndexByte { array: a2, index: i2 })
             => a1 == a2 && same_simple(i1, i2),

@@ -697,7 +697,7 @@ impl Locals {
             // enregisters a THIRD pointer into CX (deref via `mov bx, cx`),
             // skipping DX/BX. The 4th+ pointers spill to the stack. Probed
             // against the oracle (3+ char-pointers deref'd in a loop →
-            // SI/DI/CX; fixture 4146). The CX slot is use-count-gated below.
+            // SI/DI/CX; fixture 4240). The CX slot is use-count-gated below.
             &[Reg::Si, Reg::Di, Reg::Cx]
         } else {
             &[Reg::Si, Reg::Di]
@@ -727,7 +727,7 @@ impl Locals {
                 // pointer is used beyond the bare ENREGISTER_THRESHOLD. A
                 // once-deref'd spillover pointer stays stack-resident. (Counts
                 // include a +2 param base, so 3512's `b` = 3 stays on the stack
-                // while 4146's `c` = 5 takes CX.)
+                // while 4240's `c` = 5 takes CX.)
                 if all_pointer_case
                     && matches!(chosen, Some(Reg::Cx | Reg::Dx))
                     && counts.get(&declared[i].name).copied().unwrap_or(0) <= ENREGISTER_THRESHOLD

@@ -1698,8 +1698,8 @@ impl<'a> super::FunctionEmitter<'a> {
     /// Addressing form for dereferencing a char pointer, staging it through BX
     /// first when the pointer can't be a base register: SI/DI/BX address memory
     /// directly (`[si]`), CX/DX copy to BX (`mov bx, cx`), and a stack-resident
-    /// pointer loads from its slot (`mov bx, word ptr [bp+disp]`). Fixtures 4146
-    /// (CX) and 4148 (stack spill).
+    /// pointer loads from its slot (`mov bx, word ptr [bp+disp]`). Fixtures 4240
+    /// (CX) and 4242 (stack spill).
     fn char_deref_addr_via_bx(&mut self, loc: LocalLocation) -> String {
         match loc {
             LocalLocation::Reg(r) if matches!(r, Reg::Si | Reg::Di | Reg::Bx) => {
@@ -1773,7 +1773,7 @@ impl<'a> super::FunctionEmitter<'a> {
             && let Some(r_loc) = char_ptr_local(self, r_name)
         {
             // SI/DI/BX address memory directly; a pointer in CX/DX (`mov bx, cx`,
-            // fixture 4146) or on the STACK (`mov bx, [bp+disp]`, fixture 4148 —
+            // fixture 4240) or on the STACK (`mov bx, [bp+disp]`, fixture 4242 —
             // the 4th pointer that overflows the SI/DI/CX pool) must be staged
             // through BX first. The L-side load into AL finishes before the
             // R-side reuses BX, so both can route through BX without conflict.
