@@ -56,6 +56,32 @@ fn far_dup_init_live(out: &[u8], lea: &[u8], barrier: usize) -> (bool, bool) {
         return (false, dx_ss);
     }
 }
+/// If the trailing instruction in `out` is `mov si,imm16` / `mov di,imm16`
+/// (B8|reg + imm16, reg = SI/DI) loading exactly `imm`, return that register's
+/// ModRM register code (6 = SI, 7 = DI). MSC keeps a `register int`'s init value
+/// live in SI/DI and reuses it for an immediately-following stack store of the
+/// same constant — `mov [bp+d],si` instead of re-materializing the immediate.
+/// Limited to the two register-local registers, and only when the load is the
+/// very last thing emitted (so the register provably still holds `imm`).
+/// Fixture 4208 (`p=1` → `mov si,1`; then `i=1` reuses SI).
+fn reg_holding_const(out: &[u8], imm: u16) -> Option<u8> {
+    if out.len() < 3 {
+        return None;
+    }
+    let n = out.len();
+    let opcode = out[n - 3];
+    let lo = out[n - 2];
+    let hi = out[n - 1];
+    let loaded = u16::from_le_bytes([lo, hi]);
+    if loaded != imm {
+        return None;
+    }
+    match opcode {
+        0xBE => Some(6), // mov si, imm16
+        0xBF => Some(7), // mov di, imm16
+        _ => None,
+    }
+}
 pub(crate) fn cast_rhs_needs_al_form(value: &Expr, target_is_int: bool) -> bool {
     matches!(value, Expr::CastChar { from_var: true, unsigned, .. }
         if target_is_int || !*unsigned)
@@ -1313,8 +1339,21 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             }
         } else {
             let imm = (k as u32 & 0xFFFF) as u16;
-            out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
-            out.extend_from_slice(&imm.to_le_bytes());
+            // Reuse a register that the immediately-preceding instruction just
+            // loaded with this same constant. A `register int` init lowers to
+            // `mov si,K` (B8|reg + imm16); a following stack-local store of the
+            // SAME constant reuses that register — `mov [bp+disp],si` (3 bytes)
+            // instead of re-materializing the immediate `mov word [..],K`
+            // (5 bytes). Fixture 4208 (`p=1` leaves SI=1, then `i=1` reuses it).
+            if let Some(reg) = reg_holding_const(out, imm) {
+                // mov [bp+disp], reg  (89 /r, modrm reg field = reg, /m = bp+disp)
+                out.push(0x89);
+                out.push(bp_modrm(0x46 | (reg << 3), disp));
+                push_bp_disp(out, disp);
+            } else {
+                out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.extend_from_slice(&imm.to_le_bytes());
+            }
         }
     } else if locals.is_long_local(local_idx)
         && (long_operand(value, locals)

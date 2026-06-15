@@ -3253,8 +3253,23 @@ fn pick_si(
     declared: &[DeclItem],
     counts: &HashMap<String, u32>,
 ) -> Option<usize> {
+    // An explicit `register` declaration claims SI ahead of any
+    // non-register eligible, regardless of use count. BCC honors the
+    // programmer's hint by parking the register-qualified variable in
+    // SI (the first slot of its enregistration pool) even when another
+    // local is textually used more often. Fixture 4208
+    // (`register int p` competes with the loop counter `i`, which has
+    // the higher use count via `i++`, yet `p` still wins SI). When
+    // multiple register-qualified ints are eligible, the highest-use
+    // one wins, source order breaking ties — the same rule applied
+    // among the register subset. With no register-qualified eligible,
+    // fall back to the plain highest-use pick across all eligibles.
+    let has_register = eligible.iter().any(|&i| declared[i].is_register);
     let mut best: Option<(usize, u32)> = None;
     for &i in eligible {
+        if has_register && !declared[i].is_register {
+            continue;
+        }
         let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
         if best.is_none_or(|(_, b)| uses > b) {
             best = Some((i, uses));

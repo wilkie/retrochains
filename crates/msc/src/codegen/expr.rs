@@ -2572,6 +2572,50 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         else { out.extend_from_slice(&[0x2B, 0xC0]); }       // sub ax,ax
         return;
     }
+    // Commutative op between a `register` local (SI/DI) and a plain word memory
+    // operand: MSC loads the MEMORY operand into AX and applies the op with the
+    // register as the source — `mov ax,[i]; imul si` rather than `mov ax,si;
+    // imul word [i]`. The register is naturally the more expensive operand to
+    // spill, so it stays put. Covers either operand order (commutativity).
+    // Fixture 4208 (`p = p * i`, p in SI, i on stack → `mov ax,[bp-4]; imul si`).
+    if matches!(op, BinOp::Mul | BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
+        let reg_local = |e: &Expr| match e {
+            Expr::Local(i) => locals.reg_for_local(*i),
+            _ => None,
+        };
+        let mem_word = |e: &Expr| match e {
+            Expr::Local(i) => (locals.size(*i) == 2
+                && !locals.is_long_local(*i)
+                && !locals.is_float_local(*i)
+                && !locals.is_array_local(*i)
+                && locals.reg_for_local(*i).is_none())
+                .then(|| locals.disp(*i)),
+            Expr::Param(i) => (!locals.is_char_param(*i)
+                && !locals.is_long_param(*i)
+                && !locals.is_float_param(*i))
+                .then(|| param_disp(*i)),
+            _ => None,
+        };
+        let pair = match (reg_local(left), mem_word(right)) {
+            (Some(reg), Some(disp)) => Some((reg, disp)),
+            _ => match (reg_local(right), mem_word(left)) {
+                (Some(reg), Some(disp)) => Some((reg, disp)),
+                _ => None,
+            },
+        };
+        if let Some((reg, disp)) = pair {
+            out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[mem]
+            match op {
+                BinOp::Mul => out.extend_from_slice(&[0xF7, 0xE8 | reg]),   // imul reg
+                BinOp::Add => out.extend_from_slice(&[0x03, 0xC0 | reg]),   // add ax,reg
+                BinOp::BitAnd => out.extend_from_slice(&[0x23, 0xC0 | reg]), // and ax,reg
+                BinOp::BitOr => out.extend_from_slice(&[0x0B, 0xC0 | reg]),  // or  ax,reg
+                BinOp::BitXor => out.extend_from_slice(&[0x33, 0xC0 | reg]), // xor ax,reg
+                _ => unreachable!(),
+            }
+            return;
+        }
+    }
     // Trailing constant fold: `(X ± c1) ± c2` with both c1 and c2 literal and X a
     // runtime value collapses to `X ± (net)` — a single `add/sub ax,imm`. MSC's
     // expression folder combines the adjacent constants (e.g. `f() - 54321 + 12345`

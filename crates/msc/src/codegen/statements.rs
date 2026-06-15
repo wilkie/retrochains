@@ -1888,6 +1888,26 @@ pub(crate) fn emit_return(
             crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Expr::Local(i) = expr {
+            // `return <register local>` (the var lives in SI/DI). Its value is in
+            // the register; the return needs it in AX via `mov ax,reg`. But MSC
+            // elides that move when AX already holds the register's value — e.g.
+            // after a loop body whose last assignment was `p = p * i` (`...; mov
+            // si,ax`), the trailing cmp/inc/jcc preserve AX, so AX == SI at loop
+            // exit and `return p` falls straight into the epilogue. The defining
+            // event is the `mov reg,ax` self-copy (store_self); `mov ax,reg` is
+            // the load we would otherwise emit. Fixture 4208.
+            if let Some(reg) = locals.reg_for_local(*i) {
+                let load = [0x8B, 0xC0 | reg];        // mov ax, reg
+                let store_self = [0x8B, 0xC0 | (reg << 3)]; // mov reg, ax
+                let ax_already = crate::codegen::expr::ax_holds_word_operand(
+                    out, &load, &store_self, locals.last_branch_barrier.get(),
+                );
+                if !ax_already {
+                    out.extend_from_slice(&load); // mov ax, reg
+                }
+                crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
+                return;
+            }
             let disp = locals.disp(*i);
             if locals.size(*i) == 1 && !locals.is_unsigned_local(*i) {
                 // Signed char local: check if AL is already loaded from a
