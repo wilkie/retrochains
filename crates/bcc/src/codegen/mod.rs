@@ -525,9 +525,21 @@ fn last_emit_ends_with_byte_store_al(buf: &[u8]) -> bool {
 /// matching how the architecture wants AX live across the smallest
 /// window. Conservatively bails on any other shape.
 fn hoist_bx_load_above_ax_load(buf: &mut Vec<u8>, pre_pos: usize, mid_pos: usize) {
-    // LHS line: `\tmov\tax,word ptr <...>\r\n`.
+    // LHS line: `\tmov\tax,word ptr <...>\r\n` (a memory load) or
+    // `\tmov\tax,<reg>\r\n` (a register-resident local in SI/DI). The
+    // register form must not name BX — that would be a true dependency
+    // on the BX load we want to hoist above it. Fixture 4227
+    // (`sum + **(pp+2)` with `sum` in DI: BX gets set up first).
     let lhs_line = &buf[pre_pos..mid_pos];
-    if !lhs_line.starts_with(b"\tmov\tax,word ptr ") || !lhs_line.ends_with(b"\r\n") {
+    if !lhs_line.ends_with(b"\r\n") {
+        return;
+    }
+    let lhs_mem = lhs_line.starts_with(b"\tmov\tax,word ptr ");
+    let lhs_reg = matches!(
+        lhs_line,
+        b"\tmov\tax,si\r\n" | b"\tmov\tax,di\r\n",
+    );
+    if !lhs_mem && !lhs_reg {
         return;
     }
     // RHS must start with `\tmov\tbx,word ptr <...>\r\n`.

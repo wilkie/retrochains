@@ -1449,6 +1449,29 @@ impl<'a> super::FunctionEmitter<'a> {
             );
             return;
         }
+        // `<reg> = *<ptr-load>` — single deref whose operand value is
+        // itself a register-relative pointer load (`**pp`, `*(pp+K)`
+        // double-indirection, or any deref folding to a `[reg]` /
+        // `[reg+off]` operand). resolve_operand_source emits the inner
+        // pointer materialization (`mov bx, word ptr [si]`) and returns
+        // a `[bx]`-style operand; the final read goes straight into the
+        // destination register, skipping the AX round-trip. Fixture
+        // 4227 (`sum = **pp` with sum in DI → `mov bx,[si]; mov
+        // di,[bx]`).
+        if let ExprKind::Deref(inner) = &expr.kind
+            && !reg.is_byte()
+            && matches!(&inner.kind, ExprKind::Deref(_))
+        {
+            // Emit into a scratch buffer first so a non-matching
+            // resolution leaves no partial output.
+            let mark = self.out.len();
+            let src = self.resolve_operand_source(expr);
+            if matches!(src, OperandSource::DerefReg(_) | OperandSource::DerefRegOffset { .. }) {
+                let _ = write!(self.out, "\tmov\t{},{}\r\n", reg.name(), src.word());
+                return;
+            }
+            self.out.truncate(mark);
+        }
         // Non-constant char init: untested. Best guess would be
         // `<compute to AL> / mov <reg>, al`, but until a fixture pins
         // the load-to-AL path, bail.

@@ -316,6 +316,14 @@ pub(crate) fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(disp) = parse_word_di_disp(rhs) {
             return Ok(Instr::MovReg16DiDisp { reg, disp });
         }
+        // `mov <reg16>, word ptr [bx]` — BX sibling. The dedicated
+        // AX/BX variants above (`MovAxFromBxPtr`, `MovBxFromBxPtr`)
+        // already short-circuit those two destinations; this catches
+        // the remaining registers (e.g. DI for `**pp` final reads,
+        // fixture 4227).
+        if rhs == "word ptr [bx]" {
+            return Ok(Instr::MovReg16FromBxPtr { reg });
+        }
     }
     // Generic 16-bit `mov <reg>,offset <group>:<sym>` (fixtures 108
     // for AX, 157 for SI). Tried before reg-imm so it doesn't get

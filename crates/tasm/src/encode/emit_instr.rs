@@ -2410,6 +2410,12 @@ pub(crate) fn emit_instr(
             out.push(0x40 | (reg.code() << 3) | 0x05);
             out.push(*disp as u8);
         }
+        Instr::MovReg16FromBxPtr { reg } => {
+            // `mov <reg16>, word ptr [bx]` → 8B (mod=00 reg=<dst>
+            // r/m=111). E.g. `mov di, [bx]` = 8B 3F.
+            out.push(0x8B);
+            out.push((reg.code() << 3) | 0x07);
+        }
         Instr::MovDxSiDisp { disp } => {
             // `mov dx,word ptr [si+disp8]` → 8B 54 dd.
             out.push(0x8B);

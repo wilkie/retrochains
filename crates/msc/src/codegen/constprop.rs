@@ -1083,6 +1083,26 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.mutated_locals.insert(*p);
                 return;
             }
+            // Pointer-to-pointer array decay: `int *row[N]; int **pp; pp = row;`.
+            // The array name decays to `&row[0]`, so `pp` holds the (stack) base
+            // address of the pointer array. Record `pp -> row` so a later double
+            // indirection `**(pp + K)` folds to the direct element-pointer deref
+            // `LocalPtrArrayDeref { row, K }`. The decay store still emits (a `lea`
+            // of row + store). Multi-use: the base is a fixed frame address.
+            // Fixture 4227.
+            if let AssignTarget::Local(pp) = target
+                && let Expr::Local(arr) = value
+                && !cp.local_specs.get(*pp).map(|s| s.is_far_ptr).unwrap_or(false)
+                && cp.local_specs.get(*pp).map(|s| s.pointee_size > 0).unwrap_or(false)
+                && cp.local_specs.get(*arr).map(|s| s.array_len > 1 && s.pointee_size > 0 && s.size == 2).unwrap_or(false)
+            {
+                cp.ptr_arr_alias.insert(*pp, *arr);
+                cp.ptr_alias.remove(pp);
+                cp.ptr_addr.remove(pp);
+                cp.l_known.remove(pp);
+                cp.mutated_locals.insert(*pp);
+                return;
+            }
             // Element-level aliasing: `arr[K] = &x` (arr a local array of
             // pointers) records `(arr, byte_off) -> x`, leaving x intact (a
             // tracked alias, not an escape). The store still emits. Fixture 1565.
@@ -1729,6 +1749,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
+            cp.ptr_arr_alias.clear();
             cp.ptr_addr.clear();
             cp.ga_known.clear();
         }
@@ -1748,6 +1769,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
+            cp.ptr_arr_alias.clear();
             cp.ptr_addr.clear();
             cp.ga_known.clear();
         }
@@ -1798,6 +1820,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
+            cp.ptr_arr_alias.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
                 } else {
@@ -1813,6 +1836,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
+            cp.ptr_arr_alias.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
                     let mut chosen: Option<usize> = None;
@@ -1852,6 +1876,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
+            cp.ptr_arr_alias.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
                 }
@@ -1865,6 +1890,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
+            cp.ptr_arr_alias.clear();
             cp.ptr_addr.clear();
                 cp.ga_known.clear();
             }
@@ -1895,6 +1921,7 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.func_addr.clear();
             cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
+            cp.ptr_arr_alias.clear();
             cp.ptr_addr.clear();
             cp.ga_known.clear();
         }
@@ -1913,6 +1940,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         ptr_alias: cp.ptr_alias.clone(),
         elem_ptr_alias: cp.elem_ptr_alias.clone(),
         ptr_alias_g: cp.ptr_alias_g.clone(),
+        ptr_arr_alias: cp.ptr_arr_alias.clone(),
         aliases_used: cp.aliases_used.clone(),
         ptr_addr: cp.ptr_addr.clone(),
         local_specs: cp.local_specs.clone(),
@@ -3018,6 +3046,39 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
         }
         Expr::DerefByte { .. } | Expr::DerefWord { .. } => {
+            // Double indirection through a pointer-to-pointer-array alias:
+            // `**(pp + K)` where `pp = row` (recorded in `ptr_arr_alias`) folds to
+            // the direct element-pointer deref `LocalPtrArrayDeref { row, K/2 }`.
+            // The inner `*(pp + Kbytes)` reads the K/2-th pointer element of `row`
+            // from the frame; the outer deref then reads through it. K is the
+            // BYTE offset the parser scaled (`pp + 2` over an `int**` → 4). Word
+            // deref only (the element pointers are 2-byte words). Fixture 4227.
+            if let Expr::DerefWord { ptr: outer } = e
+                && let Expr::DerefWord { ptr: inner } = outer.as_ref()
+            {
+                let pp_and_byteoff = match inner.as_ref() {
+                    Expr::Local(pp) => Some((*pp, 0i32)),
+                    Expr::BinOp { op: BinOp::Add, left, right } => match (left.as_ref(), right.as_ref()) {
+                        (Expr::Local(pp), Expr::IntLit(k)) => Some((*pp, *k)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((pp, byte_off)) = pp_and_byteoff
+                    && let Some(&arr) = cp.ptr_arr_alias.get(&pp)
+                    && byte_off >= 0
+                    && byte_off % 2 == 0
+                {
+                    let elem_size = cp.local_specs.get(arr).map(|s| s.pointee_size as u8).unwrap_or(2);
+                    *e = Expr::LocalPtrArrayDeref {
+                        local: arr,
+                        index: Box::new(Expr::IntLit(byte_off / 2)),
+                        inner: Box::new(Expr::IntLit(0)),
+                        elem_size,
+                    };
+                    return;
+                }
+            }
             // Recurse into the pointer subexpression first (folds the index of
             // `*(p + i)` when i is a known local), then resolve through any alias.
             match e {

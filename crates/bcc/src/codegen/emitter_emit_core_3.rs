@@ -144,6 +144,40 @@ impl<'a> super::FunctionEmitter<'a> {
                     let off16 = i16::try_from(off).unwrap_or(i16::MAX);
                     return OperandSource::DerefRegOffset { reg, offset: off16 };
                 }
+                // `**(pp + K)` / `**pp` — double indirection through a
+                // register-resident pointer-to-pointer. Load the inner
+                // pointer value `*(pp + K)` into BX (`mov bx,[si+K*2]`),
+                // then the outer deref reads `[bx]`. Fixture 4227
+                // (`sum + **(pp + 2)` for `int **pp` in SI).
+                if let ExprKind::Deref(inner2) = &inner.kind {
+                    // Resolve the inner pointer-value operand. Accept either a
+                    // bare register pointer (`*pp`) or `*(pp + K)`.
+                    let inner_operand = if let ExprKind::Ident(name) = &inner2.kind {
+                        match (self.globals.type_of(name).is_none(), self.locals.location_of(name)) {
+                            (true, LocalLocation::Reg(reg)) => {
+                                Some(OperandSource::DerefReg(reg))
+                            }
+                            _ => None,
+                        }
+                    } else if let ExprKind::BinOp { op: BinOp::Add, left, right } = &inner2.kind
+                        && let ExprKind::Ident(name) = &left.kind
+                        && self.locals.has(name)
+                        && let Some(pointee) = self.locals.type_of(name).pointee()
+                        && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+                        && let Some(k) = try_const_eval(right)
+                    {
+                        let stride = i32::from(pointee.size_bytes());
+                        let off = (k as i32).wrapping_mul(stride);
+                        let off16 = i16::try_from(off).unwrap_or(i16::MAX);
+                        Some(OperandSource::DerefRegOffset { reg, offset: off16 })
+                    } else {
+                        None
+                    };
+                    if let Some(op) = inner_operand {
+                        let _ = write!(self.out, "\tmov\tbx,{}\r\n", op.word());
+                        return OperandSource::DerefReg(Reg::Bx);
+                    }
+                }
                 panic!("`*p` as right operand of a binary op only supported for register-resident local pointers (no fixture for {:?})", inner.kind)
             }
             ExprKind::ArrayIndex { array, index } => {

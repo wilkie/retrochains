@@ -329,6 +329,7 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16SiDisp { .. } => 3,
         Instr::MovReg16FromDiPtr { .. } => 2,
         Instr::MovReg16DiDisp { .. } => 3,
+        Instr::MovReg16FromBxPtr { .. } => 2,
         Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } | Instr::SubSiPtrImm8 { .. } => 3,
         Instr::AndSiPtrByteImm8 { .. }
         | Instr::OrSiPtrByteImm8 { .. }

@@ -1414,6 +1414,21 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             push_bp_disp(out, disp);
             return;
         }
+        // `<ptr-local> = <array-local>` — array-to-pointer decay. The array name
+        // denotes its base ADDRESS, so MSC emits `lea ax,[bp+arr]` (not a load of
+        // element 0) then stores it. Mirrors the far-pointer decay arm above for
+        // a near pointer. Fixture 4227 (`pp = row`).
+        if !is_byte
+            && !locals.is_long_local(local_idx)
+            && locals.local_pointee_size(local_idx) > 0
+            && let Expr::Local(arr) = value
+            && locals.is_array_local(*arr)
+        {
+            let arr_disp = locals.disp(*arr);
+            out.push(0x8D); out.push(bp_modrm(0x46, arr_disp)); push_bp_disp(out, arr_disp); // lea ax,[bp+arr]
+            out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);          // mov [bp+pp],ax
+            return;
+        }
         emit_expr_to_ax(value, locals, out, fixups);
         if is_byte {
             // Strip trailing CBW emitted for char globals/fields — AL still

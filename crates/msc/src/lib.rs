@@ -3954,6 +3954,14 @@ struct ConstProp {
     /// Unlike the local single-use alias this persists until p is reassigned or
     /// a branch boundary. Keyed by global idx.
     ptr_alias_g: std::collections::HashMap<usize, (AliasTarget, i32)>,
+    /// Pointer-to-pointer aliasing from an array-of-pointers decay: `int
+    /// *row[3]; int **pp; pp = row;` records `pp -> row`. A later double
+    /// indirection `**(pp + K)` then folds to the direct element-pointer deref
+    /// `LocalPtrArrayDeref { row, K }` (`mov bx,[row+2K]; mov ax,[bx]`), matching
+    /// MSC's const-propagation of the array base address. Multi-use (the stack
+    /// base is known at every deref), so it is NOT drained via `aliases_used`;
+    /// cleared on reassignment or at a branch boundary. Fixture 4227.
+    ptr_arr_alias: std::collections::HashMap<usize, usize>,
     /// Pointers whose alias was used in the current statement. MSC's alias is
     /// single-use: only the FIRST statement dereferencing `p` (after `p = &x`)
     /// is aliased; later `*p` derefs through the pointer. Drained after each
