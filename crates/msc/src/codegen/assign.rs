@@ -453,7 +453,24 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             return;
         }
         AssignTarget::Index2D { is_global, base, row, col, cols, elem } => {
-            assert!(is_global, "local 2-D runtime store should have const-folded");
+            if !is_global {
+                // Runtime `a[i][j] = v` on a LOCAL 2-D array: build the element
+                // byte offset in SI (`si = row*cols*elem + col*elem`, the same
+                // shape as the local 2-D read), compute the value into AX, then
+                // store `[bp + base_disp + si]`. Mirrors the `Index2D
+                // {is_global:false}` read path. Fixture 4217.
+                crate::codegen::expr::emit_load_si(&row, locals, out, fixups); // mov si,[row]
+                crate::codegen::expr::scale_si(out, cols);                     // si *= cols
+                for _ in 0..elem.trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE6]); } // shl si,1 (×elem)
+                emit_expr_to_ax(&col, locals, out, fixups);                    // mov ax,[col]
+                for _ in 0..elem.trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE0]); } // shl ax,1 (×elem)
+                out.extend_from_slice(&[0x03, 0xF0]);                          // add si,ax
+                emit_expr_to_ax(&value, locals, out, fixups);                  // value → AX
+                let disp = locals.disp(base);
+                out.push(if elem == 1 { 0x88 } else { 0x89 });
+                out.push(bp_modrm(0x42, disp)); push_bp_disp(out, disp); // mov [bp+si+disp],ax/al
+                return;
+            }
             crate::codegen::expr::emit_index2d_regs(&row, &col, cols, elem, locals, out, fixups);
             emit_expr_to_ax(&value, locals, out, fixups); // value → AX
             // mov [base + bx + si], ax/al  (modrm [bx+si]+disp16 = 0x80)

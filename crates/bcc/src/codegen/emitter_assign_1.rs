@@ -1680,6 +1680,35 @@ impl<'a> super::FunctionEmitter<'a> {
             );
             return;
         }
+        // Stack-resident int local += general expression rhs: evaluate
+        // the rhs into AX (which is free to clobber BX/DX), then op it
+        // against the local in memory (`<mnem> word ptr [bp-N], ax`).
+        // This is the catch-all for rhs forms that aren't a constant, a
+        // simple lvalue, or a register-resident ident — e.g. an indexed
+        // pointer deref `(*p)[c]`. Fixture 4217 (`sum += (*p)[c]`).
+        if local_ty.is_int_like()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+        {
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            self.emit_expr_to_ax(value);
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr {},ax\r\n",
+                bp_addr(off),
+            );
+            return;
+        }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"

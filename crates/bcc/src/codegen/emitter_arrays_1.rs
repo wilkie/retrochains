@@ -1205,6 +1205,53 @@ impl<'a> super::FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
         self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
     }
+    /// Like `emit_array_addr_2d_to_bx` but leaves the absolute element
+    /// address in AX (rather than BX). BCC uses this when the store RHS
+    /// is a non-constant expression that may clobber BX/DX: the address
+    /// is computed into AX, `push`ed, the value is evaluated, and the
+    /// address is `pop`ped back into BX for the store. The non-power-of-
+    /// two outer-stride form is exactly the BX variant minus the trailing
+    /// `mov bx,ax`. Fixture 4217 (`m[r][c] = r*3+c`).
+    pub(crate) fn emit_array_addr_2d_to_ax(
+        &mut self,
+        outer_idx: &Expr,
+        inner_idx: &Expr,
+        outer_stride: u16,
+        inner_stride: u16,
+        base_off: i16,
+    ) {
+        let outer_reg = self.idx_reg_name(outer_idx);
+        let inner_reg = self.idx_reg_name(inner_idx);
+        let outer_pow2 = outer_stride > 1 && outer_stride.is_power_of_two();
+        if outer_pow2 {
+            let _ = write!(self.out, "\tmov\tax,{outer_reg}\r\n");
+            for _ in 0..outer_stride.trailing_zeros() {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            }
+            let _ = write!(self.out, "\tmov\tdx,{inner_reg}\r\n");
+            if inner_stride == 2 {
+                self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+            } else if inner_stride != 1 {
+                panic!("2D inner-stride != {{1,2}} not yet supported (no fixture)");
+            }
+            self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+            let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(base_off));
+            self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+            return;
+        }
+        let _ = write!(self.out, "\tmov\tax,{outer_reg}\r\n");
+        let _ = write!(self.out, "\tmov\tdx,{outer_stride}\r\n");
+        self.out.extend_from_slice(b"\timul\tdx\r\n");
+        let _ = write!(self.out, "\tmov\tdx,{inner_reg}\r\n");
+        if inner_stride == 2 {
+            self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+        } else if inner_stride != 1 {
+            panic!("2D inner-stride != {{1,2}} not yet supported (no fixture)");
+        }
+        self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+        let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(base_off));
+        self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+    }
     /// `&a[i0][i1]...[iN]` into BX for an N-dimensional (N ≥ 3) local
     /// array whose per-level strides are all powers of two. BCC scales
     /// the first index into BX with a run of `shl bx,1`, then for each
@@ -2199,20 +2246,41 @@ impl<'a> super::FunctionEmitter<'a> {
                 },
                 _ => panic!("`{array}[i][j] = v`: not an array type"),
             };
-            self.emit_array_addr_2d_to_bx(
+            let width = ptr_width(&leaf_ty);
+            if let Some(v) = try_const_eval(value) {
+                self.emit_array_addr_2d_to_bx(
+                    &indices[0],
+                    &indices[1],
+                    outer_stride,
+                    inner_stride,
+                    base_off,
+                );
+                let v_masked =
+                    if leaf_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+                return;
+            }
+            // Non-constant RHS: BCC computes the element address into AX,
+            // saves it on the stack (`push ax`), evaluates the value into
+            // AX, restores the address (`pop bx`), then stores. The value
+            // expression is free to clobber DX/BX (e.g. a multiply) because
+            // the address is parked on the stack. Fixture 4217
+            // (`m[r][c] = r*3+c`).
+            self.emit_array_addr_2d_to_ax(
                 &indices[0],
                 &indices[1],
                 outer_stride,
                 inner_stride,
                 base_off,
             );
-            let width = ptr_width(&leaf_ty);
-            let Some(v) = try_const_eval(value) else {
-                panic!("non-constant rhs in 2D array assign not yet supported (no fixture)");
-            };
-            let v_masked =
-                if leaf_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
-            let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\tpop\tbx\r\n");
+            if leaf_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\t{width} ptr [bx],al\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\t{width} ptr [bx],ax\r\n");
+            }
             return;
         }
         // N-D (≥3) variable-index write: `a[i][j]...[k] = v` for a

@@ -3738,6 +3738,19 @@ fn expr_has_direct_pointer_deref(name: &str, e: &Expr) -> bool {
             {
                 return true;
             }
+            // `(*p)[var]` for a pointer-to-array `p` (`array` is
+            // `*p`): a non-constant subscript needs a per-use scale
+            // step (`shl`/`add`) before the load, the same shape as
+            // `p[var]`. BCC does NOT award SI to such a pointer — the
+            // loop counter keeps SI and the pointer lives in CX. So
+            // don't treat the inner `*p` as a direct deref here.
+            // Fixture 4217 (`(*p)[c]` keeps `c` in SI, `p` in CX).
+            if let ExprKind::Deref(inner) = &array.kind
+                && matches!(&inner.kind, ExprKind::Ident(n) if n == name)
+                && try_const_eval(index).is_none()
+            {
+                return expr_has_direct_pointer_deref(name, index);
+            }
             expr_has_direct_pointer_deref(name, array)
                 || expr_has_direct_pointer_deref(name, index)
         }

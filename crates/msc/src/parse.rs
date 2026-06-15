@@ -4685,8 +4685,15 @@ pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> R
         {
             // Post-(in|de)crement form: `x++;` / `x--;`. For far/huge
             // pointer locals the step is 2 (int element size); otherwise 1.
+            // For a pointer-to-array local (`int (*p)[N]`), `p++` advances by a
+            // WHOLE row (`N*elem`); the addend is later byte-scaled by the
+            // pointee element size, so pre-scale it to ELEMENT units (`N`) here.
+            // Fixture 4217 (`int (*p)[3]; p++` → `add word [p],6`).
             let step = if let AssignTarget::Local(idx) = target {
-                if p.local_specs.get(*idx).map(|s| s.is_far_ptr).unwrap_or(false) { 2 } else { 1 }
+                if let Some(&rs) = p.local_names.get(*idx).and_then(|n| p.ptr_array_stride.get(n)) {
+                    let elem = p.local_specs.get(*idx).map(|s| s.pointee_size.max(1)).unwrap_or(1);
+                    (rs / elem) as i32
+                } else if p.local_specs.get(*idx).map(|s| s.is_far_ptr).unwrap_or(false) { 2 } else { 1 }
             } else { 1 };
             Expr::IntLit(step)
         }
@@ -6531,6 +6538,11 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
                     let step_sign = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1i32 } else { -1i32 };
                     p.bump();
+                    // For a pointer-to-array local (`int (*p)[N]`), incrementing
+                    // the pointer strides by the WHOLE row (`N*elem`), not by the
+                    // element `pointee_size` (which scales `(*p)[K]` access). The
+                    // row stride is recorded in `ptr_array_stride`. Fixture 4217
+                    // (`int (*p)[3]; p++` → `add [p],6`).
                     let ptsz = p.local_specs[idx].pointee_size;
                     let step = step_sign * if ptsz > 0 { ptsz as i32 } else { 1 };
                     return Ok(Expr::PostMutateLocal { local_idx: idx, step });

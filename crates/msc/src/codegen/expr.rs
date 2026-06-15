@@ -261,7 +261,7 @@ fn emit_si_field_word_op(opc: u8, disp: i16, out: &mut Vec<u8>) {
 }
 /// Scale SI by `factor`: power-of-two → `shl si,1` steps; 3 → `mov ax,si; shl
 /// si,1; add si,ax`; otherwise `imul si,si,imm16`.
-fn scale_si(out: &mut Vec<u8>, factor: usize) {
+pub(crate) fn scale_si(out: &mut Vec<u8>, factor: usize) {
     match factor {
         0 | 1 => {}
         f if f.is_power_of_two() => { for _ in 0..f.trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE6]); } }
