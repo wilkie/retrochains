@@ -425,6 +425,23 @@ impl Parser {
                 let r = self.expr_static_size(right).unwrap_or(2);
                 Some(l.max(r))
             }
+            // `sizeof <base>.<field>` / `sizeof <base>-><field>` —
+            // the size of the named struct member. Resolve the base's
+            // struct type (directly for `.`, through one pointer level
+            // for `->`), look the field up, and report its size. The
+            // base must be a bare identifier with a known struct type.
+            ExprKind::Member { base, field, kind } => {
+                let ExprKind::Ident(name) = &base.kind else { return None };
+                let base_ty = self
+                    .function_locals
+                    .get(name)
+                    .or_else(|| self.global_types.get(name))?;
+                let struct_ty = match kind {
+                    crate::ast::MemberKind::Dot => base_ty,
+                    crate::ast::MemberKind::Arrow => base_ty.pointee()?,
+                };
+                struct_ty.struct_field(field).map(|f| f.ty.size_bytes())
+            }
             // `sizeof(<cast>)` — cast determines the result type.
             ExprKind::Cast { ty, .. } => Some(ty.size_bytes()),
             // `sizeof(<intlit>)` — int.

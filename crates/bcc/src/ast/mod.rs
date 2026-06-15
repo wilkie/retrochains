@@ -626,6 +626,19 @@ impl Type {
         }
     }
 
+    /// The named field of a `Struct` type, or `None` if this isn't a
+    /// struct or the field is absent. Used by `sizeof <base>.<field>`
+    /// folding to recover the member's type without a full type
+    /// checker.
+    #[must_use]
+    pub fn struct_field(&self, field: &str) -> Option<&StructField> {
+        if let Self::Struct { fields, .. } = self {
+            fields.iter().find(|f| f.name == field)
+        } else {
+            None
+        }
+    }
+
     /// True for the `_seg` segment-only pointer type. Used by codegen
     /// to distinguish the load-ES-then-deref pattern from regular
     /// or seg-qualified pointers.

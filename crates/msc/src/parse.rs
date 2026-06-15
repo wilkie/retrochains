@@ -6016,6 +6016,50 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 sz
             } else if let Some(Tok::Ident(name)) = p.peek().cloned() {
                 p.bump();
+                // `sizeof <base>.<field>` / `sizeof <base>-><field>` → the
+                // size of the named struct member (no evaluation). Resolve
+                // the base's struct (directly for `.`, through one pointer
+                // level for `->`), look the field up, and report its size.
+                if matches!(p.peek(), Some(Tok::Dot | Tok::Arrow)) {
+                    let sidx = if let Some(idx) = p.resolve_local(&name) {
+                        p.local_specs[idx].struct_idx
+                    } else if let Some(pos) = p.param_names.iter().position(|n| *n == name) {
+                        p.param_struct_idxs.get(pos).copied().flatten()
+                    } else {
+                        None
+                    };
+                    let mut cur = sidx;
+                    // Walk the `.field` / `->field` chain, narrowing the
+                    // current struct each step; the last field's size is
+                    // the sizeof result.
+                    let mut fsize: Option<i32> = None;
+                    while matches!(p.peek(), Some(Tok::Dot | Tok::Arrow)) {
+                        p.bump();
+                        let fname = match p.bump().cloned() {
+                            Some(Tok::Ident(f)) => f,
+                            other => {
+                                return Err(EmitError::Unsupported(format!(
+                                    "expected field name in sizeof member access, got {other:?}"
+                                )));
+                            }
+                        };
+                        let sd = cur.and_then(|i| p.structs.get(i)).ok_or_else(|| {
+                            EmitError::Unsupported(format!(
+                                "sizeof member `{fname}` on non-struct base"
+                            ))
+                        })?;
+                        let field = sd.fields.iter().find(|f| f.name == fname).ok_or_else(|| {
+                            EmitError::Unsupported(format!(
+                                "sizeof unknown field `{fname}`"
+                            ))
+                        })?;
+                        fsize = Some(field.size as i32);
+                        cur = field.struct_idx;
+                    }
+                    let n = fsize.expect("at least one field consumed");
+                    if has_paren { p.eat(&Tok::RParen)?; }
+                    return Ok(Expr::IntLit(n));
+                }
                 // `sizeof(a[K])` → the array's ELEMENT size (the index is
                 // irrelevant; consumed and discarded). `sizeof(a)` → full storage.
                 let is_elem = matches!(p.peek(), Some(Tok::LBrack));
