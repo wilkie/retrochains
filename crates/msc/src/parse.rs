@@ -770,7 +770,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 fields.push(StructField {
                     name, byte_off: unit_off, size: 2, struct_idx: None,
                     bit_width: width, bit_off: place_bit, is_pointer: false, pointee_size: 0,
-                    is_unsigned: false,
+                    is_unsigned: had_unsigned,
                 });
             }
             continue;
@@ -3687,7 +3687,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 // `f.a++` / `f.a--` on a bit-field — a dedicated post-mutate RMW
                 // (the generic `f.a = f.a + 1` desugar emits a different shape).
                 // Fixture 3445.
-                if let Some((bit_off, bit_width)) = p.last_field_bits
+                if let Some((bit_off, bit_width, _)) = p.last_field_bits
                     && matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus))
                 {
                     let step = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1 } else { -1 };
@@ -3697,7 +3697,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                         base: BitBase::Global(global_idx), byte_off, bit_off, bit_width, step,
                     }));
                 }
-                let target = if let Some((bit_off, bit_width)) = p.last_field_bits {
+                let target = if let Some((bit_off, bit_width, _)) = p.last_field_bits {
                     AssignTarget::BitField { base: BitBase::Global(global_idx), byte_off, bit_off, bit_width }
                 } else {
                     AssignTarget::GlobalField { global: global_idx, byte_off, size }
@@ -3790,7 +3790,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                let target = if let Some((bit_off, bit_width)) = p.last_field_bits {
+                let target = if let Some((bit_off, bit_width, _)) = p.last_field_bits {
                     AssignTarget::BitField { base: BitBase::Local(local_idx), byte_off, bit_off, bit_width }
                 } else {
                     AssignTarget::LocalField { local: local_idx, byte_off, size }
@@ -4986,7 +4986,7 @@ pub(crate) fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16
     // struct POINTER field also carries struct_idx but must NOT recurse inline.
     let inner = if field.is_pointer { None } else { field.struct_idx };
     let (byte_off, size) = (field.byte_off, field.size);
-    let leaf_bits = (field.bit_off, field.bit_width);
+    let leaf_bits = (field.bit_off, field.bit_width, field.is_unsigned);
     p.last_field_bits = None;
     // Multi-level access `o.inner.a`: recurse into the nested struct, summing
     // byte offsets; the returned size is the leaf field's.
@@ -5428,7 +5428,16 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 let mut had_star = false;
                 while matches!(p.peek(), Some(Tok::Star)) { p.bump(); had_star = true; }
                 p.eat(&Tok::RParen)?;
-                let inner = parse_atom(p)?;
+                let mut inner = parse_atom(p)?;
+                // An explicit `(int)`/`(unsigned int)` cast over a bit-field read
+                // overrides its effective signedness — `(int)f` makes the field
+                // signed (a `* K` product then uses `imul`, fixture 2105) while a
+                // bare `unsigned` bit-field stays unsigned (`mul`, fixture 4220).
+                if cast_int && !had_star
+                    && let Expr::BitField { unsigned, .. } = &mut inner
+                {
+                    *unsigned = cast_unsigned;
+                }
                 if cast_char && !had_star {
                     // A literal operand in source (`(char)200`) folds completely
                     // to the truncated constant — MSC materializes it as a word
@@ -5835,8 +5844,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 let i = *i;
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                if let Some((bit_off, bit_width)) = p.last_field_bits {
-                    return Ok(Expr::BitField { base: BitBase::Local(i), byte_off, bit_off, bit_width });
+                if let Some((bit_off, bit_width, unsigned)) = p.last_field_bits {
+                    return Ok(Expr::BitField { base: BitBase::Local(i), byte_off, bit_off, bit_width, unsigned });
                 }
                 return Ok(Expr::LocalField { local: i, byte_off, size });
             }
@@ -5847,8 +5856,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 let g = *g;
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                if let Some((bit_off, bit_width)) = p.last_field_bits {
-                    return Ok(Expr::BitField { base: BitBase::Global(g), byte_off, bit_off, bit_width });
+                if let Some((bit_off, bit_width, unsigned)) = p.last_field_bits {
+                    return Ok(Expr::BitField { base: BitBase::Global(g), byte_off, bit_off, bit_width, unsigned });
                 }
                 return Ok(Expr::GlobalField { global: g, byte_off, size });
             }
@@ -6513,8 +6522,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     }
                     p.bump();
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                    if let Some((bit_off, bit_width)) = p.last_field_bits {
-                        return Ok(Expr::BitField { base: BitBase::Local(idx), byte_off, bit_off, bit_width });
+                    if let Some((bit_off, bit_width, unsigned)) = p.last_field_bits {
+                        return Ok(Expr::BitField { base: BitBase::Local(idx), byte_off, bit_off, bit_width, unsigned });
                     }
                     let field = Expr::LocalField { local: idx, byte_off, size };
                     // `op.fn(args)` — calling a function-pointer field. Fixture 2378.
@@ -6648,8 +6657,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     }
                     p.bump();
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                    if let Some((bit_off, bit_width)) = p.last_field_bits {
-                        return Ok(Expr::BitField { base: BitBase::DerefParam(idx), byte_off, bit_off, bit_width });
+                    if let Some((bit_off, bit_width, unsigned)) = p.last_field_bits {
+                        return Ok(Expr::BitField { base: BitBase::DerefParam(idx), byte_off, bit_off, bit_width, unsigned });
                     }
                     return Ok(Expr::DerefParamField { ptr_param: idx, byte_off, size });
                 }
@@ -6823,8 +6832,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         });
                     }
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                    if let Some((bit_off, bit_width)) = p.last_field_bits {
-                        Ok(Expr::BitField { base: BitBase::Global(idx), byte_off, bit_off, bit_width })
+                    if let Some((bit_off, bit_width, unsigned)) = p.last_field_bits {
+                        Ok(Expr::BitField { base: BitBase::Global(idx), byte_off, bit_off, bit_width, unsigned })
                     } else {
                         Ok(Expr::GlobalField { global: idx, byte_off, size })
                     }

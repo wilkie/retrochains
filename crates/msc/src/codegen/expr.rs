@@ -1634,7 +1634,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             }
             emit_expr_to_ax(value, locals, out, fixups);
         }
-        Expr::BitField { base, byte_off, bit_off, bit_width } => {
+        Expr::BitField { base, byte_off, bit_off, bit_width, .. } => {
             let mask = (1u32 << *bit_width) - 1;
             // Byte-aligned full-byte field → read the byte directly + zero-extend.
             if *bit_width == 8 && bit_off % 8 == 0 {
@@ -3770,7 +3770,7 @@ fn try_emit_product_sum_chain(
 /// (leaving `out` partially filled) the moment a non-BitField, non-Add leaf is hit.
 fn collect_bitfield_add_chain(e: &Expr, out: &mut Vec<(BitBase, u16, u8, u8)>) -> bool {
     match e {
-        Expr::BitField { base, byte_off, bit_off, bit_width } => {
+        Expr::BitField { base, byte_off, bit_off, bit_width, .. } => {
             out.push((*base, *byte_off, *bit_off, *bit_width));
             true
         }
@@ -4559,7 +4559,7 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             } else {
                 (fields[1], fields[2..n].iter().copied().collect())
             };
-            emit_expr_to_ax(&Expr::BitField { base: ax_field.0, byte_off: ax_field.1, bit_off: ax_field.2, bit_width: ax_field.3 }, locals, out, fixups);
+            emit_expr_to_ax(&Expr::BitField { base: ax_field.0, byte_off: ax_field.1, bit_off: ax_field.2, bit_width: ax_field.3, unsigned: true }, locals, out, fixups);
             // Middle operands → DX, add into AX.
             for f in dx_fields {
                 bf_read_into_dx(f.0, f.1, f.2, f.3, locals, out, fixups);
@@ -4587,7 +4587,7 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             && fields[0].2 == 0 && fields[1].2 == 0
         {
             let (a, b) = (fields[0], fields[1]);
-            emit_expr_to_ax(&Expr::BitField { base: a.0, byte_off: a.1, bit_off: 0, bit_width: a.3 }, locals, out, fixups);
+            emit_expr_to_ax(&Expr::BitField { base: a.0, byte_off: a.1, bit_off: 0, bit_width: a.3, unsigned: true }, locals, out, fixups);
             bf_load_word_cx(b.0, b.1, locals, out, fixups);
             if b.3 < 16 {
                 let mask = (1u32 << b.3) - 1;
@@ -4599,16 +4599,25 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         }
     }
     // `<non-bit-field expr> + <bit-field>`: emit the LHS into AX, read the RHS
-    // bit-field into CX (shifted + masked), then `add ax,cx` — no push/pop. Pure
-    // all-bit-field chains are handled above. Fixture 2105 (`f1*100 + fl.val`).
+    // bit-field, then `add ax,<reg>` — no push/pop. Pure all-bit-field chains are
+    // handled above. The RHS register depends on the field's shift distance: a
+    // small `bit_off` (≤ 3) reads into CX with repeated `shr cx,1` (fixture 2105,
+    // `f1*100 + fl.val`, bit_off 2); a `bit_off` ≥ 4 needs the `mov cl,n; shr
+    // X,cl` form, which can't target CX itself (CL is part of CX) — so MSC reads
+    // into DX instead (fixture 4220, `s.a*100 + s.b`, bit_off 4).
     if matches!(op, BinOp::Add)
-        && let Expr::BitField { base, byte_off, bit_off, bit_width } = right
+        && let Expr::BitField { base, byte_off, bit_off, bit_width, .. } = right
         && !matches!(left, Expr::BitField { .. })
         && matches!(base, BitBase::Local(_) | BitBase::Global(_))
     {
         emit_expr_to_ax(left, locals, out, fixups);
-        bf_read_into_cx_masked(*base, *byte_off, *bit_off, *bit_width, locals, out, fixups);
-        out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
+        if *bit_off >= 4 {
+            bf_read_into_dx(*base, *byte_off, *bit_off, *bit_width, locals, out, fixups);
+            out.extend_from_slice(&[0x03, 0xC2]); // add ax,dx
+        } else {
+            bf_read_into_cx_masked(*base, *byte_off, *bit_off, *bit_width, locals, out, fixups);
+            out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
+        }
         return;
     }
     // `(int)<long> + (int)(<same long> >> 16)`: the long's low word plus its
@@ -4650,17 +4659,22 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     // add ax,cx; shl ax,1`); a larger K loads into CX and `imul cx` instead
     // (fixture 2105 `(int)fl.f1 * 100`).
     if matches!(op, BinOp::Mul)
-        && matches!(left, Expr::BitField { .. })
+        && let Expr::BitField { unsigned, .. } = left
         && let Expr::IntLit(k) = right
     {
         if *k > 0 && *k <= 15 {
             emit_expr_to_ax(left, locals, out, fixups);           // bit-field → AX
             emit_imm_op(BinOp::Mul, *k, out);                     // shift-and-add ×K
         } else {
+            // A wide K loads into CX and multiplies the (AX) bit-field. The
+            // signedness follows the field's effective type: an `unsigned`
+            // bit-field uses `mul cx` (F7E1), a signed (or `(int)`-cast) one
+            // `imul cx` (F7E9). Fixture 2105 ((int)-cast → imul); 4220
+            // (`unsigned :4 * 100` → mul).
             let kw = (*k as u32 & 0xFFFF) as u16;
             out.push(0xB9); out.extend_from_slice(&kw.to_le_bytes()); // mov cx,K
             emit_expr_to_ax(left, locals, out, fixups);           // bit-field → AX
-            out.extend_from_slice(&[0xF7, 0xE9]);                 // imul cx
+            out.extend_from_slice(&[0xF7, if *unsigned { 0xE1 } else { 0xE9 }]); // mul/imul cx
         }
         return;
     }

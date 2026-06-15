@@ -1444,8 +1444,12 @@ pub enum Expr {
     /// Bit-field read `s.f` — load the 16-bit unit at `base+byte_off`, shift
     /// right by `bit_off`, mask to `bit_width` bits (zero-extended). A
     /// byte-aligned full-byte field reads the byte directly. Fixtures 3207,
-    /// 3210, 3216, 3419.
-    BitField { base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8 },
+    /// 3210, 3216, 3419. `unsigned` is the field's EFFECTIVE signedness at this
+    /// use site (declared `unsigned` unless an explicit `(int)`/`(signed)` cast
+    /// forces signed) — it only steers `mul` vs `imul` in a `* K` product
+    /// (fixtures 2105 cast→imul, 4220 bare unsigned→mul); reads zero-extend
+    /// regardless.
+    BitField { base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8, unsigned: bool },
     /// `f.a++` / `f.a--` on a bit-field (postfix). MSC's dedicated read-modify-
     /// write: load the unit, inc/dec, re-mask to the field, spill the new value
     /// to a frame temp, then `and byte [unit], clear` + `or [unit], ax`. The
@@ -1723,11 +1727,12 @@ struct Parser<'a> {
     /// order. The position in the Vec is the `struct_idx` referenced
     /// by `LocalSpec::struct_idx` and `Global::struct_idx`.
     structs: Vec<StructDef>,
-    /// Set by `parse_field_lookup` to the leaf field's `(bit_off, bit_width)`
-    /// when that field is a bit-field, else `None`. Member-access sites read it
-    /// right after the lookup to emit a `BitField` variant instead of a plain
-    /// field access.
-    last_field_bits: Option<(u8, u8)>,
+    /// Set by `parse_field_lookup` to the leaf field's `(bit_off, bit_width,
+    /// is_unsigned)` when that field is a bit-field, else `None`. Member-access
+    /// sites read it right after the lookup to emit a `BitField` variant instead
+    /// of a plain field access; `is_unsigned` seeds the BitField's effective
+    /// signedness (an `(int)` cast later flips it to signed).
+    last_field_bits: Option<(u8, u8, bool)>,
     /// Strings interned across the whole translation unit. New
     /// string literals append; duplicates currently get distinct
     /// entries (no dedup yet — no fixture exercises a repeated

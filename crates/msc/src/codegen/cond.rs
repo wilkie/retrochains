@@ -866,8 +866,8 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
     // masks one operand against the other — and `test al, lowmask`. The bit-0
     // field's mask fits a byte (its bits sit at the bottom). Fixture 3452.
     if let Cond::Truthy(Expr::BinOp { op: BinOp::BitAnd, left, right }) = cond
-        && let (Expr::BitField { base: ba, byte_off: oa, bit_off: offa, bit_width: wa },
-                Expr::BitField { base: bb, byte_off: ob, bit_off: offb, bit_width: wb })
+        && let (Expr::BitField { base: ba, byte_off: oa, bit_off: offa, bit_width: wa, .. },
+                Expr::BitField { base: bb, byte_off: ob, bit_off: offb, bit_width: wb, .. })
                 = (left.as_ref(), right.as_ref())
         && ba == bb && oa == ob && wa == wb && *wa <= 8
         && ((*offa == 0) ^ (*offb == 0))
