@@ -132,6 +132,8 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             // pointer into SI (`mov si,[bp+p]; mov ax,[bx+si]`).
             Expr::ParamIndex { index, .. } => index.fold(inits).is_none(),
             Expr::Index2D { .. } => true,
+            // Runtime `g[i][j]` on a 2-D array param loads the pointer into SI.
+            Expr::Param2D { .. } => true,
             // runtime local struct-array read `a[i].f` scales the index into SI.
             Expr::LocalStructArrayField { .. } => true,
             // runtime struct-ptr-param field read `pts[i].f` scales i into SI.

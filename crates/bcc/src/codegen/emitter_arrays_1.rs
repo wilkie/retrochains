@@ -886,6 +886,66 @@ impl<'a> super::FunctionEmitter<'a> {
                 }
                 return;
             }
+            // Runtime `g[i][j]` for a `int (*g)[N]` parameter (the
+            // pointer-to-array shape: a 2-D array passed as a
+            // parameter decays to `int (*)[N]`). The address is
+            // `g + i*outer + j*inner` where `outer = sizeof(int[N])`
+            // and `inner = sizeof(int)`. BCC computes `i*outer` in
+            // AX via imul (outer is non-power-of-2 for the common
+            // `[N]` with N odd), folds it into BX alongside the
+            // loaded pointer, then adds `j*inner`. Fixture 4218.
+            if indices.len() == 2
+                && let Some(inner_pointee) = pointee.array_elem()
+                && let LocalLocation::Stack(p_off) = self.locals.location_of(array_name)
+            {
+                let inner_pointee = inner_pointee.clone();
+                let outer_stride = u32::from(pointee.size_bytes());
+                let inner_stride = u32::from(inner_pointee.size_bytes());
+                let outer_addr = self.int_lvalue_src(indices[0]);
+                let inner_addr = self.int_lvalue_src(indices[1]);
+                if let (Some(outer), Some(inner)) = (outer_addr, inner_addr) {
+                    let outer_src = if is_reg16_name(&outer) {
+                        outer.clone()
+                    } else {
+                        format!("word ptr {outer}")
+                    };
+                    let inner_src = if is_reg16_name(&inner) {
+                        inner.clone()
+                    } else {
+                        format!("word ptr {inner}")
+                    };
+                    // i*outer -> AX.
+                    let _ = write!(self.out, "\tmov\tax,{outer_src}\r\n");
+                    if outer_stride > 1 && outer_stride.is_power_of_two() {
+                        for _ in 0..outer_stride.trailing_zeros() {
+                            self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        }
+                    } else {
+                        let _ = write!(self.out, "\tmov\tdx,{outer_stride}\r\n");
+                        self.out.extend_from_slice(b"\timul\tdx\r\n");
+                    }
+                    // BX = g + i*outer.
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbx,word ptr {}\r\n",
+                        bp_addr(p_off)
+                    );
+                    self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                    // AX = j*inner; BX += AX.
+                    let _ = write!(self.out, "\tmov\tax,{inner_src}\r\n");
+                    for _ in 0..inner_stride.trailing_zeros() {
+                        self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                    }
+                    self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                    if inner_pointee.is_char_like() {
+                        self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                        self.emit_widen_al(&inner_pointee);
+                    } else {
+                        self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                    }
+                    return;
+                }
+            }
             panic!("multi-level index through a pointer not yet supported (no fixture)");
         }
         let LocalLocation::Stack(base_off) = self.locals.location_of(array_name) else {

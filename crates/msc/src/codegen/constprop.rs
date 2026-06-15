@@ -78,7 +78,8 @@ fn float_local_used_as_call_arg(stmts: &[Stmt], idx: usize) -> bool {
     fn reads_local(e: &Expr, idx: usize) -> bool {
         match e {
             Expr::Local(i) => *i == idx,
-            Expr::BinOp { left, right, .. } | Expr::Index2D { row: left, col: right, .. } =>
+            Expr::BinOp { left, right, .. } | Expr::Index2D { row: left, col: right, .. }
+            | Expr::Param2D { row: left, col: right, .. } =>
                 reads_local(left, idx) || reads_local(right, idx),
             Expr::Ternary { cond, then_arm, else_arm } =>
                 reads_local(cond, idx) || reads_local(then_arm, idx) || reads_local(else_arm, idx),
@@ -103,7 +104,8 @@ fn float_local_used_as_call_arg(stmts: &[Stmt], idx: usize) -> bool {
             Expr::CallPtr { target, args } =>
                 args.iter().any(|a| reads_local(a, idx)) || scan_expr(target, idx)
                     || args.iter().any(|a| scan_expr(a, idx)),
-            Expr::BinOp { left, right, .. } | Expr::Index2D { row: left, col: right, .. } =>
+            Expr::BinOp { left, right, .. } | Expr::Index2D { row: left, col: right, .. }
+            | Expr::Param2D { row: left, col: right, .. } =>
                 scan_expr(left, idx) || scan_expr(right, idx),
             Expr::Ternary { cond, then_arm, else_arm } =>
                 scan_expr(cond, idx) || scan_expr(then_arm, idx) || scan_expr(else_arm, idx),
@@ -2880,6 +2882,24 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                     (true, true) => Expr::IndexByte { array: *base, index: flat },
                     (false, false) => Expr::LocalIndex { local: *base, index: flat },
                     (false, true) => Expr::LocalIndexByte { local: *base, index: flat },
+                };
+                prop_expr(e, cp);
+            }
+        }
+        Expr::Param2D { param, row, col, cols, elem } => {
+            prop_expr(row, cp);
+            prop_expr(col, cp);
+            // Both indices constant → fold to a flat 1-D parameter access
+            // (`g[i][j]` with known i,j is the same as `ParamIndex`/byte-deref
+            // at element `i*cols + j`).
+            if let (Expr::IntLit(r), Expr::IntLit(c)) = (row.as_ref(), col.as_ref()) {
+                let flat = r * *cols as i32 + c;
+                *e = if *elem == 1 {
+                    let ptr = if flat == 0 { Expr::Param(*param) }
+                        else { Expr::BinOp { op: crate::BinOp::Add, left: Box::new(Expr::Param(*param)), right: Box::new(Expr::IntLit(flat)) } };
+                    Expr::DerefByte { ptr: Box::new(ptr) }
+                } else {
+                    Expr::ParamIndex { param: *param, index: Box::new(Expr::IntLit(flat)) }
                 };
                 prop_expr(e, cp);
             }

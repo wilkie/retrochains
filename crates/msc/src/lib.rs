@@ -1256,6 +1256,12 @@ pub enum Expr {
     /// 1-D access when both indices are known; otherwise codegen materializes
     /// `si = row*cols*elem`, `bx = col*elem` and reads `[base + bx + si]`.
     Index2D { is_global: bool, base: usize, row: Box<Expr>, col: Box<Expr>, cols: usize, elem: usize },
+    /// Runtime `g[i][j]` read on a 2-D array PARAMETER (`int g[2][3]` decays
+    /// to `int (*g)[3]`). The flat byte offset `row*cols*elem + col*elem` is
+    /// built in BX, the pointer param loaded into SI, then `mov ax,[bx+si]`.
+    /// Distinct from `Index2D` because the base is a pointer value, not a
+    /// resident array — there is no `bp`/global displacement. Fixture 4218.
+    Param2D { param: usize, row: Box<Expr>, col: Box<Expr>, cols: usize, elem: usize },
     /// `<struct-local>.<field>` — read a field of a struct local.
     /// `byte_off` is the precomputed field offset within the
     /// struct. `size == 1` triggers `mov al, [bp+disp]; cbw`;
@@ -1536,7 +1542,7 @@ impl Expr {
             Expr::PtrChainField { .. } => None,
             Expr::StructArrayField { .. } | Expr::LocalStructArrayField { .. }
             | Expr::ParamStructArrayField { .. } | Expr::ParamPtrArrayDeref { .. } => None,
-            Expr::Index2D { .. } => None,
+            Expr::Index2D { .. } | Expr::Param2D { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
             Expr::LocalField { .. } | Expr::DerefLocalField { .. } | Expr::GlobalField { .. } => None,
@@ -2328,7 +2334,7 @@ fn string_reference_order(unit: &Unit) -> Vec<usize> {
             | Expr::ParamIndex { index, .. } | Expr::PtrIndexByte { index, .. } => {
                 walk_expr(index, order, seen);
             }
-            Expr::Index2D { row, col, .. } => {
+            Expr::Index2D { row, col, .. } | Expr::Param2D { row, col, .. } => {
                 walk_expr(row, order, seen);
                 walk_expr(col, order, seen);
             }

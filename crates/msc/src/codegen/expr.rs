@@ -269,6 +269,18 @@ pub(crate) fn scale_si(out: &mut Vec<u8>, factor: usize) {
         f => { out.push(0x69); out.push(0xF6); out.extend_from_slice(&(f as u16).to_le_bytes()); }
     }
 }
+/// Scale `bx` by `factor` in place, mirroring `scale_si` but on BX. Used for
+/// the runtime 2-D array-parameter row offset, where MSC builds the offset in
+/// BX (the pointer goes into SI). Factor 3 expands to `mov ax,bx; shl bx,1;
+/// add bx,ax`. Fixture 4218.
+pub(crate) fn scale_bx(out: &mut Vec<u8>, factor: usize) {
+    match factor {
+        0 | 1 => {}
+        f if f.is_power_of_two() => { for _ in 0..f.trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE3]); } }
+        3 => out.extend_from_slice(&[0x8B, 0xC3, 0xD1, 0xE3, 0x03, 0xD8]),
+        f => { out.push(0x69); out.push(0xDB); out.extend_from_slice(&(f as u16).to_le_bytes()); }
+    }
+}
 /// Shift `si` left by `n` bits. MSC emits a `mov cl,n; shl si,cl`
 /// variable-count shift (4 bytes) once `n >= 3` — cheaper than `n`
 /// inline `shl si,1` (2 bytes each) — and inline shifts for `n <= 2`.
@@ -501,6 +513,22 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             let disp = locals.disp(*base);
             let op = if *elem == 1 { 0x8Au8 } else { 0x8B };
             out.push(op); out.push(bp_modrm(0x42, disp)); push_bp_disp(out, disp); // mov ax/al,[bp+si+disp]
+            if *elem == 1 { out.push(0x98); } // cbw
+        }
+        // Runtime `g[i][j]` on a 2-D array PARAMETER (`int(*)[N]`): the offset
+        // `row*cols*elem + col*elem` is built in BX (cols-scale then elem-shift,
+        // kept separate as MSC emits them), the pointer param is loaded into SI,
+        // then `mov ax,[bx+si]`. Fixture 4218.
+        Expr::Param2D { param, row, col, cols, elem } => {
+            emit_load_bx(row, locals, out, fixups);                          // mov bx,[row]
+            scale_bx(out, *cols);                                            // bx *= cols
+            for _ in 0..(*elem).trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE3]); } // shl bx,1 (×elem)
+            emit_expr_to_ax(col, locals, out, fixups);                       // mov ax,[col]
+            for _ in 0..(*elem).trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE0]); } // shl ax,1 (×elem)
+            out.extend_from_slice(&[0x03, 0xD8]);                            // add bx,ax
+            out.extend_from_slice(&[0x8B, 0x76, param_disp(*param) as u8]);  // mov si,[bp+disp]
+            let op = if *elem == 1 { 0x8Au8 } else { 0x8B };
+            out.push(op); out.push(0x00);                                    // mov ax/al,[bx+si]
             if *elem == 1 { out.push(0x98); } // cbw
         }
         Expr::IntLit(k) => {

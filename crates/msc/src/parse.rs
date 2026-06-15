@@ -6609,8 +6609,16 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         let elem = p.param_pointee_sizes.get(idx).copied().unwrap_or(2);
                         let flat = match ms {
                             MultiSub::Flat(f) => f,
+                            // Runtime `g[i][j]` on a 2-D array param (`int(*)[N]`):
+                            // build the byte offset in BX, load the pointer into SI,
+                            // `mov ax,[bx+si]`. Fixture 4218.
+                            MultiSub::Runtime(mut ix) if ix.len() == 2 => {
+                                let col = Box::new(ix.pop().unwrap());
+                                let row = Box::new(ix.pop().unwrap());
+                                return Ok(Expr::Param2D { param: idx, row, col, cols: dims[1], elem });
+                            }
                             MultiSub::Runtime(_) => return Err(EmitError::Unsupported(
-                                "runtime 2-D array parameter index not yet supported".to_owned())),
+                                "runtime index on a >2-D array parameter not yet supported".to_owned())),
                         };
                         if elem == 1 {
                             let ptr = if flat == 0 { Expr::Param(idx) }
