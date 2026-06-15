@@ -61,7 +61,7 @@ impl DistroSpec {
 
     /// Microsoft C 5.0 — the second oracle. Distribution layout is
     /// flat (BIN/INCLUDE/LIB at the top of the zip), so `root_subdir`
-    /// is empty. See `MSC500.md` for acquisition and verification.
+    /// is empty. See `oracles/msc/MSC500.md` for acquisition and verification.
     #[must_use]
     pub fn msc500(workspace_root: &Path) -> Self {
         Self {

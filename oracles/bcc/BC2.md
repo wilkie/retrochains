@@ -14,7 +14,7 @@ licensed the binaries for redistribution. The companion
 Borland C++ 2.0 install hashes to the same values, they have the same
 toolchain we used to capture goldens, and their `crates/bcc` runs will
 produce byte-identical OBJs. This mirrors the
-[`MSC500.sha256`](MSC500.sha256) / [`MSC500.md`](MSC500.md) arrangement
+[`MSC500.sha256`](../msc/MSC500.sha256) / [`MSC500.md`](../msc/MSC500.md) arrangement
 used for the second compiler target.
 
 ## How to acquire Borland C++ 2.0
@@ -67,7 +67,7 @@ unzip -d /tmp/bc2 BC2.zip
 # 2. Hash-check against the manifest (paths are BC2/-prefixed, so cd to
 #    the parent of the extracted BC2/ directory).
 cd /tmp/bc2
-sha256sum -c <path-to-repo>/BC2.sha256
+sha256sum -c <path-to-repo>/oracles/bcc/BC2.sha256
 ```
 
 Every entry should report `OK`. A single mismatch means your copy differs

@@ -231,7 +231,7 @@ impl OracleConfig {
     }
 
     /// Defaults for the Microsoft C 5.0 oracle (MSC500.zip at the
-    /// workspace root). See `MSC500.md` for the manifest and acquisition
+    /// workspace root). See `oracles/msc/MSC500.md` for the manifest and acquisition
     /// path; the zip itself is gitignored.
     #[must_use]
     pub fn for_msc500_workspace(workspace_root: &Path) -> Self {

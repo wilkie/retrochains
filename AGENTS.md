@@ -30,7 +30,7 @@ secondary.
 
 The original binaries (`BCC.EXE`, `TASM.EXE`, `TLINK.EXE`) plus headers and
 runtime libraries are supplied in `BC2.zip` at the repo root (gitignored, not
-redistributable — supply your own; see `BC2.md` / `BC2.sha256`). The
+redistributable — supply your own; see `oracles/bcc/BC2.md` / `oracles/bcc/BC2.sha256`). The
 `crates/oracle/` crate unpacks it lazily into `.bc2/` (gitignored) and runs
 the tools under DOSBox. Use it; don't shell out to DOSBox directly. Full
 details and a known-issues list are in
@@ -88,8 +88,9 @@ pnpm format:check
 ## Repository layout (short form)
 
 ```
-BC2.zip               original Borland C++ 2.0 install (oracle source; gitignored, supply your own — see BC2.md)
-BC2.sha256 / BC2.md   integrity manifest + how-to-acquire doc for BC2.zip
+BC2.zip               original Borland C++ 2.0 install (oracle source; gitignored, supply your own — see oracles/bcc/BC2.md)
+oracles/bcc/          BCC oracle docs: BC2.sha256 (integrity manifest) + BC2.md (how-to-acquire) + BC2.toml
+oracles/msc/          MSC oracle docs: MSC500.{sha256,md,toml}
 .bc2/                 lazily unpacked from BC2.zip (gitignored)
 crates/               cargo workspace
   bcc/   tlink/  tasm/        — the three tool reimplementations (lib + bin)
