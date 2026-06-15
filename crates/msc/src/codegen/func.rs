@@ -54,6 +54,7 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     AssignTarget::IndexedLocalVar { .. }
                     | AssignTarget::IndexedLocalByteVar { .. }
                     | AssignTarget::Index2D { .. }
+                    | AssignTarget::IndexNDLocal { .. }
                     // runtime local struct-array store `a[i].f = v` (a folded
                     // constant index became a plain LocalField in const-prop, so
                     // any surviving target here has a runtime index → SI).

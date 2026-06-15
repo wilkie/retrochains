@@ -269,6 +269,48 @@ fn scale_si(out: &mut Vec<u8>, factor: usize) {
         f => { out.push(0x69); out.push(0xF6); out.extend_from_slice(&(f as u16).to_le_bytes()); }
     }
 }
+/// Shift `si` left by `n` bits. MSC emits a `mov cl,n; shl si,cl`
+/// variable-count shift (4 bytes) once `n >= 3` — cheaper than `n`
+/// inline `shl si,1` (2 bytes each) — and inline shifts for `n <= 2`.
+fn shift_si_left(out: &mut Vec<u8>, n: u32) {
+    if n >= 3 {
+        out.push(0xB1); out.push(n as u8);          // mov cl,n
+        out.extend_from_slice(&[0xD3, 0xE6]);        // shl si,cl
+    } else {
+        for _ in 0..n { out.extend_from_slice(&[0xD1, 0xE6]); } // shl si,1
+    }
+}
+/// Shift `ax` left by `n` bits with the same `mov cl,n; shl ax,cl`
+/// vs inline-`shl ax,1` selection rule used for SI.
+fn shift_ax_left(out: &mut Vec<u8>, n: u32) {
+    if n >= 3 {
+        out.push(0xB1); out.push(n as u8);          // mov cl,n
+        out.extend_from_slice(&[0xD3, 0xE0]);        // shl ax,cl
+    } else {
+        for _ in 0..n { out.extend_from_slice(&[0xD1, 0xE0]); } // shl ax,1
+    }
+}
+/// Build the flat element offset for a runtime ≥3-D LOCAL array index in
+/// SI: `si = i0*stride0`, then `+= iN*strideN` for each later index (each
+/// scaled into AX and folded with `add si,ax`). Every stride is a power of
+/// two, so scaling is pure shifting. `dims` lists each dimension extent;
+/// `elem` the element byte size. Fixture 4216 (`int a[2][2][2]`).
+pub(crate) fn emit_index_nd_si(
+    indices: &[Expr], dims: &[usize], elem: usize,
+    locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>,
+) {
+    let stride_shift = |d: usize| -> u32 {
+        let prod: usize = dims.get(d + 1..).map(|rest| rest.iter().product()).unwrap_or(1);
+        ((prod * elem.max(1)) as u32).trailing_zeros()
+    };
+    emit_load_si(&indices[0], locals, out, fixups);
+    shift_si_left(out, stride_shift(0));
+    for (d, ix) in indices.iter().enumerate().skip(1) {
+        emit_expr_to_ax(ix, locals, out, fixups);
+        shift_ax_left(out, stride_shift(d));
+        out.extend_from_slice(&[0x03, 0xF0]); // add si,ax
+    }
+}
 /// Emit the SI=row*rowstride, BX=col*elem address setup shared by 2-D read/write.
 pub(crate) fn emit_index2d_regs(row: &Expr, col: &Expr, cols: usize, elem: usize, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     emit_load_si(row, locals, out, fixups);

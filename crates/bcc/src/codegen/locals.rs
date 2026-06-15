@@ -114,6 +114,13 @@ impl Reg {
     /// clobbered across the body; only DI/CX remain. Fixture 1700
     /// (`a[i][j]` with stride 6 → imul + BX scratch).
     const NON_SI_POOL_NO_DX_NO_BX: [Self; 2] = [Self::Di, Self::Cx];
+    /// Variant when the function uses BX as the indexed-address
+    /// scratch for a multi-dim array whose per-level strides are all
+    /// powers of two — the address math is pure `shl` runs, so no
+    /// `imul` fires and DX is NOT clobbered. Only BX drops; DX stays
+    /// in the pool. Fixture 4216 (`int a[2][2][2]; a[i][j][k] = n` →
+    /// i/j/k/n land in SI/DI/DX/CX, BX reserved for the address).
+    const NON_SI_POOL_NO_BX: [Self; 3] = [Self::Di, Self::Dx, Self::Cx];
     /// Variant fired by the shift-count SI swap (fixture 2399): the
     /// shift-count int gets DX as its first choice so the body's
     /// `mov cl, dl` is the natural source. Other eligibles fall to
@@ -599,8 +606,18 @@ impl Locals {
         let function_has_2d_array_index = body_has_2d_array_index(
             function.body.as_deref().unwrap_or(&[]),
         );
+        // Pure-shift multi-dim index (all strides power-of-two): BX is
+        // the address scratch but no `imul` runs, so DX survives. Drop
+        // only BX. Checked before the imul-2D case so a stride-6 array
+        // (which DOES imul) still picks NO_DX_NO_BX. Fixture 4216.
+        let function_has_pow2_multidim_index = body_has_pow2_multidim_local_index(
+            function.body.as_deref().unwrap_or(&[]),
+            &declared,
+        );
         let non_si_pool: &[Reg] = if function_makes_call {
             &Reg::NON_SI_POOL_WITH_CALL
+        } else if function_has_pow2_multidim_index && !function_has_imul_now {
+            &Reg::NON_SI_POOL_NO_BX
         } else if function_has_2d_array_index {
             &Reg::NON_SI_POOL_NO_DX_NO_BX
         } else if function_has_imul_now {
@@ -3020,6 +3037,165 @@ fn expr_has_2d_array_index(e: &Expr) -> bool {
         | ExprKind::AddressOfArrayElemVar { .. }
         | ExprKind::StringLit(_) => false,
     }
+}
+
+/// True iff the function body contains a multi-dim (≥2 subscript)
+/// array store/read with a non-constant index, where the indexed
+/// array is a local whose per-level strides are *all* powers of two.
+/// Such accesses scale with `shl` runs only (no `imul`), so DX is
+/// never clobbered by the address math — only BX (the scratch the
+/// address lands in). Distinguishes the pure-shift case from the
+/// `imul`-scaled multi-dim case (`int a[2][3]`, stride 6 → fixture
+/// 1700/198) which clobbers both. Fixture 4216 (`int a[2][2][2]`).
+fn body_has_pow2_multidim_local_index(body: &[Stmt], declared: &[DeclItem]) -> bool {
+    fn array_strides_all_pow2(array_ty: &Type, depth: usize) -> bool {
+        let mut cur = array_ty;
+        for _ in 0..depth {
+            let Type::Array { elem, .. } = cur else {
+                return false;
+            };
+            let stride = elem.size_bytes();
+            if stride != 1 && !stride.is_power_of_two() {
+                return false;
+            }
+            cur = elem;
+        }
+        true
+    }
+    fn local_array_ty<'a>(name: &str, declared: &'a [DeclItem]) -> Option<&'a Type> {
+        declared
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| &d.ty)
+            .filter(|ty| matches!(ty, Type::Array { .. }))
+    }
+    fn check_assign(
+        array: &str,
+        indices: &[Expr],
+        declared: &[DeclItem],
+    ) -> bool {
+        check_assign_refs(
+            array,
+            &indices.iter().collect::<Vec<_>>(),
+            declared,
+        )
+    }
+    fn check_assign_refs(
+        array: &str,
+        indices: &[&Expr],
+        declared: &[DeclItem],
+    ) -> bool {
+        indices.len() >= 2
+            && indices.iter().any(|i| try_const_eval(i).is_none())
+            && local_array_ty(array, declared)
+                .is_some_and(|ty| array_strides_all_pow2(ty, indices.len()))
+    }
+    fn flatten_index<'a>(mut e: &'a Expr, indices: &mut Vec<&'a Expr>) -> Option<&'a str> {
+        loop {
+            match &e.kind {
+                ExprKind::ArrayIndex { array, index } => {
+                    indices.push(index);
+                    e = array;
+                }
+                ExprKind::Ident(n) => return Some(n.as_str()),
+                _ => return None,
+            }
+        }
+    }
+    fn walk_expr(e: &Expr, declared: &[DeclItem]) -> bool {
+        if let ExprKind::ArrayIndex { array, .. } = &e.kind
+            && matches!(array.kind, ExprKind::ArrayIndex { .. })
+        {
+            let mut idxs: Vec<&Expr> = Vec::new();
+            if let Some(name) = flatten_index(e, &mut idxs) {
+                if check_assign_refs(name, &idxs, declared) {
+                    return true;
+                }
+            }
+        }
+        match &e.kind {
+            ExprKind::ArrayIndex { array, index } => {
+                walk_expr(array, declared) || walk_expr(index, declared)
+            }
+            ExprKind::BinOp { left, right, .. }
+            | ExprKind::Logical { left, right, .. }
+            | ExprKind::Comma { left, right } => {
+                walk_expr(left, declared) || walk_expr(right, declared)
+            }
+            ExprKind::Unary { operand, .. }
+            | ExprKind::Deref(operand)
+            | ExprKind::Cast { operand, .. } => walk_expr(operand, declared),
+            ExprKind::AssignExpr { value, .. }
+            | ExprKind::CompoundAssignExpr { value, .. } => walk_expr(value, declared),
+            ExprKind::AssignLvalueExpr { target, value } => {
+                walk_expr(target, declared) || walk_expr(value, declared)
+            }
+            ExprKind::Ternary { cond, then_value, else_value } => {
+                walk_expr(cond, declared)
+                    || walk_expr(then_value, declared)
+                    || walk_expr(else_value, declared)
+            }
+            ExprKind::Member { base, .. } => walk_expr(base, declared),
+            ExprKind::Call { args, .. } => args.iter().any(|a| walk_expr(a, declared)),
+            ExprKind::CallVia { addr, args } => {
+                walk_expr(addr, declared) || args.iter().any(|a| walk_expr(a, declared))
+            }
+            ExprKind::InitList { items } => items.iter().any(|x| walk_expr(x, declared)),
+            ExprKind::UpdateLvalue { target, .. } => walk_expr(target, declared),
+            _ => false,
+        }
+    }
+    fn walk_stmt(s: &Stmt, declared: &[DeclItem]) -> bool {
+        match &s.kind {
+            StmtKind::ArrayAssign { array, indices, value }
+            | StmtKind::ArrayCompoundAssign { array, indices, value, .. } => {
+                check_assign(array, indices, declared)
+                    || indices.iter().any(|i| walk_expr(i, declared))
+                    || walk_expr(value, declared)
+            }
+            StmtKind::Return(Some(e)) | StmtKind::ExprStmt(e) => walk_expr(e, declared),
+            StmtKind::Return(None) => false,
+            StmtKind::Declare { init, .. } => {
+                init.as_ref().is_some_and(|e| walk_expr(e, declared))
+            }
+            StmtKind::Assign { value, .. }
+            | StmtKind::CompoundAssign { value, .. } => walk_expr(value, declared),
+            StmtKind::DerefAssign { target, value }
+            | StmtKind::DerefCompoundAssign { target, value, .. } => {
+                walk_expr(target, declared) || walk_expr(value, declared)
+            }
+            StmtKind::MemberAssign { base, value, .. }
+            | StmtKind::MemberCompoundAssign { base, value, .. } => {
+                walk_expr(base, declared) || walk_expr(value, declared)
+            }
+            StmtKind::MemberArrayAssign { indices, value, .. } => {
+                indices.iter().any(|i| walk_expr(i, declared)) || walk_expr(value, declared)
+            }
+            StmtKind::If { cond, then_branch, else_branch } => {
+                walk_expr(cond, declared)
+                    || then_branch.iter().any(|s| walk_stmt(s, declared))
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|b| b.iter().any(|s| walk_stmt(s, declared)))
+            }
+            StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
+                walk_expr(cond, declared) || body.iter().any(|s| walk_stmt(s, declared))
+            }
+            StmtKind::For { init, cond, step, body } => {
+                init.as_ref().is_some_and(|es| es.iter().any(|e| walk_expr(e, declared)))
+                    || cond.as_ref().is_some_and(|e| walk_expr(e, declared))
+                    || step.as_ref().is_some_and(|es| es.iter().any(|e| walk_expr(e, declared)))
+                    || body.iter().any(|s| walk_stmt(s, declared))
+            }
+            StmtKind::Switch { scrutinee, cases } => {
+                walk_expr(scrutinee, declared)
+                    || cases.iter().any(|c| c.body.iter().any(|s| walk_stmt(s, declared)))
+            }
+            StmtKind::Block(body) => body.iter().any(|s| walk_stmt(s, declared)),
+            _ => false,
+        }
+    }
+    body.iter().any(|s| walk_stmt(s, declared))
 }
 
 fn stmt_emits_imul(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {

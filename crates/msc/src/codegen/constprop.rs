@@ -963,6 +963,35 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                     };
                 }
             }
+            // Runtime ≥3-D local store `a[i][j][k] = v`: fold each index; when
+            // all are known, rewrite to a flat IndexedLocal/IndexedLocalByte
+            // store (MSC emits a direct store for a fully-constant subscript).
+            // Otherwise it stays IndexNDLocal for the si-scaling codegen path.
+            // Fixture 4216.
+            if let AssignTarget::IndexNDLocal { base, indices, dims, elem } = target {
+                for ix in indices.iter_mut() {
+                    prop_expr(ix, cp);
+                }
+                let consts: Option<Vec<i32>> = indices
+                    .iter()
+                    .map(|ix| if let Expr::IntLit(k) = ix { Some(*k) } else { None })
+                    .collect();
+                if let Some(cs) = consts {
+                    let mut flat = 0i64;
+                    for (d, &ix) in cs.iter().enumerate() {
+                        let stride: usize =
+                            dims.get(d + 1..).map(|rest| rest.iter().product()).unwrap_or(1);
+                        flat += ix as i64 * stride as i64;
+                    }
+                    if let Ok(byte_off) = u16::try_from(flat * *elem as i64) {
+                        *target = if *elem == 1 {
+                            AssignTarget::IndexedLocalByte { local: *base, byte_off }
+                        } else {
+                            AssignTarget::IndexedLocal { local: *base, byte_off }
+                        };
+                    }
+                }
+            }
             // Runtime local struct-array store `a[i].f = v`: fold the index; when
             // known, rewrite to a flat LocalField store (matching MSC's const
             // folding — fixture 2438 with `i=2`). Otherwise it stays

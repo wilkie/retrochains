@@ -3882,8 +3882,16 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                             p.eat(&Tok::Semi)?;
                             return Ok(Stmt::Assign { target, value });
                         }
-                        MultiSub::Runtime(_) => return Err(EmitError::Unsupported(
-                            "runtime index on a >2-D local array store not yet supported".to_owned())),
+                        MultiSub::Runtime(ix) => {
+                            let elem = p.local_specs[local_idx].size;
+                            let target = AssignTarget::IndexNDLocal {
+                                base: local_idx, indices: ix, dims: dims.clone(), elem,
+                            };
+                            p.eat(&Tok::Assign)?;
+                            let value = parse_expr(p)?;
+                            p.eat(&Tok::Semi)?;
+                            return Ok(Stmt::Assign { target, value });
+                        }
                     }
                 }
                 // Try folding against the local-init view so simple

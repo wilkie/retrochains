@@ -464,6 +464,16 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             fixups.push(Fixup { body_offset: mp, kind: FixupKind::GlobalAddr { global_idx: base } });
             return;
         }
+        AssignTarget::IndexNDLocal { base, indices, dims, elem } => {
+            crate::codegen::expr::emit_index_nd_si(&indices, &dims, elem, locals, out, fixups);
+            emit_expr_to_ax(&value, locals, out, fixups); // value → AX
+            let disp = locals.disp(base);
+            // mov [bp+si+disp], ax/al   (r/m 010 = [bp+si])
+            out.push(if elem == 1 { 0x88 } else { 0x89 });
+            out.push(bp_modrm(0x42, disp));
+            push_bp_disp(out, disp);
+            return;
+        }
         AssignTarget::IndexedGlobal { array, byte_off } => {
             return emit_assign_indexed_global(array, byte_off, value, locals, out, fixups);
         }

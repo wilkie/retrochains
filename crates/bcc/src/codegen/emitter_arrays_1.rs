@@ -1205,6 +1205,49 @@ impl<'a> super::FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
         self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
     }
+    /// `&a[i0][i1]...[iN]` into BX for an N-dimensional (N ≥ 3) local
+    /// array whose per-level strides are all powers of two. BCC scales
+    /// the first index into BX with a run of `shl bx,1`, then for each
+    /// further index scales into AX (`mov ax,<idx>; shl ax,1...`) and
+    /// folds it in with `add bx,ax`. Finally `lea ax, base; add bx,ax`
+    /// lands the absolute element address. The 2-D power-of-two head
+    /// (`emit_array_addr_2d_to_bx`) is the N=2 instance of this same
+    /// shape; this generalizes it for deeper arrays. Fixture 4216
+    /// (`int a[2][2][2]; a[i][j][k] = n;`).
+    pub(crate) fn emit_array_addr_nd_to_bx(
+        &mut self,
+        indices: &[Expr],
+        strides: &[u16],
+        base_off: i16,
+    ) {
+        debug_assert_eq!(indices.len(), strides.len());
+        // First index → BX, scaled by its stride.
+        let first_reg = self.idx_reg_name(&indices[0]);
+        let _ = write!(self.out, "\tmov\tbx,{first_reg}\r\n");
+        let s0 = strides[0];
+        if s0 > 1 && s0.is_power_of_two() {
+            for _ in 0..s0.trailing_zeros() {
+                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+            }
+        } else if s0 != 1 {
+            panic!("N-D array stride != power-of-two not yet supported (no fixture)");
+        }
+        // Remaining indices → AX, scaled, then folded into BX.
+        for (idx, &stride) in indices[1..].iter().zip(&strides[1..]) {
+            let reg = self.idx_reg_name(idx);
+            let _ = write!(self.out, "\tmov\tax,{reg}\r\n");
+            if stride > 1 && stride.is_power_of_two() {
+                for _ in 0..stride.trailing_zeros() {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+            } else if stride != 1 {
+                panic!("N-D array stride != power-of-two not yet supported (no fixture)");
+            }
+            self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+        }
+        let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(base_off));
+        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+    }
     /// True when `value` is a `<int-var> ± <const>` expression whose
     /// variable is a register-resident int local. Such a value lowers
     /// to `mov ax,<reg>; inc/dec/add ax,K`, touching only AX (never BX
@@ -2172,9 +2215,44 @@ impl<'a> super::FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
             return;
         }
+        // N-D (≥3) variable-index write: `a[i][j]...[k] = v` for a
+        // local array of ints. Walk the type down each subscript level
+        // collecting per-level strides, scale them into BX (power-of-
+        // two `shl` runs), then store. Fixture 4216 (`int a[2][2][2];
+        // a[i][j][k] = n`).
+        if indices.len() >= 3 {
+            let mut strides: Vec<u16> = Vec::with_capacity(indices.len());
+            let mut cur = &array_ty;
+            for _ in 0..indices.len() {
+                let Type::Array { elem, .. } = cur else {
+                    panic!("`{array}[...] = v`: subscripted non-array level");
+                };
+                strides.push(elem.size_bytes());
+                cur = elem;
+            }
+            let leaf_ty = cur.clone();
+            self.emit_array_addr_nd_to_bx(indices, &strides, base_off);
+            let width = ptr_width(&leaf_ty);
+            if let Some(v) = try_const_eval(value) {
+                let v_masked =
+                    if leaf_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+                return;
+            }
+            // Non-constant int element RHS: materialize into AX, then
+            // store. Register-resident int idents take the same `mov
+            // ax,<reg>; mov word ptr [bx],ax` shape BCC uses for `n`.
+            if !leaf_ty.is_char_like() {
+                self.emit_expr_to_ax(value);
+                let _ = write!(self.out, "\tmov\tword ptr [bx],ax\r\n");
+                return;
+            }
+            self.emit_expr_to_ax(value);
+            let _ = write!(self.out, "\tmov\tbyte ptr [bx],al\r\n");
+            return;
+        }
         // Variable-index fallback: only the single-dim path is wired
-        // up today (covers fixtures 078, 142). Deeper multi-dim with
-        // any non-const subscript isn't fixtured.
+        // up today (covers fixtures 078, 142).
         if indices.len() != 1 {
             panic!("multi-dim (>2) array assign with non-constant indices not yet supported (no fixture)");
         }

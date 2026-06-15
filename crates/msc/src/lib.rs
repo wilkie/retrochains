@@ -1137,6 +1137,14 @@ pub enum AssignTarget {
     /// `Expr::Index2D`; const-prop folds to a flat IndexedGlobal/IndexedLocal when
     /// both indices are known, else codegen does the `si`/`bx` addressing.
     Index2D { is_global: bool, base: usize, row: Box<Expr>, col: Box<Expr>, cols: usize, elem: usize },
+    /// `a[i][j][k]... = <expr>;` store on a ≥3-D LOCAL array with a runtime
+    /// index. Codegen builds the flat element offset in SI — the first index
+    /// is scaled by the product of all following dims × elem (`mov cl,N; shl
+    /// si,cl` when the shift count ≥3, else inline `shl si,1` runs), each
+    /// later index scaled into AX and folded in with `add si,ax` — then stores
+    /// `mov [bp+si+disp], ax`. `dims` holds every dimension extent; `elem` the
+    /// element byte size. Fixture 4216 (`int a[2][2][2]`).
+    IndexNDLocal { base: usize, indices: Vec<Expr>, dims: Vec<usize>, elem: usize },
     /// `<ptr-local>[K] = <expr>;` with constant K≠0 — store through a
     /// pointer local at a byte offset (`byte_off` = K * pointee size).
     /// When the pointer aliases a base array the const-prop pass rewrites
