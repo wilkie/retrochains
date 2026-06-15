@@ -333,6 +333,33 @@ impl<'a> super::FunctionEmitter<'a> {
         // `try_lvalue_chain_addr` resolves the whole Dot chain to the
         // root ident, accumulated byte offset, and the array leaf
         // type. Fixture 4195 (array inside a union inside a struct).
+        // `<local-struct>.<...>.<arr-field>[K]` — a nested Dot chain
+        // rooted at a *stack* struct local, ending in an array field
+        // indexed by a constant. `try_lvalue_chain_addr` folds the
+        // whole chain to (root-ident, byte-offset, array-leaf-type);
+        // we add the constant element offset onto the local's stack
+        // slot and load directly. Fixture 4212 (`o.in.vals[K]`).
+        if let ExprKind::Member { kind: crate::ast::MemberKind::Dot, .. } = &array.kind
+            && let Some((struct_name, field_off_i32, field_ty)) =
+                self.try_lvalue_chain_addr(array)
+            && self.locals.has(&struct_name)
+            && let LocalLocation::Stack(struct_off) = self.locals.location_of(&struct_name)
+            && let Some(elem_ty) = field_ty.array_elem()
+            && let Some(k) = try_const_eval(index)
+        {
+            let elem_ty = elem_ty.clone();
+            let stride = i32::from(elem_ty.size_bytes());
+            let total_off = field_off_i32.wrapping_add((k as i32).wrapping_mul(stride));
+            let off = struct_off + i16::try_from(total_off).unwrap_or(i16::MAX);
+            let addr = bp_addr(off);
+            if elem_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.emit_widen_al(&elem_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+            return;
+        }
         if let ExprKind::Member { kind: crate::ast::MemberKind::Dot, .. } = &array.kind
             && let Some((struct_name, field_off_i32, field_ty)) =
                 self.try_lvalue_chain_addr(array)

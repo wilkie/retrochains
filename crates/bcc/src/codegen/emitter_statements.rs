@@ -75,9 +75,9 @@ impl<'a> super::FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_array_compound_assign(array, indices, *op, value, *from_postfix);
             }
-            StmtKind::MemberArrayAssign { base, field, indices, value } => {
+            StmtKind::MemberArrayAssign { lvalue, indices, value } => {
                 self.advance_to_stmt_line(stmt);
-                self.emit_member_array_assign(base, field, indices, value);
+                self.emit_member_array_assign(lvalue, indices, value);
             }
             StmtKind::DerefAssign { target, value } => {
                 self.advance_to_stmt_line(stmt);

@@ -1198,6 +1198,20 @@ fn body_has_call(body: &[Stmt]) -> bool {
 /// `<ident> + <constant>` or `<ident> - <constant>` — return the
 /// ident's name. Otherwise `None`. Used to decide whether `*<e>`
 /// should give the pointer name the enregistration bonus.
+/// Walk a `.`/`[]`-chain lvalue (`o.in.vals`, `b.data[i]`, …) down to
+/// the root identifier. Returns `None` if the chain doesn't bottom out
+/// at a bare `Ident` (e.g. it roots at an arrow-deref or a call).
+fn chain_root_ident(e: &Expr) -> Option<&str> {
+    match &e.kind {
+        ExprKind::Ident(name) => Some(name.as_str()),
+        ExprKind::ArrayIndex { array, .. } => chain_root_ident(array),
+        ExprKind::Member { base, kind: crate::ast::MemberKind::Dot, .. } => {
+            chain_root_ident(base)
+        }
+        _ => None,
+    }
+}
+
 fn direct_deref_target(e: &Expr) -> Option<String> {
     use crate::ast::BinOp;
     match &e.kind {
@@ -3821,10 +3835,15 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
             count_uses_expr(value, counts);
         }
-        StmtKind::MemberArrayAssign { base, indices, value, .. } => {
-            // `b.data[i] = v;` — same shape as ArrayAssign over `b`'s
-            // storage. Fixture 497.
-            *counts.entry(base.clone()).or_insert(0) += 2;
+        StmtKind::MemberArrayAssign { lvalue, indices, value } => {
+            // `b.data[i] = v;` / `o.in.vals[i] = v;` — same shape as
+            // ArrayAssign over the root struct's storage. Fixtures 497,
+            // 4212.
+            if let Some(root) = chain_root_ident(lvalue) {
+                *counts.entry(root.to_owned()).or_insert(0) += 2;
+            } else {
+                count_uses_expr(lvalue, counts);
+            }
             for ix in indices {
                 count_uses_expr(ix, counts);
             }

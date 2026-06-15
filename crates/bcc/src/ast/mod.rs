@@ -163,8 +163,12 @@ pub enum StmtKind {
     /// or stack offset, then adds the field offset and constant index
     /// to land at a single memory destination. Fixture 497.
     MemberArrayAssign {
-        base: String,
-        field: String,
+        /// The member-access array expression being assigned through,
+        /// e.g. `b.data` for `b.data[i] = v` or `o.in.vals` for the
+        /// nested `o.in.vals[K] = v`. Codegen folds the whole `.`-chain
+        /// to (root-ident, byte-offset, array-leaf-type) via
+        /// `try_lvalue_chain_addr`.
+        lvalue: Expr,
         indices: Vec<Expr>,
         value: Expr,
     },

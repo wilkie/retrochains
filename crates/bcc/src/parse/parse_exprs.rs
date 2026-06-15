@@ -213,7 +213,7 @@ impl Parser {
                 let lv_span_start = expr.span.start;
                 let mut indices: Vec<Expr> = Vec::new();
                 let mut cur = expr;
-                let root_kind;
+                let root_lvalue;
                 loop {
                     match cur.kind {
                         ExprKind::ArrayIndex { array, index } => {
@@ -221,25 +221,27 @@ impl Parser {
                             cur = *array;
                         }
                         _ => {
-                            root_kind = cur.kind;
+                            root_lvalue = cur;
                             break;
                         }
                     }
                 }
                 indices.reverse();
-                match root_kind {
-                    ExprKind::Ident(array) => StmtKind::ArrayAssign { array, indices, value },
-                    ExprKind::Member {
-                        base,
-                        field,
-                        kind: crate::ast::MemberKind::Dot,
-                    } => {
-                        let ExprKind::Ident(base_name) = base.kind else {
-                            return Err(ParseError::Unsupported { offset: base.span.start });
-                        };
+                match &root_lvalue.kind {
+                    ExprKind::Ident(array) => StmtKind::ArrayAssign {
+                        array: array.clone(),
+                        indices,
+                        value,
+                    },
+                    // A `.`-chain root (`b.data`, `o.in.vals`, …). The
+                    // whole chain is folded by codegen via
+                    // `try_lvalue_chain_addr`; we just carry the lvalue
+                    // expression through. The innermost base must
+                    // ultimately bottom out at an Ident, which the
+                    // resolver enforces.
+                    ExprKind::Member { kind: crate::ast::MemberKind::Dot, .. } => {
                         StmtKind::MemberArrayAssign {
-                            base: base_name,
-                            field,
+                            lvalue: root_lvalue,
                             indices,
                             value,
                         }

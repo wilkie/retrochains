@@ -1202,25 +1202,22 @@ impl<'a> super::FunctionEmitter<'a> {
     /// emit one `mov <width> ptr <dest>, <imm>`. Fixture 497.
     pub(crate) fn emit_member_array_assign(
         &mut self,
-        base: &str,
-        field: &str,
+        lvalue: &Expr,
         indices: &[Expr],
         value: &Expr,
     ) {
-        let base_ty = if self.globals.contains(base) {
-            self.globals.type_of(base).unwrap().clone()
-        } else {
-            self.locals.type_of(base).clone()
-        };
-        let (field_off, field_ty) = base_ty
-            .field(field)
-            .unwrap_or_else(|| panic!("`{base}.{field}[…]`: no such field in {base_ty:?}"));
+        // Fold the `.`-chain (`b.data`, `o.in.vals`, …) to the root
+        // ident, the accumulated byte offset of the array field, and
+        // the array's type. Then apply the constant subscripts.
+        let (base, field_off_i32, field_ty) = self
+            .try_lvalue_chain_addr(lvalue)
+            .unwrap_or_else(|| panic!("unsupported struct-field array lvalue: {lvalue:?}"));
         // Walk through array dimensions matching the index count.
         let mut elem_ty = field_ty;
-        let mut total_off = u32::from(field_off);
+        let mut total_off = field_off_i32 as u32;
         for ix in indices {
             let Type::Array { elem, .. } = elem_ty else {
-                panic!("`{base}.{field}` indexed but not array");
+                panic!("`{base}` indexed but not array");
             };
             let stride = u32::from(elem.size_bytes());
             let k = try_const_eval(ix)
@@ -1228,6 +1225,7 @@ impl<'a> super::FunctionEmitter<'a> {
             total_off = total_off.checked_add((k as u32).wrapping_mul(stride)).unwrap();
             elem_ty = *elem;
         }
+        let base = base.as_str();
         let dest = if self.globals.contains(base) {
             if total_off == 0 {
                 format!("DGROUP:_{base}")
