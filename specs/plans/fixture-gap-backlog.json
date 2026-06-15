@@ -1,0 +1,132 @@
+[
+ {
+  "slug": "goto-out-of-nested-loops",
+  "area": "control-flow",
+  "sub": "loops",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "int main(void) {\n  int i;\n  int j;\n  int found;\n  found = 0;\n  for (i = 0; i < 5; i = i + 1) {\n    for (j = 0; j < 5; j = j + 1) {\n      if (i * j == 6) {\n        found = i * 10 + j;\n        goto out;\n      }\n    }\n  }\nout:\n  return found;\n}\n",
+  "notes": "Both oracles compiled (exit 0). Ours BCC: match. Ours MSC: MISMATCH HELLO.OBJ size 331 (expected) -> 333 (ours), differing sha256. goto breaking out of nested for-loops yields 2 extra bytes in our MSC OBJ. Dir removed."
+ },
+ {
+  "slug": "3d-array-triple-loop-sum",
+  "area": "arrays",
+  "sub": "multidim",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "int cube[2][2][2] = {\n  { {1, 2}, {3, 4} },\n  { {5, 6}, {7, 8} }\n};\nint main(void) {\n  int i;\n  int j;\n  int k;\n  int sum;\n  sum = 0;\n  for (i = 0; i < 2; i++) {\n    for (j = 0; j < 2; j++) {\n      for (k = 0; k < 2; k++) {\n        sum += cube[i][j][k];\n      }\n    }\n  }\n  return sum;\n}\n",
+  "notes": "Both oracles compiled (exit 0). Ours BCC: PANIC at crates/bcc/src/codegen/emitter_assign_1.rs:1684 'compound assignment on stack-resident sum not yet supported (no fixture)'. Ours MSC: error 'unsupported source shape: runtime index on a >2-D array not yet supported'. Two distinct unimplemented featu"
+ },
+ {
+  "slug": "2d-row-decay-to-int-ptr",
+  "area": "arrays",
+  "sub": "multidim",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "int main(void) {\n  int m[3][2];\n  int *p;\n  int i;\n  int sum;\n  m[0][0] = 1; m[0][1] = 2;\n  m[1][0] = 3; m[1][1] = 4;\n  m[2][0] = 5; m[2][1] = 6;\n  p = m[1];\n  sum = 0;\n  for (i = 0; i < 2; i++) {\n    sum += p[i];\n  }\n  return sum;\n}\n",
+  "notes": "Both oracles compiled (exit 0). BCC ours MISMATCH: OBJ same size (214), first byte differs at offset 190 - local frame slot offsets differ (expected stores into bp-0e/f2, ours uses f4/f6), i.e. our frame layout assigns different slot offsets for the m[3][2] array vs the int*/int locals. MSC ours MIS"
+ },
+ {
+  "slug": "2d-omitted-dim-param-rowsum",
+  "area": "arrays",
+  "sub": "multidim",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "int rowsums(int a[][3], int rows) {\n  int i;\n  int j;\n  int total;\n  total = 0;\n  for (i = 0; i < rows; i++) {\n    for (j = 0; j < 3; j++) {\n      total += a[i][j];\n    }\n  }\n  return total;\n}\nint main(void) {\n  int m[2][3];\n  m[0][0] = 1; m[0][1] = 2; m[0][2] = 3;\n  m[1][0] = 4; m[1][1] = 5; m[1][2] = 6;\n  return rowsums(m, 2);\n}\n",
+  "notes": "Both oracles compiled (exit 0). BCC ours PANICS (exit 101, no OBJ): crates/bcc/src/codegen/emitter_arrays_1.rs:889 'multi-level index through a pointer not yet supported (no fixture)' - triggered by a[i][j] on the int a[][3] param (a decays to int(*)[3], so a[i][j] is a two-level index through a poi"
+ },
+ {
+  "slug": "signed-bitfield-high-offset",
+  "area": "aggregates",
+  "sub": "bitfields",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "struct S {\n  unsigned pad : 4;\n  int val : 4;\n};\nint main(void) {\n  struct S s;\n  s.pad = 9;\n  s.val = -2;\n  return s.val + (int)s.pad;\n}\n",
+  "notes": "Both oracles compiled (exit 0). BCC ours MATCHES (byte-exact). MSC ours MISMATCH: OBJ size 289 (expected) -> 291 (ours), 2 bytes larger; size differs so no single first-diff offset reported. The signed bitfield at bit-offset 4 (int val:4) sign-extraction codegen differs in length on MSC. Single-comp"
+ },
+ {
+  "slug": "bitfield-normal-adjacent-rw",
+  "area": "aggregates",
+  "sub": "bitfields",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "struct Pkt {\n  unsigned flag : 1;\n  unsigned tag : 7;\n  unsigned char raw;\n};\nint main(void) {\n  struct Pkt p;\n  p.flag = 1;\n  p.tag = 100;\n  p.raw = 200;\n  p.tag = p.tag + p.flag;\n  return (int)p.tag + (int)p.raw - (int)p.flag;\n}\n",
+  "notes": "Both oracles compiled (exit 0). Both ours FAIL. BCC: OBJ size 285(expected) -> 289(ours), full sha mismatch. MSC: OBJ size 315(expected) -> 335(ours), full sha mismatch. Bitfield read-modify-write of adjacent bitfields (flag:1, tag:7) plus mixing with a same-word unsigned char member is not yet matc"
+ },
+ {
+  "slug": "ptr-compare-walk",
+  "area": "pointers",
+  "sub": "arithmetic",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "int main(void)\n{\n  int a[6];\n  int *p;\n  int *q;\n  int count;\n  int i;\n\n  for (i = 0; i < 6; i++) {\n    a[i] = i * i;\n  }\n  p = &a[1];\n  q = &a[5];\n  count = 0;\n  while (p < q) {\n    count = count + *p;\n    p++;\n  }\n  return count;\n}\n",
+  "notes": "Both oracles compiled (exit 0). MSC ours byte-exact match. BCC ours MISMATCH: HELLO.OBJ first byte differs at offset 189. expected '33 f6 ... d1 e3' (uses SI: 33 f6 = xor si,si; 8b de = mov bx,si), actual '33 ff ... d1 e3' (uses DI: 33 ff = xor di,di; 8b df = mov bx,di). Register-allocation differen"
+ },
+ {
+  "slug": "int-pp-arith-walk",
+  "area": "pointers",
+  "sub": "arithmetic",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "int main(void)\n{\n  int x;\n  int y;\n  int z;\n  int *row[3];\n  int **pp;\n  int sum;\n  int i;\n\n  x = 5;\n  y = 7;\n  z = 9;\n  row[0] = &x;\n  row[1] = &y;\n  row[2] = &z;\n  pp = row;\n  sum = 0;\n  for (i = 0; i < 3; i++) {\n    sum = sum + **pp;\n    pp++;\n  }\n  return sum;\n}\n",
+  "notes": "Both oracles compiled (exit 0). BCC ours: exit_code 101, HELLO.OBJ missing, stderr len 0->346 (our bcc errors out on int** double-deref / pointer-array init). MSC ours: MISMATCH at offset 271: expected '8d 46 f6' (lea ax,[bp-0a] for &z store into row[2]), actual '8b 46 f6' (mov ax,[bp-0a]) -- we emi"
+ },
+ {
+  "slug": "macro-array-dim-arith",
+  "area": "preprocessor",
+  "sub": "macros",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "#define ROWS 4\n#define COLS 3\n#define SIZE (ROWS * COLS)\nint main(void) {\n  int grid[ROWS][COLS];\n  int i;\n  int sum;\n  for (i = 0; i < SIZE; i++) {\n    grid[i / COLS][i % COLS] = i;\n  }\n  sum = 0;\n  for (i = 0; i < ROWS; i++) {\n    sum += grid[i][COLS - 1];\n  }\n  return sum + SIZE;\n}\n",
+  "notes": "Both oracles compiled (exit 0). Both our compilers error: BCC ours exit_code 101, HELLO.OBJ missing, stderr len 0->227; MSC ours exit_code 101, HELLO.OBJ missing, stderr len 0->205. Root cause is the 2D array declaration int grid[ROWS][COLS] -- multidimensional arrays are unsupported in both our BCC"
+ },
+ {
+  "slug": "macro-stringize-len-arith",
+  "area": "preprocessor",
+  "sub": "macros",
+  "needs": [
+   "bcc",
+   "msc"
+  ],
+  "c_source": "#define STR(x) #x\n#define LABEL(x) STR(x)\n#define TAG abcde\nint main(void) {\n  static char buf[] = LABEL(TAG);\n  int n;\n  n = 0;\n  while (buf[n] != 0) {\n    n++;\n  }\n  return n + buf[0];\n}\n",
+  "notes": "Both oracles compile (bcc exit 0, msc exit 0) but BOTH ours mismatch. BCC: MISMATCH, OBJ sizes equal, first byte differs at offset 124 (expected ...28 1f 00 02 03 01 14 98... vs actual ...28 21 00 02 03 01 12 98...). MSC: MISMATCH, OBJ size 304 -> 312 (+8 bytes, ours larger). Source exercises indire"
+ },
+ {
+  "slug": "two-ptr-max-gt-cmp-msc-half",
+  "area": "pointers",
+  "sub": "arithmetic",
+  "needs": [
+   "msc"
+  ],
+  "c_source": "int a[6] = { 4, 9, 2, 8, 5, 1 };\n\nint main(void) {\n  int *p;\n  int *best;\n  best = a;\n  for (p = a + 1; p < a + 6; p++) {\n    if (*p > *best) {\n      best = p;\n    }\n  }\n  return (int)(best - a);\n}\n",
+  "notes": "Sibling already landed as a single-compiler fixture; MSC half still open. Both oracles compile (exit 0). The fixture exercises a for-loop with a global-array pointer compare `p < a + 6`, conditional best-update, and pointer-difference return `(int)(best - a)`.\n\nBCC HALF — r"
+ },
+ {
+  "slug": "stringize-len-array-dim-bcc-half",
+  "area": "preprocessor",
+  "sub": "macros",
+  "needs": [
+   "bcc"
+  ],
+  "c_source": "#define STR(x) #x\n#define WORD STR(hello)\nint main(void) {\n  char buf[sizeof WORD];\n  int i;\n  int sum;\n  for (i = 0; i < (int)(sizeof WORD); i++) {\n    buf[i] = (char)('A' + i);\n  }\n  sum = 0;\n  sum = sum + buf[0];\n  sum = sum + (int)(sizeof buf);\n  return sum - 'A';\n}\n",
+  "notes": "Sibling already landed as a single-compiler fixture; BCC half still open. Both oracles compile. The fixture has THREE independent BCC mismatches and ONE MSC mismatch.\n\nMSC (TRACTABLE, solved during the run but reverted): the only diff was `buf[i] = (char)('A' + i)`. The `(c"
+ }
+]
