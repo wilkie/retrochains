@@ -41,6 +41,9 @@ subdirectory. The order roughly follows the compilation pipeline:
 - [`tlink/`](tlink/) — the linker (`TLINK.EXE`). The OMF records it
   consumes, segment ordering, fixups, and the MZ executable (and
   eventually NewExe) it emits.
+- [`linkers/`](linkers/) — **cross-linker** discoveries. `DIFFERENCES.md`
+  catalogs Borland TLINK vs Microsoft LINK MZ output — the EXE-level
+  toolchain fingerprints feeding compiler-aware decompilation.
 
 ## Shared formats
 
