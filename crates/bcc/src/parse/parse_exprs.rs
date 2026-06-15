@@ -900,6 +900,44 @@ impl Parser {
                         span,
                     };
                 }
+                // `(*ops[0])(args)` — explicit-deref call through a
+                // function pointer stored in an array element or a
+                // struct field. `*expr` and `expr` are equivalent
+                // when `expr` is a function pointer, so collapse the
+                // Deref and route to a CallVia on the underlying
+                // lvalue (ArrayIndex / Member). Mirrors the implicit
+                // `ops[0](args)` form handled above. Fixture 4199.
+                TokenKind::LParen
+                    if matches!(
+                        &e.kind,
+                        ExprKind::Deref(inner)
+                            if matches!(
+                                inner.kind,
+                                ExprKind::ArrayIndex { .. }
+                                    | ExprKind::Member { .. }
+                            )
+                    ) =>
+                {
+                    let ExprKind::Deref(inner) = e.kind else { unreachable!() };
+                    self.bump();
+                    let mut args: Vec<Expr> = Vec::new();
+                    if !matches!(self.peek().kind, TokenKind::RParen) {
+                        loop {
+                            args.push(self.parse_for_clause_expr()?);
+                            if matches!(self.peek().kind, TokenKind::Comma) {
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect(&TokenKind::RParen)?;
+                    let span = Span::new(inner.span.start, close.span.end);
+                    e = Expr {
+                        kind: ExprKind::CallVia { addr: inner, args },
+                        span,
+                    };
+                }
                 _ => break,
             }
         }

@@ -5655,8 +5655,27 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     Expr::Global(g) => p.global_names.get(*g).is_some_and(|n| p.fn_ptr_globals.contains(n)),
                     _ => false,
                 };
+                // `(*ops[i])(args)` — explicit deref of a fn-ptr ARRAY element.
+                // The element is itself the function pointer, so derefing it is a
+                // no-op for the call: route directly to a CallPtr on the element
+                // lvalue, exactly as the implicit `ops[i](args)` form does. A
+                // fn-ptr array local has 2-byte elements with no pointee size
+                // (size==2, pointee_size==0); a fn-ptr array global stores 2-byte
+                // pointer elements (is_pointer && array_len>1). Fixture 4199.
+                let is_fnptr_array_elem = |e: &Expr| match e {
+                    Expr::LocalIndex { local, .. } => p
+                        .local_specs
+                        .get(*local)
+                        .is_some_and(|s| s.size == 2 && s.pointee_size == 0 && s.array_len > 1),
+                    Expr::Index { array, .. } => p
+                        .globals
+                        .get(*array)
+                        .is_some_and(|g| g.is_pointer && g.array_len > 1 && g.element_size == 2),
+                    _ => false,
+                };
                 let target = match &inner {
                     Expr::DerefWord { ptr } | Expr::DerefByte { ptr } if is_fnptr(ptr) => Some((**ptr).clone()),
+                    Expr::DerefWord { ptr } | Expr::DerefByte { ptr } if is_fnptr_array_elem(ptr) => Some((**ptr).clone()),
                     e if is_fnptr(e) => Some(e.clone()),
                     _ => None,
                 };
