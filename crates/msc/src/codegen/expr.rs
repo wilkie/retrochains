@@ -3840,10 +3840,14 @@ pub(crate) fn bf_read_into_cx_masked(base: BitBase, byte_off: u16, bit_off: u8, 
         let mask = (1u32 << bit_width) - 1;
         let (hi, lo) = ((mask >> 8) & 0xFF, mask & 0xFF);
         if lo == 0xFF {
+            // Low byte is a no-op (all ones) → mask only the high byte
+            // (`and ch, hi`). Fixture 2105 (`unsigned val : 14`, mask 0x3FFF).
             out.extend_from_slice(&[0x80, 0xE5, hi as u8]); // and ch, hi
-        } else if hi == 0 {
-            out.extend_from_slice(&[0x80, 0xE1, lo as u8]); // and cl, lo
         } else {
+            // Any other mask uses the full word form `and cx, mask` — matching
+            // the direct `Expr::BitField` reader (which always emits the word
+            // `and ax, mask`). A sub-byte field does NOT collapse to `and cl`.
+            // Fixture 4219 (`signed int rest : 7`, mask 0x7F → `and cx,0x7f`).
             out.push(0x81); out.push(0xE1); out.extend_from_slice(&(mask as u16).to_le_bytes()); // and cx,mask
         }
     }
@@ -4640,17 +4644,24 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x03, 0x07]); // add ax,[bx]
         return;
     }
-    // `<bit-field> * K`: load K into CX, read the bit-field into AX (reusing the
-    // unit left live in AX by a preceding store to the same unit), then `imul cx`.
-    // Fixture 2105 (`(int)fl.f1 * 100`).
+    // `<bit-field> * K`: read the bit-field into AX, then multiply. A small K
+    // (≤ 15) strength-reduces to a shift-and-add chain like every other word
+    // `* K` (fixture 4219 `s.flag * 10` → `mov cx,ax; shl ax,1; shl ax,1;
+    // add ax,cx; shl ax,1`); a larger K loads into CX and `imul cx` instead
+    // (fixture 2105 `(int)fl.f1 * 100`).
     if matches!(op, BinOp::Mul)
         && matches!(left, Expr::BitField { .. })
         && let Expr::IntLit(k) = right
     {
-        let kw = (*k as u32 & 0xFFFF) as u16;
-        out.push(0xB9); out.extend_from_slice(&kw.to_le_bytes()); // mov cx,K
-        emit_expr_to_ax(left, locals, out, fixups);               // bit-field → AX
-        out.extend_from_slice(&[0xF7, 0xE9]);                     // imul cx
+        if *k > 0 && *k <= 15 {
+            emit_expr_to_ax(left, locals, out, fixups);           // bit-field → AX
+            emit_imm_op(BinOp::Mul, *k, out);                     // shift-and-add ×K
+        } else {
+            let kw = (*k as u32 & 0xFFFF) as u16;
+            out.push(0xB9); out.extend_from_slice(&kw.to_le_bytes()); // mov cx,K
+            emit_expr_to_ax(left, locals, out, fixups);           // bit-field → AX
+            out.extend_from_slice(&[0xF7, 0xE9]);                 // imul cx
+        }
         return;
     }
     // `x * 256` over a WORD memory operand: a left-shift by 8 just moves the
