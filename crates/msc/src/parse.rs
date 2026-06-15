@@ -5215,13 +5215,16 @@ fn deref_local_offset(e: &Expr) -> Option<(usize, i32)> {
         _ => None,
     }
 }
-/// MSC evaluates the `(*(p+J))[K]` operands (pointer-arithmetic derefs) of an
-/// add-chain BEFORE the bare `(*p)[K]` operand, regardless of source order — the
-/// bare deref (offset within one row, `< stride`) is always emitted last. Both
-/// forms parse to `DerefWord{ Local(p) + off }`, distinguishable only here by the
-/// row stride. Reorder a pure add-chain of same-pointer-array-local derefs:
-/// arithmetic operands (off `< 0` or `>= stride`) keep source order first, bare
-/// operands (`0 <= off < stride`) move last. Fixture 2329.
+/// MSC reorders the operands of a pure add-chain of derefs through the SAME
+/// pointer-to-array local (`int (*p)[N]`). Both `(*(p+J))[K]` and `(*p)[K]` parse
+/// to `DerefWord{ Local(p) + off }`, distinguishable only here by the row stride.
+/// The emission order has three stable buckets (each in source order):
+///   1. inter-row derefs — `off < 0` or `off >= stride` (a different array row)
+///   2. intra-row derefs at a NON-zero offset — `0 < off < stride`
+///   3. the bare `*p` deref (`off == 0`, the literal `(*p)[0]`) — emitted LAST
+/// So `(*(p+1))[2] + (*p)[1]` keeps the inter-row term first (2329), and within a
+/// single row `(*p)[0] + (*p)[3]` swaps to load `(*p)[3]` first then `(*p)[0]` —
+/// only the exactly-offset-0 term sinks to the end (fixture 4211).
 fn reorder_ptr_array_deref_chain(p: &Parser<'_>, e: Expr) -> Expr {
     if !matches!(e, Expr::BinOp { op: BinOp::Add, .. }) { return e; }
     fn flat(e: Expr, out: &mut Vec<Expr>) {
@@ -5235,9 +5238,10 @@ fn reorder_ptr_array_deref_chain(p: &Parser<'_>, e: Expr) -> Expr {
     let mut terms = Vec::new();
     flat(e, &mut terms);
     // Classify every term; bail (rebuild in source order) if any doesn't qualify
-    // as a deref of the SAME pointer-to-array local.
+    // as a deref of the SAME pointer-to-array local. `bucket`: 0 = inter-row,
+    // 1 = intra-row non-zero offset, 2 = bare `*p` (offset exactly 0).
     let mut base: Option<usize> = None;
-    let mut is_bare: Vec<bool> = Vec::with_capacity(terms.len());
+    let mut bucket: Vec<u8> = Vec::with_capacity(terms.len());
     for t in &terms {
         let Some((li, off)) = deref_local_offset(t) else { return rebuild_add(terms); };
         let Some(name) = p.local_names.get(li) else { return rebuild_add(terms); };
@@ -5247,16 +5251,16 @@ fn reorder_ptr_array_deref_chain(p: &Parser<'_>, e: Expr) -> Expr {
             Some(b) if b != li => return rebuild_add(terms),
             _ => {}
         }
-        is_bare.push(off >= 0 && off < stride as i32);
+        bucket.push(if off == 0 { 2 } else if off > 0 && off < stride as i32 { 1 } else { 0 });
     }
-    // Stable partition: arithmetic derefs first (source order), bare derefs last.
-    let mut arith = Vec::new();
-    let mut bare = Vec::new();
-    for (t, b) in terms.into_iter().zip(is_bare) {
-        if b { bare.push(t); } else { arith.push(t); }
+    // Stable partition into the three buckets, concatenated in bucket order.
+    let mut ordered = Vec::with_capacity(terms.len());
+    for b in 0u8..=2 {
+        for (t, &tb) in terms.iter().zip(bucket.iter()) {
+            if tb == b { ordered.push(t.clone()); }
+        }
     }
-    arith.extend(bare);
-    rebuild_add(arith)
+    rebuild_add(ordered)
 }
 fn rebuild_add(terms: Vec<Expr>) -> Expr {
     let mut it = terms.into_iter();

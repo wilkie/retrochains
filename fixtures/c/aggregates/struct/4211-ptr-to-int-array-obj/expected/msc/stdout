@@ -1,0 +1,3 @@
+HELLO.C
+HELLO.C(11) : warning C4046: '&' on function/array, ignored
+HELLO.C(11) : warning C4047: '=' : different levels of indirection
