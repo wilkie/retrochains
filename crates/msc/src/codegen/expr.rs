@@ -2401,6 +2401,49 @@ fn emit_unsigned_byte_to_cx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fi
     }
     out.extend_from_slice(&[0x2A, 0xED]); // sub ch,ch
 }
+/// `<unsigned-char> << 8` → returns the inner byte operand. MSC realizes a byte
+/// shifted left by exactly 8 by loading it straight into AH (the high byte) and
+/// zeroing AL — no actual shift. Fixture 4197 (`(u.b[1] << 8) | u.b[0]`).
+fn unsigned_byte_shl8<'a>(e: &'a Expr, locals: &Locals<'_>) -> Option<&'a Expr> {
+    if let Expr::BinOp { op: BinOp::Shl, left, right } = e
+        && right.fold(locals.inits) == Some(8)
+        && unsigned_byte_load(left, locals)
+    {
+        Some(left)
+    } else {
+        None
+    }
+}
+/// Load an unsigned-char byte operand into AH and zero AL (`mov ah,<byte>;
+/// sub al,al`) — i.e. realize `<byte> << 8` in AX without a shift. Mirrors
+/// `emit_unsigned_byte_to_cx` but targets the AH register (ModR/M reg=100).
+fn emit_unsigned_byte_to_ah(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match e {
+        Expr::GlobalField { global, byte_off, .. } => {
+            out.push(0x8A); out.push(0x26); // mov ah,[moffs16]
+            let bo = out.len() - 1;
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global } });
+        }
+        Expr::Global(g) => {
+            out.push(0x8A); out.push(0x26);
+            let bo = out.len() - 1;
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+        }
+        Expr::LocalField { local, byte_off, .. } => {
+            let d = locals.disp(*local) + *byte_off as i16;
+            out.push(0x8A); out.push(bp_modrm(0x66, d)); push_bp_disp(out, d);
+        }
+        Expr::Local(i) => {
+            let d = locals.disp(*i);
+            out.push(0x8A); out.push(bp_modrm(0x66, d)); push_bp_disp(out, d);
+        }
+        Expr::Param(i) => { out.extend_from_slice(&[0x8A, 0x66, param_disp(*i) as u8]); }
+        _ => unreachable!("emit_unsigned_byte_to_ah: unexpected operand"),
+    }
+    out.extend_from_slice(&[0x2A, 0xC0]); // sub al,al
+}
 /// `*p` where `p` is a near char-pointer PARAM or LOCAL → the pointer's bp-disp
 /// (so the `mov bx,[p]` load can be scheduled separately from the deref).
 fn char_deref_ptr_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
@@ -4697,6 +4740,23 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2A, 0xED]);                                 // sub ch,ch
         let opc = match op {
             BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
+            BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
+        };
+        out.push(opc); out.push(0xC1); // op ax, cx
+        return;
+    }
+    // `(<unsigned-byte> << 8) OP <unsigned-byte>` — assemble a 16-bit word from
+    // two bytes. MSC places the high byte directly into AH (`mov ah,<hi>; sub
+    // al,al`, no shift), zero-extends the low byte into CX (`mov cl,<lo>; sub
+    // ch,ch`), then `op ax,cx`. Fixture 4197 (`(u.b[1] << 8) | u.b[0]`).
+    if matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(hi) = unsigned_byte_shl8(left, locals)
+        && unsigned_byte_load(right, locals)
+    {
+        emit_unsigned_byte_to_ah(hi, locals, out, fixups);    // mov ah,..; sub al,al
+        emit_unsigned_byte_to_cx(right, locals, out, fixups); // mov cl,..; sub ch,ch
+        let opc = match op {
+            BinOp::Add => 0x03, BinOp::BitAnd => 0x23,
             BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
         };
         out.push(opc); out.push(0xC1); // op ax, cx

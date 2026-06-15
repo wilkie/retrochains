@@ -1570,6 +1570,12 @@ pub(crate) fn emit_instr(
             // Same shape as `AddDxGroupSym`; opcode 2B (SUB r16,r/m16).
             emit_group_sym_lea(&[0x2B, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
+        Instr::SubReg16GroupSym { reg, group, symbol, offset } => {
+            // `sub <reg16>,word ptr <group>:<sym>[+offset]` → 2B
+            // (mod=00 reg=<r> r/m=110) lo hi. AX dst gives ModR/M 06.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x2B, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
         Instr::SbbAxGroupSym { group, symbol, offset } => {
             // `sbb ax,word ptr <group>:<symbol>` → 1B 06 lo hi.
             // Companion to AdcAxGroupSym; opcode 1B (SBB r16,r/m16).

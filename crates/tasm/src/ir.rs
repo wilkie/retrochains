@@ -1187,6 +1187,12 @@ pub enum Instr {
     /// with DX dst (`2B 16 lo hi`). Long-to-long subtraction's low-
     /// half subtract (fixture 220).
     SubDxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `sub <reg16>,word ptr <group>:<symbol>[+<offset>]` — SUB
+    /// r16,r/m16 (`2B (mod=00 reg=<r> r/m=110) lo hi`). Memory-direct
+    /// subtract from a data-segment global into any register. The AX
+    /// dst form (ModR/M `06`) appears for `r - g.member` (fixture 4197,
+    /// union-bytes-reassemble-int). Mirror of `AddReg16GroupSym`.
+    SubReg16GroupSym { reg: Reg16, group: String, symbol: String, offset: i16 },
     /// `sbb ax,word ptr <group>:<symbol>[+<offset>]` — SBB r16,r/m16
     /// with AX dst (`1B 06 lo hi`). High-half subtract-with-borrow
     /// (fixture 220).

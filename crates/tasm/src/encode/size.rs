@@ -210,6 +210,7 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         | Instr::SbbGroupSymDx { .. }
         | Instr::AdcDxGroupSym { .. }
         | Instr::SubDxGroupSym { .. }
+        | Instr::SubReg16GroupSym { .. }
         | Instr::SbbAxGroupSym { .. }
         | Instr::AndDxGroupSym { .. }
         | Instr::AndAxGroupSym { .. }

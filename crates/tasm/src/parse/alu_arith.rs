@@ -30,6 +30,18 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(disp) = parse_word_di_disp(rhs) {
             return Ok(Instr::SubAxDiDisp { disp });
         }
+        // `sub ax,word ptr <group>:<sym>[+N]` — memory-direct subtract
+        // from a data-segment global into AX (`2B 06 lo hi`). Mirror of
+        // `AddAxGroupSym`. Fixture 4197 (`r - u.i`).
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SubReg16GroupSym {
+                reg: Reg16::Ax,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
     }
     // `sub al,imm8` — AL-specific 2-byte encoding (companion to
     // `AddAlImm8`).
@@ -71,6 +83,21 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             if let Some(offset) = parse_bp_relative(rhs) {
                 return Ok(Instr::SubReg16BpRel { reg, offset });
             }
+        }
+        // `sub <reg16>, word ptr <group>:<sym>[+N]` — memory-direct
+        // subtract from a global into a non-AX, non-DX register. AX is
+        // handled above; DX keeps its dedicated `SubDxGroupSym` (same
+        // bytes). Mirror of `AddReg16GroupSym`.
+        if !matches!(reg, Reg16::Ax | Reg16::Dx)
+            && let Some((group, symbol)) = parse_group_symbol(rhs)
+        {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SubReg16GroupSym {
+                reg,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
         }
     }
     // `sub word ptr <group>:<sym>[+N], <reg16>` — fixture 571 sibling.

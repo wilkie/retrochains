@@ -1242,9 +1242,33 @@ impl<'a> super::FunctionEmitter<'a> {
                                 );
                                 return;
                             }
-                            if let (Some(l_addr), Some(r_addr)) = (l_uchar, r_uchar) {
+                            if let (Some(l_addr), Some(r_addr)) = (l_uchar.as_ref(), r_uchar.as_ref()) {
                                 let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
                                 self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                                let _ = write!(self.out, "\tmov\tdl,byte ptr {r_addr}\r\n");
+                                self.out.extend_from_slice(b"\tmov\tdh,0\r\n");
+                                emit_op_with_source(
+                                    self.out,
+                                    *op,
+                                    &OperandSource::Reg(Reg::Dx),
+                                    unsigned,
+                                );
+                                return;
+                            }
+                            // LHS is an AX-clobbering arithmetic expr
+                            // (e.g. a constant shift `(x << 8)`) and RHS
+                            // is a plain uchar lvalue. BCC computes LHS
+                            // into AX, then loads the RHS byte straight
+                            // into DX (`mov dl, ..; mov dh, 0`) and ORs/
+                            // adds with `<op> ax, dx`, sidestepping the
+                            // push/pop dance. Fixture 4197
+                            // (`(u.b[1] << 8) | u.b[0]`).
+                            if l_uchar.is_none()
+                                && let Some(r_addr) = r_uchar.as_ref()
+                                && matches!(&left.kind, ExprKind::BinOp { .. })
+                                && try_const_eval(left).is_none()
+                            {
+                                self.emit_expr_to_ax(left);
                                 let _ = write!(self.out, "\tmov\tdl,byte ptr {r_addr}\r\n");
                                 self.out.extend_from_slice(b"\tmov\tdh,0\r\n");
                                 emit_op_with_source(
