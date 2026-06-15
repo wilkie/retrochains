@@ -115,6 +115,53 @@ pub struct InstallRecipe {
     /// Files relocated within the tree after extraction.
     #[serde(default)]
     pub relocate: Vec<RelocateStep>,
+    /// Verbatim file copies out of the (uncompressed) floppy images. Used by
+    /// distributions whose media isn't archive-based (e.g. MS C 5.0).
+    #[serde(default)]
+    pub copy: Vec<CopyStep>,
+    /// Combined libraries built by running the vendor's `LIB.EXE` under DOSBox
+    /// (the only non-copy step the MS C installer performs).
+    #[serde(default)]
+    pub lib_build: Vec<LibBuildStep>,
+    /// Small files the installer generates rather than ships.
+    #[serde(default)]
+    pub write: Vec<WriteStep>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CopyStep {
+    /// Disk-image stem the files live on (e.g. `INCLIBSM`).
+    pub disk: String,
+    /// Subdir within that disk (default: the image root).
+    #[serde(default)]
+    pub from: String,
+    /// Destination subdir of `tree_root`.
+    pub into: String,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibBuildStep {
+    /// Tree subdir the build runs in (e.g. `LIB`); also where `base`, the
+    /// component libraries, and `output` reside.
+    pub dir: String,
+    /// Existing library copied to `output` as the starting point.
+    pub base: String,
+    /// Library to produce.
+    pub output: String,
+    /// `LIB.EXE` operations, e.g. `+LIBH.LIB +SLIBFP.LIB +87.LIB +GRAPHICS.LIB`.
+    pub ops: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteStep {
+    /// Tree-relative output path.
+    pub path: String,
+    /// Lines, joined with CRLF.
+    pub lines: Vec<String>,
+    /// Whether to append a trailing CRLF.
+    #[serde(default)]
+    pub trailing_newline: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -401,25 +448,32 @@ pub fn install_tree(
     unpacked_dir: &Path,
     staging: &Path,
 ) -> Result<(), ProvisionError> {
-    // 1. Pull every file out of the FAT12 floppy images into one flat dir.
+    // 1. Pull every file out of each FAT12 floppy image into `.media/<STEM>/`,
+    //    preserving subdirectories. Per-disk so `copy` steps can name a disk and
+    //    `extract`/`span` steps can search across disks for an archive.
     let media = staging.join(".media");
     if media.exists() {
         fs::remove_dir_all(&media)?;
     }
     fs::create_dir_all(&media)?;
     for img in disk_images(unpacked_dir)? {
-        extract_fat_image(&img, &media)?;
+        let stem = img
+            .file_stem()
+            .map_or_else(String::new, |s| s.to_string_lossy().to_ascii_uppercase());
+        let disk_dir = media.join(&stem);
+        fs::create_dir_all(&disk_dir)?;
+        extract_fat_image(&img, &disk_dir)?;
     }
 
     let root = staging.join(&recipe.tree_root);
     fs::create_dir_all(&root)?;
 
-    // 2. Plain archives.
+    // 2. Plain archives (search every disk for the named archive).
     for step in &recipe.extract {
         let dest = root.join(&step.into);
         fs::create_dir_all(&dest)?;
         for archive in &step.archives {
-            let path = require_archive(&media, archive)?;
+            let path = find_in_media(&media, archive)?;
             run_unzip(&path, &dest, &step.only)?;
         }
     }
@@ -430,8 +484,7 @@ pub fn install_tree(
         fs::create_dir_all(&dest)?;
         let mut joined = Vec::new();
         for part in &step.parts {
-            let path = require_archive(&media, part)?;
-            joined.extend(fs::read(&path)?);
+            joined.extend(fs::read(find_in_media(&media, part)?)?);
         }
         let cat = media.join("_span_cat.zip");
         let fixed = media.join("_span_fixed.zip");
@@ -440,7 +493,35 @@ pub fn install_tree(
         run_unzip(&fixed, &dest, &step.only)?;
     }
 
-    // 4. Relocations the installer performs after extraction.
+    // 4. Verbatim copies from a named disk's subdir (uncompressed media).
+    for step in &recipe.copy {
+        let src = media.join(&step.disk).join(&step.from);
+        let dest = root.join(&step.into);
+        fs::create_dir_all(&dest)?;
+        for file in &step.files {
+            fs::copy(src.join(file), dest.join(file))?;
+        }
+    }
+
+    // 5. Combined libraries built by the vendor LIB.EXE under DOSBox.
+    if !recipe.lib_build.is_empty() {
+        run_lib_builds(&recipe.lib_build, &root)?;
+    }
+
+    // 6. Files the installer generates rather than ships.
+    for step in &recipe.write {
+        let path = root.join(&step.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut content = step.lines.join("\r\n");
+        if step.trailing_newline {
+            content.push_str("\r\n");
+        }
+        fs::write(path, content)?;
+    }
+
+    // 7. Relocations the installer performs after extraction.
     for step in &recipe.relocate {
         let from = root.join(&step.from);
         let into = root.join(&step.into);
@@ -454,35 +535,53 @@ pub fn install_tree(
     Ok(())
 }
 
-/// Extract every regular file from a FAT12 floppy image into `dest` (flat —
-/// the install floppies have no subdirectories).
+/// Extract every regular file from a FAT12 floppy image into `dest`, recursing
+/// into subdirectories (MS C's floppies nest INCLUDE/, LIB/, etc.).
 fn extract_fat_image(img: &Path, dest: &Path) -> Result<(), ProvisionError> {
     let bytes = fs::read(img)?;
     let cursor = io::Cursor::new(bytes);
     let fs_img = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new())
         .map_err(|e| ProvisionError::FatImage(img.to_path_buf(), e.to_string()))?;
-    for entry in fs_img.root_dir().iter() {
-        let entry = entry.map_err(|e| ProvisionError::FatImage(img.to_path_buf(), e.to_string()))?;
-        if entry.is_dir() {
+    let err = |e: std::io::Error| ProvisionError::FatImage(img.to_path_buf(), e.to_string());
+    extract_fat_dir(&fs_img.root_dir(), dest, &err)
+}
+
+fn extract_fat_dir<T: fatfs::ReadWriteSeek>(
+    dir: &fatfs::Dir<'_, T>,
+    dest: &Path,
+    err: &impl Fn(std::io::Error) -> ProvisionError,
+) -> Result<(), ProvisionError> {
+    fs::create_dir_all(dest)?;
+    for entry in dir.iter() {
+        let entry = entry.map_err(err)?;
+        let name = entry.file_name();
+        if name == "." || name == ".." {
             continue;
         }
-        let name = entry.file_name();
-        let mut file = entry.to_file();
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut buf)
-            .map_err(|e| ProvisionError::FatImage(img.to_path_buf(), e.to_string()))?;
-        fs::write(dest.join(name), buf)?;
+        if entry.is_dir() {
+            extract_fat_dir(&entry.to_dir(), &dest.join(&name), err)?;
+        } else {
+            let mut file = entry.to_file();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut buf).map_err(err)?;
+            fs::write(dest.join(&name), buf)?;
+        }
     }
     Ok(())
 }
 
-fn require_archive(media: &Path, name: &str) -> Result<PathBuf, ProvisionError> {
-    let path = media.join(name);
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(ProvisionError::ArchiveMissing(name.to_string()))
+/// Find an archive by basename anywhere in the per-disk media tree.
+fn find_in_media(media: &Path, name: &str) -> Result<PathBuf, ProvisionError> {
+    for entry in fs::read_dir(media)? {
+        let disk = entry?.path();
+        if disk.is_dir() {
+            let candidate = disk.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
     }
+    Err(ProvisionError::ArchiveMissing(name.to_string()))
 }
 
 /// `unzip -o <archive> [members…] -d <dest>`.
@@ -519,6 +618,60 @@ fn run_tool(tool: &'static str, mut cmd: Command, args: &str) -> Result<(), Prov
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
+    Ok(())
+}
+
+/// Build each combined library by driving the vendor `LIB.EXE` under DOSBox-X,
+/// one DOSBox invocation per library (batching all of them in a single session
+/// can intermittently truncate the last output). The produced tree's BIN holds
+/// `LIB.EXE` and its `dir` holds the component libraries, so the whole build
+/// runs against the freshly-copied tree mounted as `C:`.
+fn run_lib_builds(steps: &[LibBuildStep], root: &Path) -> Result<(), ProvisionError> {
+    let mount = root.canonicalize()?;
+    for step in steps {
+        let dir = step.dir.replace('/', "\\");
+        let bak = format!("{}.BAK", step.output.rsplit_once('.').map_or(&*step.output, |(s, _)| s));
+        let bat = format!(
+            "@echo off\r\nc:\r\npath c:\\bin\r\ncd \\{dir}\r\n\
+             del {out}\r\ncopy {base} {out}\r\nLIB {out} {ops};\r\ndel {bak}\r\nexit\r\n",
+            out = step.output,
+            base = step.base,
+            ops = step.ops,
+        );
+        let bat_path = root.join("_LIBBLD.BAT");
+        fs::write(&bat_path, bat)?;
+        run_dosbox_x(&mount, "_LIBBLD.BAT")?;
+        let _ = fs::remove_file(&bat_path);
+    }
+    Ok(())
+}
+
+/// Run a `.BAT` headlessly under DOSBox-X with `mount_c` as drive `C:`. The
+/// DOSBox-X command is taken from `$ORACLE_DOSBOX_X` (whitespace-split) and
+/// defaults to the Flathub build with dummy SDL drivers. Exit status isn't
+/// gated — the manifest verification downstream is the real correctness check.
+fn run_dosbox_x(mount_c: &Path, bat: &str) -> Result<(), ProvisionError> {
+    const DEFAULT: &str = "flatpak run --env=SDL_VIDEODRIVER=dummy \
+        --env=SDL_AUDIODRIVER=dummy com.dosbox_x.DOSBox-X";
+    let spec = std::env::var("ORACLE_DOSBOX_X").unwrap_or_else(|_| DEFAULT.to_string());
+    let mut words = spec.split_whitespace();
+    let prog = words.next().unwrap_or("dosbox-x");
+    let mut cmd = Command::new(prog);
+    cmd.args(words)
+        .env("SDL_VIDEODRIVER", "dummy")
+        .env("SDL_AUDIODRIVER", "dummy")
+        .arg("-silent")
+        .arg("-exit")
+        .arg("-c")
+        .arg(format!("mount c \"{}\"", mount_c.display()))
+        .arg("-c")
+        .arg("c:")
+        .arg("-c")
+        .arg(bat)
+        .arg("-c")
+        .arg("exit");
+    cmd.output()
+        .map_err(|e| ProvisionError::ToolSpawn { tool: "dosbox-x", args: spec, source: e })?;
     Ok(())
 }
 

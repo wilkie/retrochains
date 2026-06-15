@@ -9,3 +9,190 @@ version = "5.0"
 # recipe copies files out of the FAT12 images rather than expanding archives.
 archive_sha256 = "fdf20049715ca932fe242a495764f3031cc0f058b042a803da98a96837c854c4"
 media_filename = "Microsoft C Compiler 5.0 (1987) (5.25-360k).7z"
+
+# How to assemble the MS C 5.0 tree from the install media. Unlike Borland's
+# archive-based media, the MSC floppies store files uncompressed, so the recipe
+# copies files verbatim (exactly what SETUP does), builds the 12 combined FP
+# libraries with the real MS LIB.EXE under DOSBox (SETUP's only non-copy step),
+# and writes the 2 files SETUP generates. MSC500.sha256 gates all 136 files.
+# (The real SETUP.EXE can't be driven headlessly — it reads the BIOS keyboard —
+# so we reproduce its actions; the library builds still use the vendor LIB.EXE.)
+[install]
+tree_root = ""  # MSC manifest is flat (BIN/INCLUDE/LIB), no top-level prefix
+
+# --- copy: verbatim files from the FAT12 floppy images ---
+[[install.copy]]
+disk = "COMPILER"
+into = "BIN"
+files = ["C1.ERR", "C2.EXE", "C23.ERR", "C3.EXE"]
+
+[[install.copy]]
+disk = "SETUP"
+into = "BIN"
+files = ["C1.EXE", "CL.ERR", "CL.EXE", "CL.HLP", "QC.HLP", "QCL.EXE", "QCL.HLP"]
+
+[[install.copy]]
+disk = "ADDNUTIL"
+into = "BIN"
+files = ["C1L.EXE", "CVPACK.EXE", "LIBBUILD.EXE"]
+
+[[install.copy]]
+disk = "CODEVIEW"
+into = "BIN"
+files = ["CV.EXE", "CV.HLP"]
+
+[[install.copy]]
+disk = "UTILITES"
+into = "BIN"
+files = ["ERROUT.EXE", "EXEMOD.EXE", "EXEPACK.EXE", "LIB.EXE", "LINK.EXE", "MAKE.EXE", "QLIB.EXE", "QLIB.INI", "SETENV.EXE"]
+
+[[install.copy]]
+disk = "COMPILER"
+from = "PATCH"
+into = "BIN/PATCH"
+files = ["README.DOC", "RMRHS.EXE", "SETRHS.EXE", "STKPAT.BAT", "STKPAT.SCR"]
+
+[[install.copy]]
+disk = "QUICK_C"
+into = "BIN"
+files = ["QC.EXE"]
+
+[[install.copy]]
+disk = "CODEVIEW"
+from = "SAMPLE"
+into = "BIN/SAMPLE"
+files = ["ADAPT.BAT", "C_AUTO.CV", "DEMOB.BAT", "E_AUTO.CV", "LIFE.C", "LIFE.EXE", "LIFE.R", "LIFEB.BAT", "LIFEEB.BAT", "L_AUTO.CV", "MENU.BAT", "M_AUTO.CV", "Q_AUTO.CV", "RESPOND.COM", "S1.@@@", "S12.@@@", "S13.@@@", "S14.@@@", "S2.@@@", "S3.@@@", "S4.@@@", "S5.@@@", "S6.@@@", "S7.@@@", "S8.@@@", "S9.@@@", "SAMPLE.BAT", "S_AUTO.CV"]
+
+[[install.copy]]
+disk = "ADDNUTIL"
+from = "SOURCE"
+into = "BIN/SAMPLE"
+files = ["CFLOW.C", "DEMO.C", "EMOEM.ASM", "GRDEMO.C", "SIEVE.C"]
+
+[[install.copy]]
+disk = "INCLIBSM"
+from = "INCLUDE"
+into = "INCLUDE"
+files = ["ASSERT.H", "BIOS.H", "CONIO.H", "CTYPE.H", "DIRECT.H", "DOS.H", "ERRNO.H", "FCNTL.H", "FLOAT.H", "GRAPH.H", "IO.H", "LIMITS.H", "MALLOC.H", "MATH.H", "MEMORY.H", "PROCESS.H", "SEARCH.H", "SETJMP.H", "SHARE.H", "SIGNAL.H", "STDARG.H", "STDDEF.H", "STDIO.H", "STDLIB.H", "STRING.H", "TIME.H", "VARARGS.H"]
+
+[[install.copy]]
+disk = "INCLIBSM"
+from = "INCLUDE/SYS"
+into = "INCLUDE/SYS"
+files = ["LOCKING.H", "STAT.H", "TIMEB.H", "TYPES.H", "UTIME.H"]
+
+[[install.copy]]
+disk = "INCLIBSM"
+from = "LIB"
+into = "LIB"
+files = ["87.LIB", "BINMODE.OBJ", "EM.LIB", "GRAPHICS.LIB", "LIBH.LIB", "SETARGV.OBJ"]
+
+[[install.copy]]
+disk = "LIB_L"
+into = "LIB"
+files = ["CLIBC.LIB", "CLIBFP.LIB", "CVARSTCK.OBJ", "LLIBC.LIB", "LLIBFP.LIB", "LVARSTCK.OBJ", "MVARSTCK.OBJ"]
+
+[[install.copy]]
+disk = "LIB_M_C"
+into = "LIB"
+files = ["CLIBFA.LIB", "LLIBFA.LIB", "MLIBC.LIB", "MLIBFA.LIB", "MLIBFP.LIB", "SLIBFA.LIB"]
+
+[[install.copy]]
+disk = "UTILITES"
+into = "LIB"
+files = ["QUICKLIB.OBJ"]
+
+[[install.copy]]
+disk = "INCLIBSM"
+into = "LIB"
+files = ["SLIBC.LIB", "SLIBFP.LIB", "SVARSTCK.OBJ"]
+
+[[install.copy]]
+disk = "INCLIBSM"
+from = "FORTRAN"
+into = "MIXLANG"
+files = ["F4COMPAT.BAT", "LDBGMSG.OBJ", "MDBGMSG.OBJ"]
+
+# --- lib_build: combined FP libraries via the vendor LIB.EXE under DOSBox ---
+[[install.lib_build]]
+dir = "LIB"
+base = "SLIBC.LIB"
+output = "SLIBC7.LIB"
+ops = "+LIBH.LIB +SLIBFP.LIB +87.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "SLIBC.LIB"
+output = "SLIBCE.LIB"
+ops = "+LIBH.LIB +SLIBFP.LIB +EM.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "SLIBC.LIB"
+output = "SLIBCA.LIB"
+ops = "+LIBH.LIB +SLIBFA.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "MLIBC.LIB"
+output = "MLIBC7.LIB"
+ops = "+LIBH.LIB +MLIBFP.LIB +87.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "MLIBC.LIB"
+output = "MLIBCE.LIB"
+ops = "+LIBH.LIB +MLIBFP.LIB +EM.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "MLIBC.LIB"
+output = "MLIBCA.LIB"
+ops = "+LIBH.LIB +MLIBFA.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "CLIBC.LIB"
+output = "CLIBC7.LIB"
+ops = "+LIBH.LIB +CLIBFP.LIB +87.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "CLIBC.LIB"
+output = "CLIBCE.LIB"
+ops = "+LIBH.LIB +CLIBFP.LIB +EM.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "CLIBC.LIB"
+output = "CLIBCA.LIB"
+ops = "+LIBH.LIB +CLIBFA.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "LLIBC.LIB"
+output = "LLIBC7.LIB"
+ops = "+LIBH.LIB +LLIBFP.LIB +87.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "LLIBC.LIB"
+output = "LLIBCE.LIB"
+ops = "+LIBH.LIB +LLIBFP.LIB +EM.LIB +GRAPHICS.LIB"
+
+[[install.lib_build]]
+dir = "LIB"
+base = "LLIBC.LIB"
+output = "LLIBCA.LIB"
+ops = "+LIBH.LIB +LLIBFA.LIB +GRAPHICS.LIB"
+
+# --- write: files SETUP generates from the install paths ---
+[[install.write]]
+path = "BIN/SAMPLE/NEW-VARS.BAT"
+lines = ["PATH=c:\\msc500\\bin", "set INCLUDE=c:\\msc500\\include", "set LIB=c:\\msc500\\lib", "set TMP=c:\\msc500\\tmp"]
+trailing_newline = false
+
+[[install.write]]
+path = "BIN/SAMPLE/NEW-CONF.SYS"
+lines = ["files=20", "buffers=10"]
+trailing_newline = true
