@@ -1062,7 +1062,14 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         }
         Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
-            emit_cmp_local_imm(*idx, locals, *k, out);
+            // When AX still holds this local's value (e.g. `n = n + tries` left
+            // `tries` in AX), MSC compares the register — `cmp ax,K` — instead of
+            // reloading from memory. Fixture 4214.
+            if word_local_value_in_ax(*idx, locals, out) {
+                emit_cmp_ax_imm(*k, out);
+            } else {
+                emit_cmp_local_imm(*idx, locals, *k, out);
+            }
         }
         Cond::Cmp { op: _, left: Expr::Param(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Param(idx) } => {
@@ -1395,6 +1402,63 @@ fn word_local_live_in_ax(idx: usize, locals: &Locals<'_>, out: &[u8]) -> bool {
     // The store must be STRAIGHT-LINE — at or past the last branch merge — so AX
     // isn't assumed live across a conditional branch (MSC reloads after a merge).
     out.len() - store.len() >= locals.last_branch_barrier.get()
+}
+/// True when AX still holds the *value loaded from* word local `idx`: the most
+/// recent AX write is `mov ax,[bp+disp(idx)]` (`8B 46 disp`) and everything
+/// emitted since is AX-preserving. The proven follower is `add [bp+d2],ax`
+/// (`01 46 d2`) — `n = n + tries` leaves `tries` in AX, so a later
+/// `if (tries < K)` compares the register instead of reloading. Gated to the
+/// straight-line region (no assumed-live AX across a branch merge) and to plain
+/// word locals. Fixture 4214.
+fn word_local_value_in_ax(idx: usize, locals: &Locals<'_>, out: &[u8]) -> bool {
+    if locals.size(idx) != 2 || locals.is_long_local(idx) || locals.is_float_local(idx) {
+        return false;
+    }
+    let d = locals.disp(idx);
+    let mut load = vec![0x8B, bp_modrm(0x46, d)];
+    push_bp_disp(&mut load, d);
+    // AX-preserving instructions that MSC can emit between the `mov ax,local`
+    // load and a later `if (local OP K)` test (none of which touch AX), each
+    // anchored at the START of `s`. Returns the instruction length.
+    fn ax_preserving(s: &[u8]) -> Option<usize> {
+        match s {
+            // add [bp+disp8], ax  /  add [bp+disp16], ax  (reg field = AX source)
+            [0x01, 0x46, _, ..] => Some(3),
+            [0x01, 0x86, _, _, ..] => Some(4),
+            // cmp word [bp+disp8], imm8sx  (`83 /7`) — the preceding if's compare
+            [0x83, 0x7E, _, _, ..] => Some(4),
+            // cmp word [bp+disp8], imm16  (`81 /7`)
+            [0x81, 0x7E, _, _, _, ..] => Some(5),
+            // jcc rel8 (the preceding if's conditional branch, 0x70..0x7F)
+            [j, _, ..] if (0x70..=0x7F).contains(j) => Some(2),
+            _ => None,
+        }
+    }
+    let barrier = locals.last_branch_barrier.get();
+    if out.len() < load.len() { return false; }
+    // Scan candidate load positions backward from the most recent. For each, the
+    // bytes after the load must decode FORWARD as a clean run of AX-preserving
+    // instructions ending exactly at out.len() (no leftover bytes). Forward
+    // decoding sidesteps x86 backward-scan ambiguity. The load must sit at/after
+    // the straight-line barrier.
+    let mut start = out.len() - load.len();
+    loop {
+        if out[start..start + load.len()] == *load {
+            let mut q = start + load.len();
+            let mut clean = true;
+            while q < out.len() {
+                match ax_preserving(&out[q..]) {
+                    Some(l) => q += l,
+                    None => { clean = false; break; }
+                }
+            }
+            if clean && q == out.len() {
+                return true;
+            }
+        }
+        if start == barrier || start == 0 { return false; }
+        start -= 1;
+    }
 }
 pub(crate) fn loop_back_jcc(op: RelOp) -> u8 {
     match op {
