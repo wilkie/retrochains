@@ -3617,6 +3617,18 @@ pub(crate) fn emit_var_index_to_si(index: &Expr, locals: &Locals<'_>, out: &mut 
 /// form is matched. For other expressions evaluate into AX (AL is
 /// the low byte). Fixture 1219.
 pub(crate) fn emit_byte_rhs_to_al(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // A non-constant `(char)<expr>` cast wrapping the RHS is a no-op for a byte
+    // store: the store truncates to AL anyway, so the char-cast (and its `cbw`
+    // widen) add nothing. Peel it and recurse on the inner expression so the
+    // 8-bit `var ± K` arithmetic arm can fire. (Only when the inner is a
+    // non-constant expression, matching the existing var±K path. Fixture 4229,
+    // `buf[i] = (char)('A' + i)`.)
+    if let Expr::CastChar { value: inner, .. } = value
+        && inner.fold(locals.inits).is_none()
+    {
+        emit_byte_rhs_to_al(inner, locals, out, fixups);
+        return;
+    }
     match value {
         Expr::Local(i) => {
             let disp = locals.disp(*i);
