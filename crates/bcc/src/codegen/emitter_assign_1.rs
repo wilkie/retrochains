@@ -2030,6 +2030,38 @@ impl<'a> super::FunctionEmitter<'a> {
             );
             return;
         }
+        // `<reg> += <global-struct-arr>[<var>].<field>` — variable-
+        // indexed global array-of-struct field as the RHS of a
+        // compound add. Mirrors the rvalue read shape (slice in
+        // emitter_members: `mov ax, word ptr DGROUP:_arr+<off>[bx]`)
+        // but folds the load straight into the add, avoiding the
+        // load-to-AX + add pair (saves 2 bytes). Fixture 4210
+        // (`sum += pts[i].y` for a global `struct Pt pts[3]`).
+        if matches!(op, BinOp::Add)
+            && !reg.is_byte()
+            && let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } =
+                &value.kind
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && !self.locals.has(arr_name)
+            && let Some(arr_ty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = arr_ty.array_elem()
+            && let Type::Struct { fields, .. } = elem_ty.clone()
+            && let Some(field_info) = fields.iter().find(|f| f.name == *field)
+            && field_info.ty.is_int_like()
+            && try_const_eval(index).is_none()
+        {
+            let field_off = field_info.offset;
+            let elem_ty = elem_ty.clone();
+            self.emit_index_into_bx(index, &elem_ty);
+            let addr = if field_off == 0 {
+                format!("DGROUP:_{arr_name}[bx]")
+            } else {
+                format!("DGROUP:_{arr_name}+{field_off}[bx]")
+            };
+            let _ = write!(self.out, "\tadd\t{},word ptr {addr}\r\n", reg.name());
+            return;
+        }
         // `<reg> += <stack-arr>[K_const]` — constant-indexed stack
         // array element folds to a single bp-relative add.
         // `add <reg>, word ptr [bp+(base+K*stride)]`. Fixture 1336
