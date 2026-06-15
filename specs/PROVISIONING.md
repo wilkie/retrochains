@@ -35,6 +35,36 @@ Each command prints `provisioned <name> -> <archive> (<N> files verified against
 the manifest)` on success, and exits non-zero (without writing the archive) if
 any file fails to match.
 
+## What provisioning produces (and what it doesn't)
+
+The repo has **two** separate sets of gitignored, hash-pinned binaries. Keep them
+straight:
+
+- **The compiler toolchain** — `BC2.zip` / `MSC500.zip`: the original `BCC.EXE`,
+  `TASM.EXE`, `LINK.EXE`, headers, runtime libraries, **and the toolchain's own
+  object files** (e.g. `BC2/LIB/C0*.OBJ` startup modules and `WILDARGS.OBJ`;
+  MSC's `*VARSTCK.OBJ`, `SETARGV.OBJ`, …). These `.OBJ` are part of the
+  distribution, so **`oracle provision` does produce and verify them** — they're
+  among the 99 / 136 files in `oracles/<c>/<NAME>.sha256`.
+
+- **The fixture goldens** — the compiler's *per-fixture outputs*
+  (`<NAME>.OBJ`/`.ASM`/`.EXE`/`.MAP` under `fixtures/.../expected/<compiler>/`).
+  These are **not** produced by `oracle provision`. They're a separate
+  reproducible cache, pinned by `expected/<compiler>/manifest.toml` and
+  regenerated with **`xfix materialize <fixture>`**, which drives the
+  *provisioned* compiler to re-emit them and asserts each matches its recorded
+  hash. See [`FIXTURES.md`](FIXTURES.md).
+
+So `oracle provision` rebuilds the **compiler** (object files and all); `xfix`
+uses that compiler to (re)generate the **fixtures'** object files:
+
+```sh
+oracle provision bcc          # rebuild the BCC toolchain (incl. its startup .OBJ)
+xfix materialize <fixture>    # drive that compiler to regenerate a fixture's golden .OBJ/.ASM/.EXE/.MAP
+```
+
+`xfix verify-all` needs neither archive — it checks recorded hashes directly.
+
 ## Prerequisites
 
 | Tool | Needed for | Notes |
