@@ -2,3 +2,10 @@ winworldpc_url = "https://winworldpc.com/product/microsoft-c-c/5x"
 winworldpc_download = "https://winworldpc.com/download/0888a1b3-d5d5-11eb-9de1-0200008a0da4"
 name = "Microsoft C"
 version = "5.0"
+
+# Integrity anchor for the upstream install media (the WinWorld 7z of the
+# original 5.25"/360K install floppies). Unlike Borland's, the MS C 5.0 floppies
+# store files uncompressed (some under INCLUDE/, LIB/ subdirs), so the install
+# recipe copies files out of the FAT12 images rather than expanding archives.
+archive_sha256 = "fdf20049715ca932fe242a495764f3031cc0f058b042a803da98a96837c854c4"
+media_filename = "Microsoft C Compiler 5.0 (1987) (5.25-360k).7z"
