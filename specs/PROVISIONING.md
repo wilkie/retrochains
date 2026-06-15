@@ -50,7 +50,8 @@ straight:
 - **The fixture goldens** — the compiler's *per-fixture outputs*
   (`<NAME>.OBJ`/`.ASM`/`.EXE`/`.MAP` under `fixtures/.../expected/<compiler>/`).
   These are **not** produced by `oracle provision`. They're a separate
-  reproducible cache, pinned by `expected/<compiler>/manifest.toml` and
+  reproducible cache under `artifacts/` (mirroring the fixtures tree, keyed by
+  family/release), pinned by `expected/<family>/<RELEASE>.toml` and
   regenerated with **`xfix materialize <fixture>`**, which drives the
   *provisioned* compiler to re-emit them and asserts each matches its recorded
   hash. See [`FIXTURES.md`](FIXTURES.md).

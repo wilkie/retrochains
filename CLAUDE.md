@@ -49,14 +49,18 @@ with `xfix capture --compiler {bcc,msc}` and add both
 
 ## Goldens are a hash-pinned, reproducible cache
 
-Compiler binary outputs (`.OBJ`, `.ASM`, `.EXE`, `.MAP`) are **not** tracked in
-git. The byte-exact contract is the `sha256` recorded for each output in the
-tracked `expected/<compiler>/manifest.toml`, and `verify-all` gates on that
-hash — it passes/fails identically whether or not the golden bytes are on disk.
-The bytes themselves are gitignored to keep the repo lean as compilers and
-fixtures multiply; regenerate them locally with `xfix materialize <fixture>`
-(re-drives the oracle, refuses to write unless the reproduction matches the
-recorded hash). So on a fresh checkout, `verify-all` works immediately, and you
-only `materialize` a fixture when you want its byte-level diff for debugging.
+Compiler binary outputs (`.OBJ`, `.ASM`, `.EXE`, `.MAP`) plus captured
+`stdout`/`stderr` are **not** tracked in git. The byte-exact contract is the
+`sha256` recorded for each output in the tracked, release-keyed manifest
+`fixtures/<path>/expected/<family>/<RELEASE>.toml` (e.g. `expected/bcc/BC2.toml`),
+and `verify-all` gates on that hash — it passes/fails identically whether or not
+the golden bytes are on disk. The bytes themselves live under `artifacts/`,
+mirroring the fixtures tree and keyed by family/release
+(`artifacts/<path>/<family>/<RELEASE>/`), gitignored so git prunes the whole
+cache in one step (see `artifacts/README.md`). Regenerate them locally with
+`xfix materialize <fixture>` (re-drives the oracle, refuses to write unless the
+reproduction matches the recorded hash). So on a fresh checkout, `verify-all`
+works immediately, and you only `materialize` a fixture when you want its
+byte-level diff for debugging.
 They were purged from history once (see git log) — never re-track them; the
 `.gitignore` keeps captures from re-adding them.
