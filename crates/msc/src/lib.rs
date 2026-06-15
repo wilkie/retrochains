@@ -3520,26 +3520,45 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // emitted immediately after the LEDATA.
     //
     // CONST-segment const globals (before the _DATA block, matching MSC's record
-    // order where the const value LEDATA sits where _DATA would). One LEDATA per
-    // const global at its CONST offset. Fixtures 2068/3260.
-    for (gi, g) in unit.globals.iter().enumerate() {
-        if let (true, Some(off), Some(values)) = (g.is_const, const_global_offsets[gi], &g.init) {
-            let mut bytes: Vec<u8> = Vec::new();
-            for v in values {
-                match v {
-                    GlobalInit::Int(k) => bytes.extend_from_slice(&((*k as u32 & 0xFFFF) as u16).to_le_bytes()),
-                    GlobalInit::Byte(bb) => bytes.push(*bb),
-                    GlobalInit::FloatBits(bits, width) => {
-                        if *width == 4 {
-                            bytes.extend_from_slice(&(f64::from_bits(*bits) as f32).to_bits().to_le_bytes());
-                        } else {
-                            bytes.extend_from_slice(&bits.to_le_bytes());
+    // order where the const value LEDATA sits where _DATA would). MSC packs
+    // adjacent const globals (no alignment hole between them) into a single
+    // LEDATA — same run-grouping it applies to _DATA below. A word-aligned
+    // global preceded by an odd-length one leaves a hole that starts a fresh
+    // LEDATA. Fixtures 2068/3260 (single global), 4207 (two ints → 1 LEDATA).
+    {
+        struct ConstGlobal { offset: usize, bytes: Vec<u8> }
+        let mut cgs: Vec<ConstGlobal> = Vec::new();
+        for (gi, g) in unit.globals.iter().enumerate() {
+            if let (true, Some(off), Some(values)) = (g.is_const, const_global_offsets[gi], &g.init) {
+                let mut bytes: Vec<u8> = Vec::new();
+                for v in values {
+                    match v {
+                        GlobalInit::Int(k) => bytes.extend_from_slice(&((*k as u32 & 0xFFFF) as u16).to_le_bytes()),
+                        GlobalInit::Byte(bb) => bytes.push(*bb),
+                        GlobalInit::FloatBits(bits, width) => {
+                            if *width == 4 {
+                                bytes.extend_from_slice(&(f64::from_bits(*bits) as f32).to_bits().to_le_bytes());
+                            } else {
+                                bytes.extend_from_slice(&bits.to_le_bytes());
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                cgs.push(ConstGlobal { offset: off, bytes });
             }
-            b.write_ledata16(3, u16::try_from(off).expect("const offset fits"), &bytes);
+        }
+        let mut i = 0;
+        while i < cgs.len() {
+            let run_start = cgs[i].offset;
+            let mut run_bytes: Vec<u8> = Vec::new();
+            let mut j = i;
+            while j < cgs.len() && cgs[j].offset == run_start + run_bytes.len() {
+                run_bytes.extend_from_slice(&cgs[j].bytes);
+                j += 1;
+            }
+            b.write_ledata16(3, u16::try_from(run_start).expect("const offset fits"), &run_bytes);
+            i = j;
         }
     }
     if data_cursor > 0 {
