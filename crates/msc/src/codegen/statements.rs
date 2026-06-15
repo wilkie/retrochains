@@ -3330,6 +3330,13 @@ pub(crate) fn emit_threaded_for(
     let base = out.len();
     let mut b: Vec<u8> = Vec::new();
     let mut bfix: Vec<Fixup> = Vec::new();
+    // A `goto`/early-return inside the nest records a label fixup (and possibly a
+    // label definition) into the SHARED tables with offsets relative to the
+    // scratch buffer `b`. Snapshot the table tails / existing labels here so they
+    // can be rebased by `base` when `b` is committed. Fixture 4215.
+    let lf_start = bl.label_fixups.borrow().len();
+    let labels_before: std::collections::HashSet<String> =
+        bl.labels.borrow().keys().cloned().collect();
     let mut cond_pos = vec![0usize; n]; // offset of each level's COND
     let mut jge_pos = vec![0usize; n];  // disp byte of each COND's exit jcc
     let mut exit_tgt = vec![0usize; n]; // where each COND's exit jcc lands
@@ -3344,7 +3351,41 @@ pub(crate) fn emit_threaded_for(
     // Innermost loop body region (level n-1).
     let inner = &levels[n - 1];
     let itop = b.len();
-    if let Some((break_c, rest)) = &inner_break {
+    // An innermost body that is a single `if(D) S;` whose then-branch S always
+    // exits (returns or `goto`s out of the nest) fuses the if-test into the
+    // loop's conditional back-edge — exactly like `emit_for_fused_if` but inside
+    // the thread. The inner COND's exit jcc still goes to IEXIT; then `cmp D;
+    // jcc(!D) -> ITOP` is the loop-back, and S is laid out straight after it with
+    // no trailing unconditional `jmp ITOP` (S terminates). Fixture 4215
+    // (`goto out` of a 2-deep nest).
+    let inner_fused_if: Option<(&Cond, &Stmt)> = if inner_break.is_none() {
+        match for_body_single_if_exit_or_goto(work_body) {
+            Some((d, s)) if matches!(d, Cond::Cmp { .. }) => Some((d, s)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some((cond_d, then_s)) = inner_fused_if {
+        let Cond::Cmp { op: dop, .. } = cond_d else { unreachable!() };
+        emit_stmt(inner.step, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        cond_pos[n - 1] = b.len();
+        emit_cond_cmp(inner.cond, &bl, &mut b, &mut bfix);
+        b.push(inverted_jcc(inner.op));
+        jge_pos[n - 1] = b.len();
+        b.push(0x00);
+        // The if-test, then a backward jcc to ITOP when D is FALSE (loop back).
+        emit_cond_cmp(cond_d, &bl, &mut b, &mut bfix);
+        b.push(inverted_jcc(*dop));
+        let p = b.len();
+        b.push(0x00);
+        let Some(d) = i8_disp(itop, p) else { return false };
+        b[p] = d;
+        // S (the then-branch) falls through here when D is true and terminates;
+        // no trailing loop-back jmp. The IEXIT pad is handled by the enclosing
+        // level (prev_uncond_jmp is true since inner_break is None).
+        emit_stmt(then_s, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+    } else if let Some((break_c, rest)) = &inner_break {
         let Cond::Cmp { op: bc_op, .. } = break_c else { return false };
         for s in rest {
             emit_stmt(s, &bl, frame, return_int, return_long, &mut b, &mut bfix);
@@ -3419,6 +3460,15 @@ pub(crate) fn emit_threaded_for(
         f.body_offset += base;
         fixups.push(f);
     }
+    // Rebase `goto`/early-return label fixups and any new label definitions from
+    // buffer-relative into out-relative space (a goto out of the nest resolves
+    // against the outer label tables). Fixture 4215.
+    for (_, pos) in bl.label_fixups.borrow_mut().iter_mut().skip(lf_start) {
+        *pos += base;
+    }
+    for (name, pos) in bl.labels.borrow_mut().iter_mut() {
+        if !labels_before.contains(name) { *pos += base; }
+    }
     true
 }
 /// rel8 displacement from a jump whose disp byte is at `disp_pos` to `target`
@@ -3472,6 +3522,25 @@ fn for_body_single_if_exit<'a>(body: &'a Stmt, locals: &Locals<'_>) -> Option<(&
         }
         if stmt_ends_in_break(then_branch) {
             return Some((cond, then_branch.as_ref(), false));
+        }
+    }
+    None
+}
+/// Match a single `if (D) S;` (no else) where S terminates control via a return
+/// OR a `goto` (a label-exit out of an enclosing loop nest). Returns the
+/// if-condition and the then-branch. Unlike [`for_body_single_if_exit`], a bare
+/// `goto`-out counts as terminating here — the threaded-loop emitter fuses the
+/// if-test into the inner back-edge and lays S out straight (no loop-back jmp).
+/// Fixture 4215.
+fn for_body_single_if_exit_or_goto(body: &Stmt) -> Option<(&Cond, &Stmt)> {
+    let if_stmt = match body {
+        Stmt::If { .. } => body,
+        Stmt::Block(ss) if ss.len() == 1 => &ss[0],
+        _ => return None,
+    };
+    if let Stmt::If { cond, then_branch, else_branch: None } = if_stmt {
+        if stmt_exits(then_branch) {
+            return Some((cond, then_branch.as_ref()));
         }
     }
     None
