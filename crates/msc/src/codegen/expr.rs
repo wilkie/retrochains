@@ -3901,10 +3901,29 @@ pub(crate) fn bf_ax_live(base: BitBase, byte_off: u16, locals: &Locals<'_>, out:
     // AX-preserving setup instruction (e.g. `mov cx,K` before `<bf> * K`), so
     // skip one such trailing instruction before matching the store. Only a strict
     // whitelist is skipped, so the reuse can never trigger on the wrong AX.
+    // The own-slot disp (Local only) lets the immediate-store strip below reject a
+    // store that writes the unit's own word (which would invalidate the live AX).
+    let own_disp = match base {
+        BitBase::Local(l) => Some(locals.disp(l) + byte_off as i16),
+        _ => None,
+    };
     let end = {
         let n = out.len();
         if n >= 3 && matches!(out[n - 3], 0xB9 | 0xBA | 0xBB | 0xBE | 0xBF) {
             n - 3 // mov cx/dx/bx/si/di, imm16
+        } else if let Some(own) = own_disp {
+            // An immediate store to ANOTHER bp-relative slot (`s.tag = K` between
+            // two bit-field assignments) preserves AX, so skip it before matching
+            // the unit store. `C6 46 d ib` (byte) / `C7 46 d iw` (word); the disp
+            // must differ from the unit's own slot or AX no longer mirrors it.
+            // Fixture 4221 (bit-field span + a plain char member).
+            if n >= 4 && out[n - 4] == 0xC6 && out[n - 3] == 0x46 && (out[n - 2] as i8 as i16) != own {
+                n - 4
+            } else if n >= 5 && out[n - 5] == 0xC7 && out[n - 4] == 0x46 && (out[n - 3] as i8 as i16) != own {
+                n - 5
+            } else {
+                n
+            }
         } else {
             n
         }
