@@ -1303,6 +1303,37 @@ impl<'a> super::FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},offset DGROUP:_{name}\r\n", reg.name());
             return;
         }
+        // Pointer init from `<global-array> + K_const`: the element
+        // address is a link-time-resolved constant, so emit it directly
+        // as a symbolic immediate `mov <reg>,offset DGROUP:_<arr>+K*stride`
+        // (no AX round-trip / inc chain). Global sibling of the stack
+        // `<arr> + K` arm below. Fixture 4226 (`p = a + 1` →
+        // `mov si,offset DGROUP:_a+2`).
+        if let ExprKind::BinOp { op: BinOp::Add, left, right } = &expr.kind
+            && let ExprKind::Ident(arr_name) = &left.kind
+            && !self.locals.has(arr_name)
+            && let Some(gty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = gty.array_elem()
+            && let Some(k) = try_const_eval(right)
+        {
+            assert!(!reg.is_byte(), "array+const into a byte register is impossible");
+            let stride = i32::from(elem_ty.size_bytes());
+            let byte_off = (k as i32).wrapping_mul(stride);
+            if byte_off == 0 {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{},offset DGROUP:_{arr_name}\r\n",
+                    reg.name(),
+                );
+            } else {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{},offset DGROUP:_{arr_name}+{byte_off}\r\n",
+                    reg.name(),
+                );
+            }
+            return;
+        }
         // Pointer init from `<stack-array> + K_const`: fold the
         // element offset into the LEA's displacement. BCC pattern is
         // `lea ax, [bp+(base + K*stride)]; mov <reg>, ax` — no

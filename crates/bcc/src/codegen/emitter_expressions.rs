@@ -840,20 +840,29 @@ impl<'a> super::FunctionEmitter<'a> {
                             .map_or(false, |t| matches!(t, Type::Array { .. }))
                             || (self.locals.has(r_name)
                                 && matches!(self.locals.type_of(r_name), Type::Array { .. }));
-                        if rhs_is_array_lvalue {
-                            // RHS is an array — we need its ADDRESS,
+                        let rhs_is_global_array = rhs_is_array_lvalue
+                            && self.globals.type_of(r_name).is_some();
+                        if rhs_is_global_array {
+                            // RHS is a GLOBAL array — its base address is
+                            // a link-time-resolved constant, so subtract
+                            // it as a symbolic immediate. No push/pop
+                            // dance: evaluate the LHS into AX, then `sub
+                            // ax,offset DGROUP:_<arr>`. Fixture 4226
+                            // (`best - a`).
+                            self.emit_expr_to_ax(left);
+                            let _ = write!(
+                                self.out,
+                                "\tsub\tax,offset DGROUP:_{r_name}\r\n",
+                            );
+                        } else if rhs_is_array_lvalue {
+                            // RHS is a STACK array — we need its ADDRESS,
                             // not its content. BCC's shape:
                             //   lea ax, &r ; push ax
                             //   <lhs into ax>
                             //   pop dx ; sub ax, dx
                             // Fixture 2347 (`p - s` for `char *p,
                             // char s[6]`).
-                            if let Some(_g) = self.globals.type_of(r_name) {
-                                let _ = write!(
-                                    self.out,
-                                    "\tmov\tax,offset DGROUP:_{r_name}\r\n",
-                                );
-                            } else if let LocalLocation::Stack(off) =
+                            if let LocalLocation::Stack(off) =
                                 self.locals.location_of(r_name)
                             {
                                 let _ = write!(

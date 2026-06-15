@@ -198,6 +198,8 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         Instr::MovBxSiPtrImm8 { .. } | Instr::MovBxDiPtrImm8 { .. } => 3,
         Instr::ImulReg16 { .. } | Instr::IdivReg16 { .. } | Instr::DivReg16 { .. } => 2,
         Instr::AddAxOffsetGroupSym { .. } => 3,
+        Instr::SubAxOffsetGroupSym { .. } => 3,
+        Instr::CmpReg16OffsetGroupSym { .. } => 4,
         Instr::AddAxSym { .. } => 4,
         Instr::AddAxGroupSym { .. }
         | Instr::OrAxGroupSym { .. }

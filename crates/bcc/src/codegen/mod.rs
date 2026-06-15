@@ -1622,6 +1622,12 @@ enum OperandSource {
     /// `<width> ptr DGROUP:_<name>+<offset>`. Fixture 189 uses
     /// `add ax, word ptr DGROUP:_a+2` for `a[1]`.
     GlobalOffset { name: String, offset: i32 },
+    /// The link-time ADDRESS of a file-scope array element, used as a
+    /// symbolic immediate: `offset DGROUP:_<name>+<offset>`. Distinct
+    /// from `GlobalOffset` (which reads memory `word ptr ...`): this is
+    /// the pointer value `<arr> + K`, not its contents. Fixture 4226
+    /// (`cmp si,offset DGROUP:_a+12` for `p < a + 6`).
+    GlobalAddr { name: String, offset: i32 },
     /// `*p` where `p` is a register-resident local pointer —
     /// addressed as `<width> ptr [<reg>]`. Fixture 201:
     /// `sub ax,word ptr [si]` for `10 - *p` with `p` in SI.
@@ -1652,6 +1658,13 @@ impl OperandSource {
                     format!("word ptr DGROUP:_{name}")
                 } else {
                     format!("word ptr DGROUP:_{name}+{offset}")
+                }
+            }
+            Self::GlobalAddr { name, offset } => {
+                if *offset == 0 {
+                    format!("offset DGROUP:_{name}")
+                } else {
+                    format!("offset DGROUP:_{name}+{offset}")
                 }
             }
             Self::DerefReg(r) => format!("word ptr [{}]", r.name()),
@@ -1697,6 +1710,9 @@ impl OperandSource {
                     r.name()
                 ),
             },
+            Self::GlobalAddr { .. } => {
+                panic!("symbolic-address operand has no byte form (pointer is 2 bytes)")
+            }
             Self::DerefReg(r) => format!("byte ptr [{}]", r.name()),
             Self::DerefRegOffset { reg, offset } => {
                 if *offset == 0 {

@@ -1145,6 +1145,19 @@ pub enum Instr {
     /// then add the array base symbol as a link-time-resolved
     /// immediate. Fixture 3439 (`arr + (c ? 1 : 2)`).
     AddAxOffsetGroupSym { group: String, symbol: String, offset: i16 },
+    /// `sub ax,offset <group>:<symbol>[+<offset>]` — AX-accumulator
+    /// SUB with an immediate symbol offset (`2D lo hi`). Mirror of
+    /// `AddAxOffsetGroupSym`. Used by pointer-difference `p - <arr>`
+    /// where the RHS is a global array decayed to its base address:
+    /// subtract the array base symbol as a link-time-resolved
+    /// immediate. Fixture 4226 (`best - a`).
+    SubAxOffsetGroupSym { group: String, symbol: String, offset: i16 },
+    /// `cmp <reg16>,offset <group>:<symbol>[+<offset>]` — register-vs-
+    /// immediate-symbol-offset compare (`81 /7 modrm lo hi`). Used by
+    /// pointer-walk loop guards `p < <arr> + K` where the RHS folds to
+    /// the array element's link-time address. Fixture 4226
+    /// (`cmp si,offset DGROUP:_a+12`).
+    CmpReg16OffsetGroupSym { reg: Reg16, group: String, symbol: String, offset: i16 },
     /// `or ax,word ptr <group>:<symbol>[+<offset>]` — OR r16,r/m16
     /// with disp16-only addressing (`0B 06 lo hi`). Used by long
     /// comparison against zero (fixture 215): `mov ax,low / or

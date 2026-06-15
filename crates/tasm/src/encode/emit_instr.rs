@@ -1515,6 +1515,21 @@ pub(crate) fn emit_instr(
             // the imm16 word is a link-time-resolved symbol offset.
             emit_group_sym_lea(&[0x05], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
+        Instr::SubAxOffsetGroupSym { group, symbol, offset } => {
+            // `sub ax,offset <group>:<symbol>` → 2D lo hi (AX-accumulator
+            // SUB-imm16). Mirror of `AddAxOffsetGroupSym` (05); the imm16
+            // word is a link-time-resolved symbol offset. Fixture 4226.
+            emit_group_sym_lea(&[0x2D], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::CmpReg16OffsetGroupSym { reg, group, symbol, offset } => {
+            // `cmp <reg16>,offset <group>:<symbol>[+N]` → 81 (F8|rc) lo hi.
+            // Grp1 /7 (CMP) with mod=11 (register-direct) and r/m = reg
+            // code. The imm16 is a link-time-resolved symbol offset, same
+            // FIXUPP shape as `MovReg16OffsetGroupSym`. Fixture 4226
+            // (`cmp si,offset DGROUP:_a+12`).
+            let modrm = 0b11_111_000 | reg.code();
+            emit_group_sym_lea(&[0x81, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
         Instr::OrAxGroupSym { group, symbol, offset } => {
             // `or ax,word ptr <group>:<symbol>` → 0B 06 lo hi.
             // Same ModR/M as the `add` sibling; opcode 0B (OR r16,r/m16).

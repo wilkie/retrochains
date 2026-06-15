@@ -89,6 +89,25 @@ impl<'a> super::FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(total));
                 OperandSource::Ax
             }
+            ExprKind::BinOp { op: BinOp::Add, left, right }
+                if let ExprKind::Ident(arr_name) = &left.kind
+                    && !self.locals.has(arr_name)
+                    && let Some(gty) = self.globals.type_of(arr_name)
+                    && let Some(elem) = gty.array_elem()
+                    && let Some(k) = try_const_eval(right) =>
+            {
+                // `<global_arr_ident> + <const>` — the link-time
+                // ADDRESS of element K, used as a symbolic immediate.
+                // The loop guard `p < a + 6` folds the RHS to `offset
+                // DGROUP:_a+12` and compares the pointer register
+                // directly. Fixture 4226 (`cmp si,offset DGROUP:_a+12`).
+                let stride = i32::from(elem.size_bytes());
+                let byte_off = (k as i32).wrapping_mul(stride);
+                OperandSource::GlobalAddr {
+                    name: arr_name.clone(),
+                    offset: byte_off,
+                }
+            }
             ExprKind::BinOp { .. } => {
                 panic!("nested non-constant right operand not yet supported")
             }

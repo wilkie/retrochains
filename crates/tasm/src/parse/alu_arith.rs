@@ -42,6 +42,18 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `sub ax,offset <group>:<sym>[+N]` — subtract the symbol's
+        // link-time address as an immediate (`2D lo hi`). Mirror of
+        // `AddAxOffsetGroupSym`. Used for pointer-difference against a
+        // global array decayed to its base. Fixture 4226 (`best - a`).
+        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SubAxOffsetGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
     }
     // `sub al,imm8` — AL-specific 2-byte encoding (companion to
     // `AddAlImm8`).
@@ -1021,6 +1033,19 @@ pub(crate) fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             if let Some(offset) = parse_bp_relative(rhs) {
                 return Ok(Instr::CmpReg16BpRel { reg, offset });
             }
+        }
+        // `cmp <reg16>,offset <group>:<sym>[+N]` — compare a pointer
+        // register against a global array element's link-time address
+        // (`81 /7 modrm lo hi`). Fixture 4226 (`cmp si,offset
+        // DGROUP:_a+12` for the loop guard `p < a + 6`).
+        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::CmpReg16OffsetGroupSym {
+                reg,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
         }
     }
     // `cmp word ptr [bp+N], <reg16>` — memory-on-left compare.
