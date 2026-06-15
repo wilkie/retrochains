@@ -334,10 +334,15 @@ pub(crate) fn emit_stmt(
             }
         }
         Stmt::Label(name) => {
-            // A label with no fall-through (right after a `ret`) aligns to an
-            // even offset with a NOP — labels reached by fall-through don't pad
-            // (3306 pads, 441 doesn't).
-            if out.len() % 2 != 0 && out.last() == Some(&0xC3) {
+            // A label with no fall-through aligns to an even offset with a NOP;
+            // labels reached by fall-through don't pad (3306 pads, 441 doesn't).
+            // "No fall-through" means the preceding instruction is a `ret`
+            // (sniffed as a trailing 0xC3) or an unconditional `goto`
+            // (precomputed in `backward_labels`, since the jmp's rel8 placeholder
+            // can't be byte-sniffed reliably). Fixture 4214 (`goto check;body:`).
+            if out.len() % 2 != 0
+                && (out.last() == Some(&0xC3) || locals.backward_labels.contains(name))
+            {
                 out.push(0x90);
             }
             // Record this label's byte offset; jumps to it are backpatched after
@@ -3304,6 +3309,7 @@ pub(crate) fn emit_threaded_for(
         loop_stack: locals.loop_stack,
         labels: locals.labels,
         label_fixups: locals.label_fixups,
+        backward_labels: locals.backward_labels,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         return_struct_bytes: locals.return_struct_bytes,
@@ -4292,6 +4298,7 @@ pub(crate) fn loop_body_locals<'a>(
         loop_stack: locals.loop_stack,
         labels: locals.labels,
         label_fixups: locals.label_fixups,
+        backward_labels: locals.backward_labels,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         return_struct_bytes: locals.return_struct_bytes,
@@ -4480,6 +4487,7 @@ pub(crate) fn emit_loop(
         loop_stack: locals.loop_stack,
         labels: locals.labels,
         label_fixups: locals.label_fixups,
+        backward_labels: locals.backward_labels,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         return_struct_bytes: locals.return_struct_bytes,
@@ -5960,6 +5968,7 @@ pub(crate) fn emit_do_while(
         loop_stack: locals.loop_stack,
         labels: locals.labels,
         label_fixups: locals.label_fixups,
+        backward_labels: locals.backward_labels,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         return_struct_bytes: locals.return_struct_bytes,

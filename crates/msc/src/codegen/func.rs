@@ -416,6 +416,45 @@ pub(crate) fn coupled_return_local(expr: &Expr) -> Option<usize> {
         _ => None,
     }
 }
+/// Collect the names of labels that are NOT reachable by fall-through because
+/// the statement immediately preceding them is an unconditional `goto`. MSC
+/// aligns such a label to an even byte offset with a `nop` pad — the same rule
+/// it applies to a label following a `ret` (which the codegen handles
+/// separately by sniffing the trailing `0xC3`). Scans every statement
+/// *sequence* (the function body and each nested block) for a `Goto` directly
+/// followed by a `Label`. Fixture 4214 (`goto check; body: ...`).
+pub(crate) fn labels_after_uncond_goto(body: &[Stmt]) -> std::collections::HashSet<String> {
+    fn scan(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+        for win in stmts.windows(2) {
+            if let (Stmt::Goto(_), Stmt::Label(name)) = (&win[0], &win[1]) {
+                out.insert(name.clone());
+            }
+        }
+        for s in stmts { descend(s, out); }
+    }
+    fn descend(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+        match stmt {
+            Stmt::If { then_branch, else_branch, .. } => {
+                descend(then_branch, out);
+                if let Some(eb) = else_branch { descend(eb, out); }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => descend(body, out),
+            Stmt::For { init, step, body, .. } => {
+                descend(init, out);
+                descend(step, out);
+                descend(body, out);
+            }
+            Stmt::Block(stmts) => scan(stmts, out),
+            Stmt::Switch { cases, .. } => {
+                for arm in cases { scan(&arm.body, out); }
+            }
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    scan(body, &mut out);
+    out
+}
 pub(crate) fn emit_function(
     func: &Function,
     struct_temp_offset: Option<u16>,
@@ -973,6 +1012,7 @@ pub(crate) fn emit_function(
     let loop_stack: std::cell::RefCell<Vec<LoopCtx>> = std::cell::RefCell::new(Vec::new());
     let labels: std::cell::RefCell<std::collections::HashMap<String, usize>> = std::cell::RefCell::new(std::collections::HashMap::new());
     let label_fixups: std::cell::RefCell<Vec<(String, usize)>> = std::cell::RefCell::new(Vec::new());
+    let backward_labels = labels_after_uncond_goto(&body);
     let param_is_char: Vec<bool> = func.param_is_char.clone();
     let param_is_long: Vec<bool> = func.param_is_long.clone();
     let param_is_unsigned: Vec<bool> = func.param_is_unsigned.clone();
@@ -1027,6 +1067,7 @@ pub(crate) fn emit_function(
         loop_stack: &loop_stack,
         labels: &labels,
         label_fixups: &label_fixups,
+        backward_labels: &backward_labels,
         fpu_live: &fpu_live,
         return_float_width: func.return_float_width,
         return_struct_bytes: func.return_struct_bytes,

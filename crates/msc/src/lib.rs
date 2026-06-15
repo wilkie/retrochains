@@ -623,6 +623,11 @@ pub struct Locals<'a> {
     /// every label offset is known (after the whole body is emitted).
     pub labels: &'a std::cell::RefCell<std::collections::HashMap<String, usize>>,
     pub label_fixups: &'a std::cell::RefCell<Vec<(String, usize)>>,
+    /// Names of labels NOT reachable by fall-through because the statement
+    /// directly preceding them is an unconditional `goto`. MSC aligns such a
+    /// label to an even byte offset with a `nop` pad (same as a label after a
+    /// `ret`). Computed by `labels_after_uncond_goto`. Fixture 4214.
+    pub backward_labels: &'a std::collections::HashSet<String>,
     /// FpuStack state: `Some(local_idx)` when that float local's value is
     /// currently live on x87 `st(0)` (its init was stored with `fst`, keeping
     /// the stack top). A coupled `return (int)<local>` consumes it with a bare
@@ -774,6 +779,7 @@ impl Locals<'_> {
             loop_stack: self.loop_stack,
             labels: self.labels,
             label_fixups: self.label_fixups,
+            backward_labels: self.backward_labels,
             fpu_live: self.fpu_live,
             return_float_width: self.return_float_width,
             return_struct_bytes: self.return_struct_bytes,
