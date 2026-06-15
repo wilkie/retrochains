@@ -1,0 +1,4 @@
+description = "Basic `do { } while (cond);` — bottom-checked loop, body always runs at least once. No trampoline jump needed (vs `while`)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

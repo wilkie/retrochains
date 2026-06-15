@@ -1,0 +1,4 @@
+description = "Empty main(), compile to assembly only (-S). Smallest possible fixture: tests that bcc produces a valid .ASM file from the trivial program."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

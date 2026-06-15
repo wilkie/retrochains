@@ -1,4 +1,0 @@
-description = "Bitwise AND of two local ints. Should be a two-operand `and ax,<src>` mirroring +/-."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

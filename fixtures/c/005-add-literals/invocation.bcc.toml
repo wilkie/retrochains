@@ -1,4 +1,0 @@
-description = "Two integer literals added in the return expression. Smallest fixture that exercises any kind of binary operator; whether BCC constant-folds or emits real arithmetic is a discovery."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

@@ -1,4 +1,0 @@
-description = "`break` inside a `for` loop. Confirms break-target semantics across loop kinds."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

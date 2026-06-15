@@ -1,5 +1,0 @@
-description = "`g = a / b;` signed long division. Probe: which helper (presumably `N_LDIV@` or `N_LXDIV@`) and what's the operand convention?"
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

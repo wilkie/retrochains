@@ -1,0 +1,4 @@
+description = "TU-local void function call, no args. Probes how MSC lays out two functions in one OBJ and the call/FIXUP shape."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,5 +1,0 @@
-description = "Call external printf with a string literal and int. Same source as 099-printf-int but -c. Probes EXTDEF (_printf), the FIXUPP referencing it, and the FIXUPP pointing at the string literal in _DATA via DGROUP."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

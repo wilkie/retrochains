@@ -1,0 +1,4 @@
+description = "p[1] = 65; — write a byte through a char-pointer global with a constant index. Companion to 4123 (read); confirms MSC's load-ptr-then-store shape (mov bx,[p]; mov [bx+disp], imm8)."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

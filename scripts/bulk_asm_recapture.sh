@@ -130,7 +130,8 @@ export -f worker recapture_bcc recapture_msc ensure_bcc_asm ensure_msc_asm
 export COMPILER
 
 main() {
-  mapfile -t TARGETS < <(ls -d fixtures/*-obj 2>/dev/null | sort)
+  # Fixtures are nested under fixtures/<lang>/<area>/<sub>/; discover recursively.
+  mapfile -t TARGETS < <(find fixtures -type d -name '*-obj' 2>/dev/null | sort)
   echo "[bulk-asm-recapture] $(date)  targets=${#TARGETS[@]}  jobs=$JOBS  compiler=$COMPILER" | tee -a "$LOG"
   printf '%s\n' "${TARGETS[@]}" \
     | xargs -P "$JOBS" -I{} bash -c 'worker "$@"' _ {} \

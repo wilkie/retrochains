@@ -1,4 +1,0 @@
-description = "`break` inside a `while` loop. Pins the label that `break` targets — likely the synthesized 'past loop' label, which is the slot the while already reserves but doesn't emit for plain conds (the unused +2 slot in `while`'s 3-slot reservation, perhaps)."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

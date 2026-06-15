@@ -1,4 +1,0 @@
-description = "Pointer dereference as lvalue: `*p = 7;`. Pins the indirect-store addressing mode."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

@@ -1,0 +1,25 @@
+[run]
+exit_code = 0
+stdout_sha256 = "a309a6255e0563ffcd467857e8af621ae83a90ac0631fe1f6643b8214a6940a2"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "HELLO.ASM"
+size = 1529
+sha256 = "58b8915660f3b396204ab64d63826aeedd332e938b77240aaa4b4245c1e84cdd"
+mtime = "1991-04-23T12:00:00Z"
+
+[[outputs]]
+name = "HELLO.OBJ"
+size = 277
+sha256 = "2e6eb541980df7e59e5a533062b72d10e1bad9bb5261c9cd324a6f6fcfa7ac75"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "bcc"
+args = [
+    "-c",
+    "-ms",
+    "HELLO.C",
+]
+fake_time = "1991-04-23T12:00:00Z"

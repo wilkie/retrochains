@@ -1,2 +1,0 @@
-void noop(void) {
-}

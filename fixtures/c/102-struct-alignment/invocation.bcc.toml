@@ -1,4 +1,0 @@
-description = "Struct with char followed by int. Pins whether BCC pads to align the int (1 byte char + 1 byte pad + 2 byte int = 4 total) or packs tight (1 + 2 = 3). Either way the field offset of `n` matters for `.n` codegen."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

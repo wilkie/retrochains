@@ -1,9 +1,0 @@
-int sumeven(int n) {
-  int s = 0;
-  int i;
-  for (i = 0; i < n; i++) {
-    if (i & 1) continue;
-    s += i;
-  }
-  return s;
-}

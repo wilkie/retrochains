@@ -1,5 +1,0 @@
-description = "++c on a char local. -c parallel of 047."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

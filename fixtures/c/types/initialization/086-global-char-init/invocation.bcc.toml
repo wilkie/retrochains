@@ -1,0 +1,4 @@
+description = "Initialized global char. Pins `db` emission and char-width addressing of a global from code (`mov al, byte ptr _g / cbw`)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

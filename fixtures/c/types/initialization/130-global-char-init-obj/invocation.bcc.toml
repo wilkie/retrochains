@@ -1,0 +1,5 @@
+description = "Initialized char global. Same source as 086 but -c. _DATA LEDATA with a single byte."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

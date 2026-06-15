@@ -1,0 +1,10 @@
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 5: 'a' is assigned a value that is never used in function main
+
+	Available memory 424560
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 5: 'a' is assigned a value that is never used in function main
+
+	Available memory 425856

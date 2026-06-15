@@ -1,4 +1,0 @@
-description = "While loop with TWO modified locals. Tells us (a) whether multiple locals are enregistered when both are loop-modified, and (b) which gets SI vs DI."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

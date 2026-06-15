@@ -1,0 +1,4 @@
+description = "main() returns a non-zero constant via -S. Exercises immediate-load codegen for return values."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

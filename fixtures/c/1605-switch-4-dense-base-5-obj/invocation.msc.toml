@@ -1,4 +1,0 @@
-description = "Auto-derived from 1605-switch-4-dense-base-5-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

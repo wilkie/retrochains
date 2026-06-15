@@ -1,0 +1,5 @@
+description = "`unsigned long g = a + b;`. Verifies BCC's add emission is identical for `unsigned long` (signed/unsigned add produce the same bytes)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

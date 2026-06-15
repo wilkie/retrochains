@@ -7,8 +7,8 @@ that we want our toolchain to reproduce. The collection is the spec for
 
 ## Directory layout
 
-Fixtures live under `fixtures/`, organized **by source language first** and
-then optionally **by category**. The harness discovers fixtures
+Fixtures live under `fixtures/`, organized **by source language first**, then
+**by feature area and sub-feature**. The harness discovers fixtures
 **recursively** (`fixtures::discover_fixtures`) — a fixture is any directory
 containing an `invocation.<compiler>.toml`, at any depth — so the tree can
 grow new languages and categories freely:
@@ -16,35 +16,47 @@ grow new languages and categories freely:
 ```
 fixtures/
 ├── c/                          # C fixtures (Borland C++ 2.0 / MSC 5.0 as C)
-│   ├── 001-empty-main/         # bulk oracle-derived corpus: flat, numbered
-│   │   ├── invocation.bcc.toml # how to invoke each oracle / our toolchain
-│   │   ├── invocation.msc.toml # (a fixture may target multiple compilers)
-│   │   ├── HELLO.C             # the source(s); DOS 8.3 uppercase names
-│   │   └── expected/           # captured goldens, one subdir per compiler
-│   │       ├── bcc/            #   TRACKED: stdout, stderr, manifest.toml
-│   │       │                   #   GITIGNORED cache: HELLO.ASM, HELLO.OBJ (regen via materialize)
-│   │       └── msc/
-│   ├── 002-.../
-│   ├── bitfields/              # curated/hand-authored fixtures: grouped by category
-│   │   ├── 4145-sum4-subword-obj/
-│   │   └── 4146-sum4-trailbyte-obj/
-│   ├── symbol-ordering/        # extern / BSS / _DATA emission-order discriminators
-│   └── register-allocation/    # reg-pool discriminators
-└── cpp/                        # (future) C++ fixtures — e.g. cpp/vtables/...
+│   ├── expressions/            # feature AREA
+│   │   ├── arithmetic/         #   SUB-FEATURE
+│   │   │   ├── 005-add-literals/
+│   │   │   │   ├── invocation.bcc.toml  # how to invoke each oracle / our toolchain
+│   │   │   │   ├── invocation.msc.toml  # (a fixture may target multiple compilers)
+│   │   │   │   ├── HELLO.C              # the source(s); DOS 8.3 uppercase names
+│   │   │   │   └── expected/            # captured goldens, one subdir per compiler
+│   │   │   │       ├── bcc/             #   TRACKED: stdout, stderr, manifest.toml
+│   │   │   │       │                    #   GITIGNORED cache: HELLO.ASM/.OBJ (regen via materialize)
+│   │   │   │       └── msc/
+│   │   │   └── 1184-int-add-three-distinct/
+│   │   ├── bitwise/  compound-assign/  compare/  cast/  ...
+│   ├── control-flow/           # switch/  loops/  conditionals/  jumps/
+│   ├── aggregates/             # struct/  union/  bitfields/
+│   ├── arrays/  pointers/  functions/  types/  floating-point/
+│   ├── library/  intrinsics/  preprocessor/  codegen/
+│   └── misc/unsorted/          # holding bucket: not yet categorized
+└── cpp/                        # (future) C++ fixtures — e.g. cpp/expressions/...
 ```
 
 Conventions:
 - **Language dir** (`c/`, `cpp/`, …) is the top level. Wildly different
   languages get their own subtree.
-- The **bulk corpus** (oracle-derived, captured in sequence) stays flat
-  directly under its language dir (`c/001-…`, `c/4144-…`).
-- **Curated fixtures** — hand-authored discriminators that pin a specific
-  rule — go in a **category subdir**. They keep a sequential number (the
-  global namespace continues across bulk + curated, e.g. `4145`) AND a
-  descriptive name, so the category groups them while the number stays a
-  short stable reference. Code comments cite the number, e.g. "fixture 4148".
-- New oracle-captured fixtures continue the flat numbering under their
-  language; new curated ones continue the number and pick (or add) a category.
+- **Every fixture is categorized** into `fixtures/<lang>/<area>/<sub>/<NNN-slug>/`.
+  Areas are the feature space (expressions, control-flow, aggregates, arrays,
+  pointers, functions, types, floating-point, library, intrinsics,
+  preprocessor, codegen); each splits into sub-features. The nesting makes
+  **coverage gaps visible** — you can see at a glance which (area, sub) cells
+  are thin. `codegen/` holds discriminators about *how* code is emitted
+  (register-allocation, symbol-ordering) rather than a language feature.
+- **Global numbering per language.** Each fixture keeps a unique sequential
+  number (the `NNN-` prefix) that is stable across the whole language corpus
+  regardless of which folder it lives in. Moving a fixture between categories
+  **keeps its number**; code comments cite the number ("fixture 4148"), and
+  `mscdiff.sh` / `xfix` resolve a fixture by bare name or number at any depth.
+- **Assigning a category** is rule-based from the descriptive slug via
+  `scripts/categorize_fixtures.py` (an ordered `RULES` table, most-specific
+  construct first). Re-run it to propose homes for new fixtures or to audit
+  the current layout; refine the rules rather than hand-sorting in bulk.
+- New oracle-captured fixtures continue the global numbering and land in the
+  area/sub their slug implies (or `misc/unsorted/` pending classification).
 
 - **Source files** live at the fixture root, named as the tool will see
   them inside the DOS work directory. DOS is 8.3 and case-insensitive, so

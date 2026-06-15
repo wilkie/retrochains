@@ -1,0 +1,4 @@
+description = "char + int locals = 3 bytes worth. Discovery fixture: pins down (a) BCC's char local layout, (b) whether BCC pads to even-byte stack alignment, and (c) where the dec-sp → sub-sp threshold actually sits. Char support is otherwise deferred; this fixture is capture-only for now."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

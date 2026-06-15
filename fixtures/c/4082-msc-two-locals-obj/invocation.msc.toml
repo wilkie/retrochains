@@ -1,4 +1,0 @@
-description = "Two int locals declared, neither used. Confirms frame size grows as 2*N and chkstk arg follows."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

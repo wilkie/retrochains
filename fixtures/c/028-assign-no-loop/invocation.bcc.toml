@@ -1,4 +1,0 @@
-description = "Local mutated outside any loop. Tests whether enregistering is triggered by ANY assignment, or specifically by loop usage. If `i` ends up in SI here, the rule is just \"any mutated local\"; if it stays at [bp-2], the rule involves loops."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

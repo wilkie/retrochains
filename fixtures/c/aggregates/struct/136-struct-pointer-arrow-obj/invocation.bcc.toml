@@ -1,0 +1,5 @@
+description = "Pointer-to-struct with -> access. -c parallel of 105. Exercises lea and [si]-based indirect addressing."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

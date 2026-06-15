@@ -1,5 +1,0 @@
-description = "`if (g != 5)` for long. Counterpart to slice 223 (== K); probes whether BCC keeps the chained-cmp shape or inverts somehow."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

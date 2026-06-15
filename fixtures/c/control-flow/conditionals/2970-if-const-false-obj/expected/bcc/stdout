@@ -1,0 +1,10 @@
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 2: Unreachable code in function test
+
+	Available memory 424304
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 2: Unreachable code in function test
+
+	Available memory 425600

@@ -1,5 +1,0 @@
-description = "`g = a | b;` long bitwise OR. Same shape as fixture 221's AND: two independent per-half OR ops, no carry."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

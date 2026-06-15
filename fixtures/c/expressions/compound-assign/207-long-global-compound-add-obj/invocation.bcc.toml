@@ -1,0 +1,5 @@
+description = "Long arithmetic: `g = g + 10` on a long global. Tests the classical 32-bit add-with-carry pattern on a memory-resident long. Probably emits `add word ptr DGROUP:_g, K; adc word ptr DGROUP:_g+2, 0` (or computes via DX:AX)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

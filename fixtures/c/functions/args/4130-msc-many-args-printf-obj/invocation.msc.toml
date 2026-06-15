@@ -1,0 +1,4 @@
+description = "printf with format string + 4 int args. Probes cdecl push-RTL ordering across many constants and the cleanup `add sp, 10` byte count."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

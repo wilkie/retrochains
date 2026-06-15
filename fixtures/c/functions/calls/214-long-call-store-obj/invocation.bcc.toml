@@ -1,0 +1,5 @@
+description = "`g = get();` where `get()` returns long. Tests calling a long-returning function and storing the DX:AX return value into a long global: `call _get` returns DX (high) and AX (low); we store DX to `_g+2` and AX to `_g`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

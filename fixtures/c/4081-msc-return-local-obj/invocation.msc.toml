@@ -1,4 +1,0 @@
-description = "Return an initialized local. Exposes the local-read codegen and whether MSC enregisters a single-use local."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

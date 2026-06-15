@@ -1,3 +1,0 @@
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

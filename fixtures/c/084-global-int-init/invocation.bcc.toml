@@ -1,4 +1,0 @@
-description = "Initialized global int. Expected to land in _DATA with an explicit `dw`. Pins the init-form emission and the data-segment population."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

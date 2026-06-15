@@ -1,4 +1,0 @@
-description = "nested switch in case, non-terminating sibling case; DIRECT continuation + fall-out fusion"
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

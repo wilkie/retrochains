@@ -1,0 +1,5 @@
+description = "`if (g < i)` mixed long-int compare. Probes whether BCC widens i to long then uses 3-jump pattern."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

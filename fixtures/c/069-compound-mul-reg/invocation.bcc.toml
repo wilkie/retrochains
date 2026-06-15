@@ -1,4 +1,0 @@
-description = "`x *= K`. `imul` doesn't accept a register destination + immediate on 8086 (that's 80186+), so BCC must route through AX with the single-operand `imul`. Confirms the shape."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

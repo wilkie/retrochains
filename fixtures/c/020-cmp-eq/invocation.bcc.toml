@@ -1,4 +1,0 @@
-description = "Standalone `==` (equality) returning 0/1."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

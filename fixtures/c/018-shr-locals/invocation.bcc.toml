@@ -1,4 +1,0 @@
-description = "Right shift by a runtime amount. 8086 SAR for signed; discover whether BCC uses SAR or SHR for signed int."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

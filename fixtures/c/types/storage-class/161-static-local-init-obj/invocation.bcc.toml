@@ -1,0 +1,5 @@
+description = "Static local with initializer. The initializer should land in _DATA exactly once; the local should resolve to a DGROUP offset, not a stack frame slot. Distinct from auto locals and from file-scope globals."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

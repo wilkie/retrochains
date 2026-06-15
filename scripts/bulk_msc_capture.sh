@@ -81,9 +81,11 @@ EOF
 export -f capture_one
 export SKIP_PATTERNS
 
-# Targets: every -obj fixture not already in the msc namespace.
+# Targets: every -obj fixture not already in the msc namespace. Fixtures are
+# nested under fixtures/<lang>/<area>/<sub>/, so discover them recursively
+# rather than globbing a fixed depth.
 mapfile -t TARGETS < <(
-  ls -d fixtures/*-obj 2>/dev/null \
+  find fixtures -type d -name '*-obj' 2>/dev/null \
     | grep -v -- '/msc' \
     | grep -v -- '-msc-' \
     | sort

@@ -1,5 +1,0 @@
-description = "`long get() { return 5; }` — function with long return type. Tests how BCC sets up the return value at the function exit: AX gets the high word, DX gets the low word (or both). Pins the long return-value convention."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

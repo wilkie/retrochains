@@ -1,0 +1,5 @@
+description = "`g = a + b;` long arithmetic between three long globals. Tests load-add-store between non-trivial sources. Compare against fixture 207 (`g = g + K`): two distinct memory sources for the operands instead of one source + immediate."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,4 +1,0 @@
-description = "static-arr-compound-add-si: arr[i] compound-modify then read reuses element addr in SI"
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

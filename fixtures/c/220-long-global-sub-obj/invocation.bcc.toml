@@ -1,5 +1,0 @@
-description = "`g = a - b;` long subtraction between three long globals. Unlike fixture 208 (constant-RHS sub via negated add), this needs actual `sub`/`sbb` since the subtrahend is a memory operand."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
-asm_args = ["-S", "-ms", "HELLO.C"]

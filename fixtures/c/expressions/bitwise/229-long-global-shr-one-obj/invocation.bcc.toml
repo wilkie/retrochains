@@ -1,0 +1,5 @@
+description = "`g = a >> 1;` signed long right-shift by one. Expected: sar high,1 / rcr low,1 (sign-fill into high, carry threads through to low MSB)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

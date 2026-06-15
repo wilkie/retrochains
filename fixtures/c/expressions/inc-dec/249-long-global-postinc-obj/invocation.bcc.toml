@@ -1,0 +1,5 @@
+description = "`g++;` for long global. Probes BCC's 32-bit increment pattern (likely add low,1; adc high,0)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

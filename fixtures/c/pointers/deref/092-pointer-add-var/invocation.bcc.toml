@@ -1,0 +1,4 @@
+description = "Pointer plus a variable offset, dereferenced. Pins variable-offset pointer arithmetic — probably the same shl/lea/add idiom we saw in array indexing (fixture 079), but without the lea-of-bp-relative part."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,5 +1,0 @@
-double main(void) {
-  double a = 3.0;
-  double b = 4.0;
-  return a * b;
-}

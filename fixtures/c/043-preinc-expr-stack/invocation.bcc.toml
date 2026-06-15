@@ -1,4 +1,0 @@
-description = "Pre-increment as part of an expression (the return value). x is referenced 2× textually (init + ++x) so it should stay on the stack; pins how the new value gets into AX."
-tool = "bcc"
-args = ["-S", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]

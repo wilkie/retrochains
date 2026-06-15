@@ -1,4 +1,0 @@
-description = "do x = x - 1; while (x); — probes the cond-at-bottom shape (no initial forward jump)."
-tool = "cl"
-args = ["/c", "/Fa", "/AS", "HELLO.C"]
-inputs = ["HELLO.C"]

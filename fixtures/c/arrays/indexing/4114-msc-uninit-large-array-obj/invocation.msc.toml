@@ -1,0 +1,4 @@
+description = "int a[100]; — 200-byte tentative array. Probes COMDEF length encoding past the single-byte ≤0x80 form: 0x81 prefix + u16 little-endian length."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
