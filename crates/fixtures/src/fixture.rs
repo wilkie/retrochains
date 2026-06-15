@@ -125,11 +125,47 @@ impl Fixture {
         Ok(Self { root, name, compiler: compiler.to_owned(), invocation })
     }
 
-    /// Path to the `expected/<compiler>/` directory (which may not
-    /// yet exist).
+    /// Path to the `expected/<compiler>/` directory (which holds the tracked,
+    /// release-keyed manifests; may not yet exist).
     #[must_use]
     pub fn expected_dir(&self) -> PathBuf {
         self.root.join("expected").join(&self.compiler)
+    }
+
+    /// The oracle *release* for this fixture's compiler (e.g. `BC2` for `bcc`).
+    /// Falls back to the compiler name for an unregistered vendor.
+    #[must_use]
+    pub fn release(&self) -> &str {
+        oracle::toolchain(&self.compiler).map_or(self.compiler.as_str(), |t| t.release)
+    }
+
+    /// Path to the tracked, release-keyed manifest:
+    /// `expected/<compiler>/<RELEASE>.toml` (e.g. `expected/bcc/BC2.toml`).
+    #[must_use]
+    pub fn manifest_path(&self) -> PathBuf {
+        self.expected_dir().join(format!("{}.toml", self.release()))
+    }
+
+    /// Where the gitignored golden cache lives — output files plus
+    /// `stdout`/`stderr`: `<ws>/artifacts/<fixture-rel>/<compiler>/<RELEASE>/`,
+    /// mirroring the fixture's own path under `fixtures/`. The bytes are a
+    /// reproducible cache (their hashes are pinned in the tracked manifest), so
+    /// they live outside the tracked tree where git can prune them wholesale.
+    #[must_use]
+    pub fn artifacts_dir(&self) -> PathBuf {
+        // Rebuild the fixture's path with its first `fixtures` component
+        // swapped for `artifacts`, then append the compiler/release.
+        let mut base = PathBuf::new();
+        let mut swapped = false;
+        for comp in self.root.components() {
+            if !swapped && comp.as_os_str() == "fixtures" {
+                base.push("artifacts");
+                swapped = true;
+            } else {
+                base.push(comp.as_os_str());
+            }
+        }
+        base.join(&self.compiler).join(self.release())
     }
 
     /// Resolve the list of input files to materialize, applying the default

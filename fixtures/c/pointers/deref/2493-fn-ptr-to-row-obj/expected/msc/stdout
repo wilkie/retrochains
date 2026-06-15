@@ -1,4 +1,0 @@
-HELLO.C
-HELLO.C(8) : warning C4046: '&' on function/array, ignored
-HELLO.C(8) : warning C4047: 'argument' : different levels of indirection
-HELLO.C(8) : warning C4024: 'sum_row' : different types : parameter 1

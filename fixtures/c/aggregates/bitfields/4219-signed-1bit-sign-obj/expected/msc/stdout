@@ -1,3 +1,0 @@
-HELLO.C
-HELLO.C(1) : warning C4014: 'flag' : bit-field type must be unsigned
-HELLO.C(1) : warning C4014: 'rest' : bit-field type must be unsigned

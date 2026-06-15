@@ -252,9 +252,16 @@ impl OracleConfig {
 /// place and can't drift out of sync across call sites.
 #[derive(Debug, Clone, Copy)]
 pub struct ToolchainProfile {
-    /// Identifier shared by the `--compiler` flag, `invocation.<name>.toml`
-    /// and `expected/<name>/`.
+    /// Compiler-family identifier shared by the `--compiler` flag,
+    /// `invocation.<name>.toml`, the `oracles/<name>/` directory and
+    /// `expected/<name>/`. Selects the reimplementation target and recipe.
     pub name: &'static str,
+    /// Oracle *release* — the specific reference distribution whose bytes the
+    /// goldens reproduce (e.g. `BC2`, `MSC500`). Matches the descriptor stem
+    /// under `oracles/<name>/<release>.toml` and keys the release-specific
+    /// goldens (`expected/<name>/<release>.toml`, `artifacts/.../<name>/<release>/`).
+    /// One family can grow several releases (BC2, BC3); each is its own row.
+    pub release: &'static str,
     /// Builds the oracle config (distribution + dosbox + faketime) for a
     /// given workspace root.
     pub oracle_config: fn(&Path) -> OracleConfig,
@@ -273,11 +280,13 @@ pub struct ToolchainProfile {
 pub const TOOLCHAINS: &[ToolchainProfile] = &[
     ToolchainProfile {
         name: "bcc",
+        release: "BC2",
         oracle_config: OracleConfig::for_workspace,
         fake_time: FakeTime::bc2,
     },
     ToolchainProfile {
         name: "msc",
+        release: "MSC500",
         oracle_config: OracleConfig::for_msc500_workspace,
         fake_time: FakeTime::msc500,
     },

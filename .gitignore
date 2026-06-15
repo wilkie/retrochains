@@ -34,22 +34,20 @@ oracles/**/*.zip
 .provision-*/
 
 # Compiler binary build artifacts are NOT tracked. A fixture's
-# `expected/<compiler>/manifest.toml` records the SHA-256 (and size) of every
+# `expected/<compiler>/<RELEASE>.toml` records the SHA-256 (and size) of every
 # output, and that hash is the byte-exact contract the harness gates on. The
-# multi-megabyte .OBJ/.ASM/.EXE/.MAP bytes are a reproducible cache: regenerate
-# them on demand with `xfix materialize <fixture>`, which re-runs the oracle and
-# asserts each reproduction matches the recorded hash. They were purged from
-# history (see git log); never re-add them. Only the artifacts under
-# `expected/` are ignored, so future hand-written tasm-input `.ASM` fixtures
-# (which live at the fixture root, like `HELLO.C`) stay trackable.
-fixtures/**/expected/**/*.OBJ
-fixtures/**/expected/**/*.obj
-fixtures/**/expected/**/*.ASM
-fixtures/**/expected/**/*.asm
-fixtures/**/expected/**/*.EXE
-fixtures/**/expected/**/*.exe
-fixtures/**/expected/**/*.MAP
-fixtures/**/expected/**/*.map
+# multi-megabyte `.OBJ`/`.ASM`/`.EXE`/`.MAP` bytes plus captured `stdout`/`stderr`
+# are a reproducible cache: regenerate them on demand with `xfix materialize
+# <fixture>`, which re-runs the oracle and asserts each reproduction matches the
+# recorded hash. They live under `artifacts/`, mirroring the fixtures tree
+# (`artifacts/<fixture-path>/<compiler>/<RELEASE>/`), so git prunes the whole
+# cache in one step instead of walking every fixture directory. See
+# artifacts/README.md. They were purged from history once (see git log); never
+# re-add them.
+# `/artifacts/*` (not `/artifacts/`) so the README stays trackable while git
+# still prunes each ignored subtree (artifacts/c/…) without descending into it.
+/artifacts/*
+!/artifacts/README.md
 
 # Stray Borland-built artifacts at the repo root and the `w/` scratch dir.
 /*.OBJ

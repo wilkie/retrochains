@@ -45,20 +45,23 @@ pub fn capture(workspace_root: &Path, fixture: &Fixture) -> Result<(), HarnessEr
     let run = run_oracle(workspace_root, fixture)?;
     let manifest = build_manifest(fixture, &run, oracle_summary(fixture));
 
-    let expected = fixture.expected_dir();
-    if expected.exists() {
-        fs::remove_dir_all(&expected)?;
-    }
-    fs::create_dir_all(&expected)?;
-
-    fs::write(expected.join("stdout"), &run.stdout)?;
-    fs::write(expected.join("stderr"), &run.stderr)?;
-    for output in &run.outputs {
-        fs::write(expected.join(output.0), &output.1.bytes)?;
-    }
+    // Tracked: the release-keyed manifest -> expected/<compiler>/<RELEASE>.toml.
+    fs::create_dir_all(fixture.expected_dir())?;
     let manifest_text = toml::to_string_pretty(&manifest)
         .map_err(|e| HarnessError::ManifestSerialize(e.to_string()))?;
-    fs::write(expected.join("manifest.toml"), manifest_text)?;
+    fs::write(fixture.manifest_path(), manifest_text)?;
+
+    // Gitignored cache: streams + output bytes -> artifacts/.../<compiler>/<RELEASE>/.
+    let artifacts = fixture.artifacts_dir();
+    if artifacts.exists() {
+        fs::remove_dir_all(&artifacts)?;
+    }
+    fs::create_dir_all(&artifacts)?;
+    fs::write(artifacts.join("stdout"), &run.stdout)?;
+    fs::write(artifacts.join("stderr"), &run.stderr)?;
+    for output in &run.outputs {
+        fs::write(artifacts.join(output.0), &output.1.bytes)?;
+    }
     Ok(())
 }
 
@@ -97,18 +100,20 @@ pub fn verify_ours(
         .collect();
     let mut diff = Diff { manifest: manifest_diffs, ..Diff::default() };
 
-    let expected_dir = fixture.expected_dir();
+    // Streams + output goldens live in the (gitignored) artifacts cache; they
+    // may not be materialized, in which case the byte diffs are simply skipped
+    // — the manifest diff above is the gating check either way.
+    let artifacts_dir = fixture.artifacts_dir();
     // Streams are noted as advisory in the report but don't gate.
-    for (name, expected, actual) in [
-        ("stdout", read_file(&expected_dir, "stdout")?, run.stdout.clone()),
-        ("stderr", read_file(&expected_dir, "stderr")?, run.stderr.clone()),
-    ] {
-        if let Some(d) = diff_bytes(name, &expected, &actual) {
+    for (name, actual) in [("stdout", &run.stdout), ("stderr", &run.stderr)] {
+        if let Some(expected) = read_file_opt(&artifacts_dir, name)?
+            && let Some(d) = diff_bytes(name, &expected, actual)
+        {
             diff.advisory.push(d);
         }
     }
     for (name, output) in &run.outputs {
-        let expected = read_file_opt(&expected_dir, name)?;
+        let expected = read_file_opt(&artifacts_dir, name)?;
         if let Some(expected) = expected
             && let Some(file_diff) = diff_bytes(name, &expected, &output.bytes)
         {
@@ -174,12 +179,12 @@ pub fn materialize(workspace_root: &Path, fixture: &Fixture) -> Result<(), Harne
         });
     }
 
-    let expected = fixture.expected_dir();
-    fs::create_dir_all(&expected)?;
-    fs::write(expected.join("stdout"), &run.stdout)?;
-    fs::write(expected.join("stderr"), &run.stderr)?;
+    let artifacts = fixture.artifacts_dir();
+    fs::create_dir_all(&artifacts)?;
+    fs::write(artifacts.join("stdout"), &run.stdout)?;
+    fs::write(artifacts.join("stderr"), &run.stderr)?;
     for (name, output) in &run.outputs {
-        fs::write(expected.join(name), &output.bytes)?;
+        fs::write(artifacts.join(name), &output.bytes)?;
     }
     Ok(())
 }
@@ -217,17 +222,18 @@ pub fn verify_oracle(workspace_root: &Path, fixture: &Fixture) -> Result<Diff, H
         ..Diff::default()
     };
 
-    let expected_dir = fixture.expected_dir();
-    if let Some(file_diff) = diff_bytes("stdout", &read_file(&expected_dir, "stdout")?, &run.stdout)
-    {
-        diff.files.push(file_diff);
-    }
-    if let Some(file_diff) = diff_bytes("stderr", &read_file(&expected_dir, "stderr")?, &run.stderr)
-    {
-        diff.files.push(file_diff);
+    // Streams + output goldens come from the (gitignored) artifacts cache;
+    // skip any that aren't materialized (the manifest diff still gates).
+    let artifacts_dir = fixture.artifacts_dir();
+    for (name, actual) in [("stdout", &run.stdout), ("stderr", &run.stderr)] {
+        if let Some(expected) = read_file_opt(&artifacts_dir, name)?
+            && let Some(file_diff) = diff_bytes(name, &expected, actual)
+        {
+            diff.files.push(file_diff);
+        }
     }
     for (name, output) in &run.outputs {
-        let expected = read_file_opt(&expected_dir, name)?;
+        let expected = read_file_opt(&artifacts_dir, name)?;
         if let Some(expected) = expected
             && let Some(file_diff) = diff_bytes(name, &expected, &output.bytes)
         {
@@ -450,14 +456,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn load_expected_manifest(fixture: &Fixture) -> Result<Manifest, HarnessError> {
-    let path = fixture.expected_dir().join("manifest.toml");
+    let path = fixture.manifest_path();
     let text = fs::read_to_string(&path)
         .map_err(|e| HarnessError::MissingExpected(path.clone(), e.to_string()))?;
     toml::from_str(&text).map_err(|e| HarnessError::ManifestParse(path, e.to_string()))
-}
-
-fn read_file(dir: &Path, name: &str) -> Result<Vec<u8>, HarnessError> {
-    fs::read(dir.join(name)).map_err(HarnessError::Io)
 }
 
 fn read_file_opt(dir: &Path, name: &str) -> Result<Option<Vec<u8>>, HarnessError> {
