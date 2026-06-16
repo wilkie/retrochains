@@ -137,17 +137,38 @@ Disassembling the manager (`__INITMODULES` at `_OVRTEXT_:0x2A0`, the relocator a
   **`count` (+6) is never read.** So `flags` is the one functional classifier:
   bit0 = code/relocatable, bit1 = overlay stub, bit2 = OVRINFO-mgmt.
 
+### The writer (from disassembling TLINK.EXE)
+
+TLINK's `__SEGTABLE__` writer is at file `0x57A0`; the generated-symbol /
+segment-name string pool it draws on is at `0x5C00` (`__SEGTABLE__`,
+`__SEGTABEND__`, `__OVRTRAP__`, `__EXENAME__`, `__EXEDATE__`, `_OvrPrepare` —
+confirming `_OvrPrepare` is an injected pull root). For each segment it fills an
+8-byte entry buffer at `DS:0x290` from TLINK's internal segment structures:
+
+- **`para` (+0)** — computed and stored last.
+- **`size` (+2) = `segrec[0x10]`** — the segment's memory size as TLINK
+  finalized it (already includes the `+count` slack; SEGDEF length plays no part
+  here).
+- **`flags` (+4) = `segrec[0x4]`** — the segment's stored type word
+  (0=data, 1=code, 3=stub, 4=OVRINFO-mgmt).
+- **`count` (+6)** and the flags come back from the helper at `0x8230`, which for
+  an overlay-relevant segment returns **`count = segArray[segrec[0]][0x8]`**
+  (walking TLINK's tables at `[0x77e]`/`[0x776]`/`[0x79e]`).
+
+The **`FBOV` writer** sits just after, at file `0x825B`: `mov word[di],0x4246`
+(`'FB'`) + `mov word[di+2],0x564F` (`'OV'`), then a 0xE-byte header whose file
+offset comes from `0x8227` (`(total − 0x10·segParas + 0xF) & ~0xF`).
+
 ### The remaining byte-exact gap
 
-`size`/`count` for non-stub segments are pure TLINK bookkeeping the manager
-ignores — but a byte-exact EXE still needs them. SEGDEF length equals the
-LEDATA-filled length (no uninitialized tail), so the `size = len + count` slack
-(`+9` for MAIN_TEXT, `+0xA` for `_OVRTEXT_`, `+0` for C0's `_TEXT`; the irregular
-DGROUP-tail values) is *added by TLINK* from something not visible in the link
-output or the manager. Pinning these last cosmetic fields needs TLINK's own
-table writer disassembled (a separate effort from OVRMAN) — but the functional
-model (relocation table + stubs + flags) is now fully understood, which is what
-the implementation actually builds against.
+`size` and `count` are now localized to specific TLINK fields (`segrec[0x10]`,
+`segArray[…][0x8]`) rather than mysteries — but their *values* are set during
+TLINK's segment construction (the `+9`/`+0xA` slack: MAIN_TEXT=9, `_OVRTEXT_`=0xA,
+C0 `_TEXT`=0; the irregular DGROUP-tail values). The manager ignores them, so
+they're cosmetic; reproducing them byte-exact is the last item and needs the
+segment-construction code (where `segArray[..][8]`/`segrec[0x10]` are assigned)
+traced. The **functional** model — relocation table, stubs, flags, FBOV — is
+complete, which is what the implementation builds against.
 
 ## What a byte-exact implementation needs
 
