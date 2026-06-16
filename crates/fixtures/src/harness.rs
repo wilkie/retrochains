@@ -279,6 +279,7 @@ pub struct ToolPaths {
     pub bcc: Option<PathBuf>,
     pub tasm: Option<PathBuf>,
     pub tlink: Option<PathBuf>,
+    pub tlib: Option<PathBuf>,
     /// Our future MSC reimplementation (`crates/msc`). `None` today —
     /// `--toolchain ours` against an MSC fixture currently has no
     /// path to spawn.
@@ -300,9 +301,11 @@ impl ToolPaths {
             // leave it unbound so `tool = tasm` fixtures surface as
             // ToolNotImplemented (→ skipped) rather than spuriously failing.
             tasm: None,
-            // `tlink` is a real reimplementation now (crates/bcc-tlink): bind it
-            // so the standalone-linker fixtures gate the linked `.EXE`.
+            // `tlink`/`tlib` are real reimplementations now (crates/bcc-tlink,
+            // crates/bcc-tlib): bind them so the standalone-linker fixtures gate
+            // the linked `.EXE` and the librarian fixtures gate the `.LIB`.
             tlink: pick("tlink"),
+            tlib: pick("tlib"),
             msc: pick("msc"),
         }
     }
@@ -312,11 +315,12 @@ impl ToolPaths {
             ToolName::Bcc => &self.bcc,
             ToolName::Tasm => &self.tasm,
             ToolName::Tlink => &self.tlink,
+            ToolName::Tlib => &self.tlib,
             ToolName::Cl => &self.msc,
-            // Oracle-only tools with no host reimplementation (TLIB builds the
-            // library inputs; MASM/LINK are MSC's). Fixtures using them as the
-            // primary tool are not-applicable under `--toolchain ours`.
-            ToolName::Tlib | ToolName::Masm | ToolName::Link => &None,
+            // Oracle-only tools with no host reimplementation yet (MASM/LINK are
+            // MSC's). Fixtures using them as the primary tool are not-applicable
+            // under `--toolchain ours`.
+            ToolName::Masm | ToolName::Link => &None,
         };
         opt.as_deref().ok_or(HarnessError::ToolNotImplemented(tool.as_str().to_owned()))
     }

@@ -1,0 +1,4 @@
+description = "Standalone TLIB: build a one-member library from ADD.OBJ (tlib MYLIB +ADD). Pins the librarian's .LIB output byte-exact — member layout (THEADR renamed to the module basename, rest copied), page-aligned framing, the 0xF1 LIBEND pad, and the 37-bucket dictionary (hash + sorted insertion). Input ADD.OBJ tracked (provenance ADD.ASM). tool=tlib gates MYLIB.LIB."
+tool = "tlib"
+args = ["MYLIB", "+ADD"]
+inputs = ["ADD.OBJ"]

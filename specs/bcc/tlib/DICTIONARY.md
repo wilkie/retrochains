@@ -6,6 +6,24 @@ object. Reverse-engineered empirically against TLIB-built archives (probe libs
 built with the now-shipped `TLIB.EXE`; see `../../formats/LIB_ARCHIVE.md` for the
 surrounding archive framing). Reproduced in `crates/bcc-tlib/src/dict.rs`.
 
+## What TLIB writes (byte-exact archive)
+
+Reproduced by `crates/bcc-tlib` (`write.rs`), gated byte-exact by fixture
+`4263-tlib-create-lib` (`tlib MYLIB +ADD` → `MYLIB.LIB`):
+
+- **Header** — a `0xF0` record whose length is `page_size − 3` so the record
+  fills the first 16-byte page; payload is `dict_offset:u32`, `dict_blocks:u16`,
+  `flags:u8`, then zero padding.
+- **Members** — each member's OMF stream with **only its THEADR rewritten** to
+  the module name (the `+spec` basename, no extension, uppercased — e.g.
+  `ADD.ASM` → `ADD`); every other record is copied verbatim (TASM objects keep
+  their COMENTs). Each member is padded up to a page boundary.
+- **LIBEND** — a `0xF1` record at the page-aligned end of the members, whose
+  length pads the file out to the **512-aligned** dictionary offset.
+- **Dictionary** — indexed names are each member's **public symbols** plus its
+  **module name + `!`**, with the member's 1-based page number; entries inserted
+  in sorted (ASCII) order.
+
 ## Block layout
 
 A dictionary is one or more **512-byte blocks**. Within a block:

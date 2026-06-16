@@ -3,3 +3,6 @@
 //! and `specs/bcc/tlib/`.
 
 pub mod dict;
+pub mod write;
+
+pub use write::{WriteError, build_library};

@@ -1,0 +1,18 @@
+[run]
+exit_code = 0
+stdout_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "MYLIB.LIB"
+size = 1024
+sha256 = "322372586ee155f33e9488e20ae469477bcce6db512df98836d4563114c065b9"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "tlib"
+args = [
+    "MYLIB",
+    "+ADD",
+]
+fake_time = "1991-04-23T12:00:00Z"
