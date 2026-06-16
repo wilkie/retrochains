@@ -104,6 +104,30 @@ pub enum Idiom {
     StoreGlobal,
     /// `eb rr` — `jmp rel8`: a short jump (control flow; `eb 00` is the exit jump).
     ShortJump,
+    /// `8b /r` or `89 /r` with mod=11 — `mov r16, r16` (register copy).
+    MovReg,
+    /// `b9+r ii ii` — `mov r16, imm16` for a register other than ax (often a
+    /// register variable initialized to a constant; ax is [`LoadImmAx`]).
+    LoadImmReg,
+    /// `03/2b/0b/23/33/3b /r` with mod=11 — `add/sub/or/and/xor/cmp r16, r16`.
+    AluReg,
+    /// the same opcodes with `[bp±disp]` — an ALU op against a local/param.
+    AluLocal,
+    /// `83 /r ii` — an ALU op with a sign-extended `imm8` (`add/cmp/...`).
+    AluImm,
+    /// `8d /r [bp±N]` — `lea r16, [bp±disp]`: the address of a local (array /
+    /// struct / `&local`).
+    LeaLocal,
+    /// `c6 46 N ii` — `mov [bp±disp], imm8`: store a `char` literal to a local.
+    StoreImmLocalByte,
+    /// `98` — `cbw`: sign-extend al→ax (the `char`→`int` promotion).
+    Cbw,
+    /// `f7 /r` with mod=11 — group 3 (`imul/idiv/mul/div/neg/not`).
+    Grp3,
+    /// `d1 /r` with mod=11 — shift/rotate a register by 1.
+    Shift1,
+    /// `ff /r [bp±N]` — group 5 on a local (`inc/dec/push`).
+    Grp5Local,
 }
 
 impl Idiom {
@@ -178,6 +202,17 @@ impl Idiom {
             Idiom::LoadGlobal => "load global (mov ax, [mem])",
             Idiom::StoreGlobal => "store global (mov [mem], ax)",
             Idiom::ShortJump => "short jump (jmp rel8)",
+            Idiom::MovReg => "mov reg, reg",
+            Idiom::LoadImmReg => "load reg, imm16",
+            Idiom::AluReg => "alu reg, reg (add/sub/or/and/xor/cmp)",
+            Idiom::AluLocal => "alu reg, local",
+            Idiom::AluImm => "alu r/m, imm8",
+            Idiom::LeaLocal => "lea (address of local)",
+            Idiom::StoreImmLocalByte => "store char imm to local (mov [bp±N], imm8)",
+            Idiom::Cbw => "cbw (sign-extend al→ax)",
+            Idiom::Grp3 => "grp3 (imul/idiv/neg/not)",
+            Idiom::Shift1 => "shift/rotate by 1",
+            Idiom::Grp5Local => "grp5 on local (inc/dec/push)",
         }
     }
 }
@@ -201,6 +236,8 @@ use Bm::{Any as A, Lit as L, Mask as M};
 
 /// ModR/M byte selecting `[bp+disp8]` with any `reg` field (mod=01, rm=110).
 const BP_DISP8: Bm = M(0xc7, 0x46);
+/// ModR/M byte selecting a register operand (mod=11), any `reg`/`rm`.
+const REG: Bm = M(0xc0, 0xc0);
 
 /// The idiom catalog, ordered most-specific-first so a longer idiom wins over a
 /// prefix of it at the same offset (e.g. `MscChkstkPrologue` and
@@ -220,21 +257,47 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::BccZeroAx, pat: &[L(0x33), L(0xc0)] },
     Def { idiom: Idiom::MscZeroAx, pat: &[L(0x2b), L(0xc0)] },
     Def { idiom: Idiom::StackReserve2, pat: &[L(0x4c), L(0x4c)] },
+    Def { idiom: Idiom::Cbw, pat: &[L(0x98)] },
     Def { idiom: Idiom::FarCall, pat: &[L(0x9a), A, A, A, A] },
-    // mov [bp±N]/[mem], imm16 — store a literal to a local or global.
+    // store a literal (word / byte) to a local or global.
     Def { idiom: Idiom::StoreImmLocal, pat: &[L(0xc7), L(0x46), A, A, A] },
     Def { idiom: Idiom::StoreImmGlobal, pat: &[L(0xc7), L(0x06), A, A, A, A] },
-    // bp-relative loads/stores (word and byte).
+    Def { idiom: Idiom::StoreImmLocalByte, pat: &[L(0xc6), L(0x46), A, A] },
+    // bp-relative loads/stores (word and byte), and lea of a local.
     Def { idiom: Idiom::LoadLocal, pat: &[L(0x8b), BP_DISP8, A] },
     Def { idiom: Idiom::StoreLocal, pat: &[L(0x89), BP_DISP8, A] },
     Def { idiom: Idiom::LoadLocalByte, pat: &[L(0x8a), BP_DISP8, A] },
     Def { idiom: Idiom::StoreLocalByte, pat: &[L(0x88), BP_DISP8, A] },
+    Def { idiom: Idiom::LeaLocal, pat: &[L(0x8d), BP_DISP8, A] },
+    Def { idiom: Idiom::Grp5Local, pat: &[L(0xff), BP_DISP8, A] },
     // global loads/stores via the accumulator-direct forms.
     Def { idiom: Idiom::LoadGlobal, pat: &[L(0xa1), A, A] },
     Def { idiom: Idiom::StoreGlobal, pat: &[L(0xa3), A, A] },
-    Def { idiom: Idiom::NearCall, pat: &[L(0xe8), A, A] },
-    Def { idiom: Idiom::LoadImmAx, pat: &[L(0xb8), A, A] },
+    // reg-to-reg mov, and ALU reg,reg / reg,local (add/sub/or/and/xor/cmp).
+    Def { idiom: Idiom::MovReg, pat: &[L(0x8b), REG] },
+    Def { idiom: Idiom::MovReg, pat: &[L(0x89), REG] },
+    Def { idiom: Idiom::AluReg, pat: &[L(0x03), REG] },
+    Def { idiom: Idiom::AluReg, pat: &[L(0x2b), REG] },
+    Def { idiom: Idiom::AluReg, pat: &[L(0x0b), REG] },
+    Def { idiom: Idiom::AluReg, pat: &[L(0x23), REG] },
+    Def { idiom: Idiom::AluReg, pat: &[L(0x33), REG] },
+    Def { idiom: Idiom::AluReg, pat: &[L(0x3b), REG] },
+    Def { idiom: Idiom::AluLocal, pat: &[L(0x03), BP_DISP8, A] },
+    Def { idiom: Idiom::AluLocal, pat: &[L(0x2b), BP_DISP8, A] },
+    Def { idiom: Idiom::AluLocal, pat: &[L(0x0b), BP_DISP8, A] },
+    Def { idiom: Idiom::AluLocal, pat: &[L(0x23), BP_DISP8, A] },
+    Def { idiom: Idiom::AluLocal, pat: &[L(0x33), BP_DISP8, A] },
+    Def { idiom: Idiom::AluLocal, pat: &[L(0x3b), BP_DISP8, A] },
+    // group-1 ALU with imm8 (reg or local); CdeclPopN (`83 c4`) wins first.
     Def { idiom: Idiom::CdeclPopN, pat: &[L(0x83), L(0xc4), A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), BP_DISP8, A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), REG, A] },
+    // unary group 3 (imul/idiv/...) and shift-by-1.
+    Def { idiom: Idiom::Grp3, pat: &[L(0xf7), REG] },
+    Def { idiom: Idiom::Shift1, pat: &[L(0xd1), REG] },
+    Def { idiom: Idiom::NearCall, pat: &[L(0xe8), A, A] },
+    Def { idiom: Idiom::LoadImmAx, pat: &[L(0xb8), A, A] }, // ax-specific; before LoadImmReg
+    Def { idiom: Idiom::LoadImmReg, pat: &[M(0xf8, 0xb8), A, A] },
     Def { idiom: Idiom::ShortJump, pat: &[L(0xeb), A] },
     Def { idiom: Idiom::SaveRegVar, pat: &[M(0xfe, 0x56)] }, // push si / push di
     Def { idiom: Idiom::RestoreRegVar, pat: &[M(0xfe, 0x5e)] }, // pop si / pop di
