@@ -99,13 +99,27 @@ exe filename (`prog.exe`) and date. Each entry:
              small values (MAIN_TEXT=9, _OVRTEXT_=0xA); still being pinned
 ```
 
-`type` cleanly distinguishes the overlaid module's resident **stub** (`MOD_TEXT`
-STUBSEG, `type=3`, `size=0x25`) from everything else. The `size`/`count` fields
-match byte length for some segments (`_TEXT`=0x1079, the stub=0x25) but not all
-DGROUP segments (`_DATA` length 0x292 vs table 0x324) — the exact derivation
-(cumulative group size? alignment padding? relocation counts) is the main open
-item before this can be emitted byte-exact, and likely wants either a second
-example program to diff or a disassembly of `OVRMAN`'s table reader.
+Confirmed by diffing two programs (1 overlay vs 2 overlays, varied call counts):
+
+- **Entries are 1:1 with resident segments in load order** (verified across the
+  shift introduced by the second overlay's extra stub entry).
+- **`type`**: 1=code, 0=data/far/stack, 3=resident stub, 4=OVRINFO-mgmt.
+- **Each overlaid module → one `type=3` stub entry**, `size` = the stub length
+  (`0x25`). The `:OVY` overlay copies are absent (they're in the FBOV area).
+- **OVRINFO management segments** (`_STUB_`/`_EXTSEG_`/`_EMSSEG_`/`_VDISKSEG_`/
+  `_EXEINFO_`) use **`size = 0xFFFF`** (a sentinel).
+- **`_OVRDATA_`** (the overlay load list) table `size` grew **+8** (0x198 →
+  0x1a0) for the second overlay → 8 bytes of runtime list per overlaid segment.
+- **Code segments**: `size = len + count`, and **`count` is fixed per segment**
+  — MAIN_TEXT=9 whether it has 1 call/1 reloc (probe A) or 3 calls/3 relocs
+  (probe B); `_OVRTEXT_`=0xA; `_TEXT` (C0)=0. So `count` tracks neither call
+  count nor relocation count nor OBJ fixup count.
+
+**Still opaque (needs OVRMAN disassembly, not more diffing):** the `count`
+derivation for code segments, and the DGROUP-tail entries (`_CVTSEG`…`_BSSEND`)
+whose `size`/`count` are small irregular values (1/2, 0xD/0xE, 3/4) unrelated to
+their lengths. The next step is to disassemble `OVRMAN`'s `__SEGTABLE__` reader
+(in `_OVRTEXT_`) to learn what each field actually feeds.
 
 ## What a byte-exact implementation needs
 
