@@ -81,6 +81,7 @@ dependencies = [
 name = "bcc-tlink"
 version = "0.0.0"
 dependencies = [
+ "bcc-tlib",
  "obj",
  "sha2 0.10.9",
  "thiserror",

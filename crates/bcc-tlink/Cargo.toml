@@ -22,6 +22,7 @@ thiserror = "2"
 
 [dev-dependencies]
 sha2 = "0.10"
+bcc-tlib = { path = "../bcc-tlib" }
 
 [lints]
 workspace = true
