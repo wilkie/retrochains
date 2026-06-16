@@ -61,6 +61,45 @@ fn check(m: char, obj: &str, exe_sha: &str, map_sha: Option<&str>) {
     }
 }
 
+/// VROOMM overlay link: a medium-model program whose `MOD.OBJ` is overlaid
+/// (`tlink C0M+MAIN /o MOD, PROG, , CM+OVERLAY`). Drives the full overlay path —
+/// force-pulling the disk-overlay manager, generating the INT 3F stub, the
+/// `_EXEINFO_`/`__SEGTABLE__` relocation table, and the appended FBOV area — and
+/// asserts the whole EXE (resident image + overlay area) byte-matches TLINK.
+fn overlay_data(name: &str) -> Vec<u8> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/overlay").join(name);
+    std::fs::read(&p).unwrap_or_else(|e| panic!("read overlay/{name}: {e}"))
+}
+
+#[test]
+fn medium_overlay() {
+    // The startup + runtime + overlay manager libraries come from the
+    // provisioned install; skip when it isn't present (same as the model links).
+    let dir = lib_dir();
+    let (c0_path, cm_path, ovl_path) =
+        (dir.join("C0M.OBJ"), dir.join("CM.LIB"), dir.join("OVERLAY.LIB"));
+    if !c0_path.exists() || !cm_path.exists() || !ovl_path.exists() {
+        eprintln!("skipping overlay capstone: install not found at {} (run `oracle provision bcc`)", dir.display());
+        return;
+    }
+    let objects = vec![
+        ("C0M.OBJ".to_string(), std::fs::read(&c0_path).expect("read C0M")),
+        ("MAIN.OBJ".to_string(), overlay_data("MAIN.OBJ")),
+        ("MOD.OBJ".to_string(), overlay_data("MOD.OBJ")),
+    ];
+    let libraries = vec![
+        ("CM.LIB".to_string(), std::fs::read(&cm_path).expect("read CM.LIB")),
+        ("OVERLAY.LIB".to_string(), std::fs::read(&ovl_path).expect("read OVERLAY.LIB")),
+    ];
+    let overlaid: std::collections::HashSet<String> = ["MOD.OBJ".to_string()].into_iter().collect();
+    let exe = bcc_tlink::link_overlay(&objects, &libraries, &overlaid, "PROG.EXE").expect("overlay link");
+    assert_eq!(
+        hex_sha256(&exe),
+        "eee0f5e246f7df19be44b9db632c39cef3cba5431157ddc4d859b89ca9211bc4",
+        "overlay PROG.EXE diverged from TLINK",
+    );
+}
+
 #[test]
 fn small_return_zero() {
     check('S', "MAIN.OBJ",
