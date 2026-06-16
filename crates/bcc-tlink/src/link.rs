@@ -204,28 +204,42 @@ pub fn link(modules: &[Module], thunks: &HashMap<String, u16>) -> Result<Image, 
         }
     }
 
+    // Each group's base is aligned to the strongest alignment among its
+    // members: a paragraph-aligned member (e.g. STACK in DGROUP) forces the
+    // group base to a paragraph, while an all-word group (DGROUP without a
+    // stack) only needs a word — so its first member byte/word-packs against
+    // the preceding segment rather than jumping to the next paragraph.
+    let mut group_align: Vec<usize> = vec![1; group_names.len()];
+    for (ci, &g) in group_of.iter().enumerate() {
+        if let Some(g) = g {
+            group_align[g] = group_align[g].max(align_bytes(combined[ci].align));
+        }
+    }
+
     // Pass 2 — lay out combined segments into the image. Every segment honors
     // its own SEGDEF alignment (byte/word/para) and packs against the previous
     // one — so per-module CODE segments (large/medium model `<MODULE>_TEXT`)
     // butt together byte-aligned, and DGROUP's interior segments pack tight.
-    // The one exception: the FIRST member of a group starts a fresh paragraph,
-    // because a group base (DGROUP) must sit on a paragraph boundary to be a
-    // valid frame.
+    // The first member of a group instead aligns to the group's alignment (see
+    // above), and an overlaid-module stub (`STUBSEG`) always starts a fresh
+    // paragraph — the overlay manager addresses it as its own segment.
     let mut cursor = 0usize;
     let mut seen_group = vec![false; group_names.len()];
     for (ci, c) in combined.iter_mut().enumerate() {
         let first_of_group = match group_of[ci] {
             Some(g) if !seen_group[g] => {
                 seen_group[g] = true;
-                true
+                Some(g)
             }
-            _ => false,
+            _ => None,
         };
-        // A group base must sit on a paragraph; so must each overlaid-module
-        // stub (`STUBSEG`), since the overlay manager addresses it as its own
-        // segment (one `__SEGTABLE__` entry per stub). Everything else honors
-        // its SEGDEF alignment and packs against the previous segment.
-        let to = if first_of_group || c.class == "STUBSEG" { 16 } else { align_bytes(c.align) };
+        let to = if let Some(g) = first_of_group {
+            group_align[g]
+        } else if c.class == "STUBSEG" {
+            16
+        } else {
+            align_bytes(c.align)
+        };
         cursor = align_up(cursor, to);
         c.load_offset = cursor;
         cursor += c.length;

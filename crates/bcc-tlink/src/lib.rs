@@ -41,6 +41,93 @@ fn needed_in(module: &Module) -> impl Iterator<Item = &str> {
     module.extdefs.iter().skip(1).map(String::as_str)
 }
 
+/// Allocate storage for communal (tentative `COMDEF`) symbols that no PUBDEF
+/// defines, matching TLINK: a synthesized `_COMDEF_` segment (class `BSS`, in
+/// `DGROUP`) holds the near communals byte-packed in first-appearance order,
+/// each published at its offset. (Far communals aren't handled here.) Appended
+/// as a final module so it lands after the user's `BSS` segments in layout.
+fn allocate_communals(modules: &mut Vec<Module>) {
+    let defined: HashSet<&str> = modules.iter().flat_map(defined_in).collect();
+    // Near communals not satisfied by a PUBDEF, first-appearance order, max size.
+    let mut order: Vec<String> = Vec::new();
+    let mut size: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+    for m in modules.iter() {
+        for cd in &m.comdefs {
+            if cd.far {
+                continue;
+            }
+            let Some(name) = m.extdefs.get(usize::from(cd.ext_index)) else { continue };
+            if defined.contains(name.as_str()) {
+                continue;
+            }
+            let bytes =
+                u16::try_from(cd.count.saturating_mul(cd.element_size)).unwrap_or(u16::MAX);
+            if let Some(s) = size.get_mut(name) {
+                *s = (*s).max(bytes);
+            } else {
+                order.push(name.clone());
+                size.insert(name.clone(), bytes);
+            }
+        }
+    }
+    if order.is_empty() {
+        return;
+    }
+    let mut pubdefs = Vec::with_capacity(order.len());
+    let mut offset = 0u16;
+    for name in &order {
+        pubdefs.push(omf::PubDef {
+            name: name.clone(),
+            base_segment: 1,
+            offset,
+            absolute_frame: 0,
+        });
+        offset += size[name];
+    }
+    let placeholder = omf::SegDef {
+        name: String::new(),
+        class: String::new(),
+        align: 0,
+        combine: 0,
+        length: 0,
+        data: Vec::new(),
+        has_data: false,
+        fixups: Vec::new(),
+    };
+    modules.push(Module {
+        name: String::new(),
+        lnames: vec![String::new()],
+        segdefs: vec![
+            placeholder,
+            omf::SegDef {
+                name: "_COMDEF_".into(),
+                class: "BSS".into(),
+                align: 1, // byte
+                combine: 2, // public
+                length: offset,
+                data: vec![0; usize::from(offset)],
+                has_data: false,
+                fixups: Vec::new(),
+            },
+        ],
+        grpdefs: vec![omf::GrpDef { name: "DGROUP".into(), segments: vec![1] }],
+        pubdefs,
+        extdefs: vec![String::new()],
+        comdefs: Vec::new(),
+        default_libs: Vec::new(),
+        entry: None,
+    });
+}
+
+/// Allocate communals, then link the resolved module set into an [`link::Image`].
+fn link_resolved(
+    mut modules: Vec<Module>,
+    thunks: &std::collections::HashMap<String, u16>,
+) -> Result<link::Image, Error> {
+    allocate_communals(&mut modules);
+    Ok(link::link(&modules, thunks)?)
+}
+
 /// Link object modules against zero or more libraries into a DOS MZ executable.
 ///
 /// Objects are linked unconditionally, in command-line order. Each library is
@@ -72,7 +159,7 @@ pub fn link_objects_with_default_libs(
     load_default_lib: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<Vec<u8>, Error> {
     let modules = resolve(objects, libraries, &[], load_default_lib)?;
-    Ok(mz::write(&link::link(&modules, &std::collections::HashMap::new())?))
+    Ok(mz::write(&link_resolved(modules, &std::collections::HashMap::new())?))
 }
 
 /// Link with VROOMM overlays: the modules after `/o` (named in `overlaid`, by
@@ -155,6 +242,7 @@ pub fn link_overlay(
         }
     }
 
+    allocate_communals(&mut modules);
     let mut image = link::link(&modules, &thunks)?;
 
     // Fill _EXEINFO_ with the segment table, using the final layout.
@@ -288,7 +376,7 @@ pub fn link_image(
     objects: &[(String, Vec<u8>)],
     libraries: &[(String, Vec<u8>)],
 ) -> Result<link::Image, Error> {
-    Ok(link::link(&resolved_modules(objects, libraries)?, &std::collections::HashMap::new())?)
+    link_resolved(resolved_modules(objects, libraries)?, &std::collections::HashMap::new())
 }
 
 /// Like [`link_image`] but honors class-`0x9F` default-library directives via
@@ -302,7 +390,7 @@ pub fn link_image_with_default_libs(
     load_default_lib: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<link::Image, Error> {
     let modules = resolve(objects, libraries, &[], load_default_lib)?;
-    Ok(link::link(&modules, &std::collections::HashMap::new())?)
+    link_resolved(modules, &std::collections::HashMap::new())
 }
 
 /// Parse the named objects and pull the library members they require, returning

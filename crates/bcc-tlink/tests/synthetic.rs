@@ -107,6 +107,74 @@ fn packed_code_object() -> Vec<u8> {
     b.emit()
 }
 
+/// A self-contained program with a near communal `_g` (a tentative `int g;`)
+/// that no PUBDEF defines, referenced DGROUP-relative. The linker must allocate
+/// storage for the communal.
+fn comdef_object() -> Vec<u8> {
+    let mut b = ModuleBuilder::new("COMG");
+    let text = b.code_segment(
+        "_TEXT",
+        &[0xb8, 0, 0, 0x8e, 0xd8, 0xa1, 0, 0, 0xb8, 0x00, 0x4c, 0xcd, 0x21],
+    );
+    let data = b.data_segment("_DATA", &[0x01, 0x00]);
+    let bss = b.bss_segment("_BSS", 2);
+    let dgroup = b.group("DGROUP", &[data, bss]);
+    b.comdef("_g", 2);
+    b.group_ref(text, 1, 2, true, Frame::Group(dgroup), dgroup); // mov ax, DGROUP
+    b.extern_ref(text, 6, 1, true, Frame::Group(dgroup), "_g"); // mov ax, [_g]
+    b.public("_start", text, 0).entry(text, 0);
+    b.emit()
+}
+
+/// Two near communals (`_zz` 1 byte, `_aa` 2 bytes) referenced DGROUP-relative,
+/// no `@DATA` selector. Probes communal ordering and packing in `_COMDEF_`.
+fn comdef_two_object() -> Vec<u8> {
+    let mut b = ModuleBuilder::new("COMG2");
+    let text = b.code_segment("_TEXT", &[0xa1, 0, 0, 0xa1, 0, 0, 0xb8, 0x00, 0x4c, 0xcd, 0x21]);
+    let data = b.data_segment("_DATA", &[0x01, 0x00]);
+    let bss = b.bss_segment("_BSS", 2);
+    let dgroup = b.group("DGROUP", &[data, bss]);
+    b.comdef("_zz", 1);
+    b.comdef("_aa", 2);
+    b.extern_ref(text, 1, 1, true, Frame::Group(dgroup), "_zz");
+    b.extern_ref(text, 4, 1, true, Frame::Group(dgroup), "_aa");
+    b.public("_start", text, 0).entry(text, 0);
+    b.emit()
+}
+
+/// COMDEF allocation, byte-exact against TLINK and install-free. An undefined
+/// near communal `_g` is allocated in a synthesized `_COMDEF_` segment (class
+/// BSS, in DGROUP) after `_BSS`; the DGROUP-relative reference resolves to it.
+#[test]
+fn synthetic_comdef_allocation() {
+    let exe = bcc_tlink::link_objects(&[("COMG.OBJ".into(), comdef_object())], &[])
+        .expect("link COMDEF object");
+    assert_eq!(
+        hex_sha256(&exe),
+        "67e3c8acbac86920ea3b011338cdd525e3a4000fbb69e8511338810248965bda",
+        "COMDEF object diverged from TLINK",
+    );
+    // `_g` lands in _COMDEF_ after _DATA(2) + _BSS(2); DGROUP base is paragraph 0
+    // (no paragraph-aligned member), so _g is at DGROUP offset 0x12 (file 0x206
+    // is the `mov ax, [_g]` operand).
+    assert_eq!(&exe[0x206..0x208], &[0x12, 0x00], "_g resolved to its _COMDEF_ slot");
+}
+
+/// Multiple communals are laid out byte-packed in record order (not name-sorted,
+/// no alignment): `_zz` (1 byte) at _COMDEF_+0, `_aa` (2 bytes) right after.
+#[test]
+fn synthetic_comdef_byte_packed_order() {
+    let exe = bcc_tlink::link_objects(&[("COMG2.OBJ".into(), comdef_two_object())], &[])
+        .expect("link two-communal object");
+    assert_eq!(
+        hex_sha256(&exe),
+        "57950d4c2f1c988e345d0051418b1067f8dc3ac4bdd8f0d0247edfb5be2e3eea",
+        "two-communal object diverged from TLINK",
+    );
+    assert_eq!(&exe[0x201..0x203], &[0x10, 0x00], "_zz at _COMDEF_+0 (DGROUP 0x10)");
+    assert_eq!(&exe[0x204..0x206], &[0x11, 0x00], "_aa byte-packed at _COMDEF_+1 (DGROUP 0x11)");
+}
+
 /// An app object that references `_rt` but defines it nowhere, and names a
 /// default library `MYRT` (a class-0x9F COMENT) to satisfy it — the way MSC
 /// objects name `SLIBCE`.
