@@ -182,27 +182,30 @@ same sub-paragraph accounting as the runtime-relocation offset fix
 - **Empty DGROUP-tail markers** (`_CVTSEG`…`_BSSEND`, flags=4): `size = count − 1`.
 - **`_OVRDATA_`** (the overlay load list): `size` grows +8 per overlaid module.
 
-So the addressing fields are explained: `para = start >> 4`, `count = start &
-0xf`, `size = count + len` (with the group/mgmt special cases). The `flags` field
-(`segrec[0x4]`) is the one rule not yet pinned for emission: the manager only
-reads its bit1 (overlay-stub), but the full byte-exact values are 0/1/3/4 and
-*not* a clean function of class — e.g. `_STUB_` is paragraph-aligned yet flags=4,
-`_OVRDATA_` is aligned yet flags=0, and within DGROUP `_DATA`=0 but `_CVTSEG`=4.
-Observed values (probe A):
+**`flags` (cracked, 25/25)** is a bitmask — keying it to group membership (not
+class) settled it:
 
-| flags | segments |
-|---|---|
-| 1 | CODE (`_TEXT`/`MAIN_TEXT`/`_OVRTEXT_`), empty `_1STUB_` |
-| 3 | the overlaid module's resident stub (`MOD_TEXT` STUBSEG) |
-| 0 | `_FARDATA` `_FARBSS` `_OVERLAY_` `_OVRDATA_` `_DATA` `_STACK` |
-| 4 | `_STUB_` `_EXTSEG_` `_EMSSEG_` `_VDISKSEG_` `_EXEINFO_`, and the DGROUP tail `_CVTSEG`…`_BSSEND` |
+- **bit0 (1)** — class is CODE or STUBSEG.
+- **bit1 (2)** — the segment is an overlaid module's resident stub (a generated
+  STUBSEG, not the empty `_1STUB_` anchor).
+- **bit2 (4)** — a **non-first member of a group** (in load order). The first
+  segment of each group (`_DATA` for DGROUP, `_OVRDATA_` for `_OVRGROUP_`), and
+  every ungrouped segment, clears it.
 
-This is the last field whose *computation* rule is open (the value comes from
-TLINK's internal segment typing during SEGDEF/combine). It wants the same
-treatment that cracked `count` — a targeted probe set, or disassembling TLINK's
-SEGDEF processor — and is the remaining decode item before `_EXEINFO_` can be
-emitted byte-exact. The functional model (relocation table, stubs, FBOV) and the
-addressing fields are complete.
+So `_DATA`=0 (first DGROUP) but `_CVTSEG`=4 (later DGROUP); `_OVRDATA_`=0 (first
+`_OVRGROUP_`) but `_STUB_`=4 (later); CODE=1; the overlaid stub=3.
+
+That group view also resolves the remaining **`size`** cases:
+
+- **First member of a group** → the **group extent** (last member's end − first
+  member's start): `_DATA` = 0x324 (DGROUP `_DATA`→`_BSSEND`), `_OVRDATA_` = 0x198
+  (`_OVRGROUP_` span, +8 per extra overlay since the load list lives here).
+- **Non-first group member** → `0xFFFF` for OVRINFO-class segments, else
+  `count − 1` (the DGROUP-tail markers).
+- **Everything else** (code, stub, ungrouped data) → `size = count + len`.
+
+Every `__SEGTABLE__` field is now pinned: `para = start>>4`, `count = start&0xf`,
+`size` as above, `flags` as above. The overlay table can be emitted byte-exact.
 
 ## What a byte-exact implementation needs
 
