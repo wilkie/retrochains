@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(kinds(&code), [Prologue, BccZeroAx, BccExitJump, EpilogueNear]);
         let c = classify(&code);
         assert_eq!(c.verdict, Verdict::Bcc);
-        assert_eq!(coverage(&code), 1.0);
+        assert!(coverage(&code) >= 1.0, "fully recognized");
     }
 
     /// `printf("...")` (HELLO.OBJ): the cdecl call shape — load, **push**, call,
