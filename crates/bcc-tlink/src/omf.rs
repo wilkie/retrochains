@@ -778,6 +778,61 @@ impl ModuleBuilder {
         self.extern_ref(seg, at, 1, false, Frame::Location, target)
     }
 
+    /// A reference to SEGDEF `target` (target method T4) at `at` within `seg`,
+    /// with the given location type, M bit, and [`Frame`]. Used for in-module
+    /// data references — e.g. `mov ax, [_global]` framed by [`Frame::Group`].
+    pub fn segment_ref(
+        &mut self,
+        seg: SegId,
+        at: u16,
+        location: u8,
+        seg_relative: bool,
+        frame: Frame,
+        target: SegId,
+    ) -> &mut Self {
+        let (frame_method, frame_datum) = frame.method_datum();
+        self.fixup(
+            seg,
+            Fixup {
+                seg: seg.0,
+                data_offset: at,
+                seg_relative,
+                location,
+                frame_method,
+                frame_datum,
+                target_method: 4,
+                target_datum: Some(target.0),
+            },
+        )
+    }
+
+    /// A reference to GRPDEF `target` (target method T5) at `at` within `seg` —
+    /// e.g. a group selector `mov ax, DGROUP` (location 2).
+    pub fn group_ref(
+        &mut self,
+        seg: SegId,
+        at: u16,
+        location: u8,
+        seg_relative: bool,
+        frame: Frame,
+        target: GrpId,
+    ) -> &mut Self {
+        let (frame_method, frame_datum) = frame.method_datum();
+        self.fixup(
+            seg,
+            Fixup {
+                seg: seg.0,
+                data_offset: at,
+                seg_relative,
+                location,
+                frame_method,
+                frame_datum,
+                target_method: 5,
+                target_datum: Some(target.0),
+            },
+        )
+    }
+
     /// Finish, returning the [`Module`].
     #[must_use]
     pub fn build(self) -> Module {

@@ -7,7 +7,7 @@
 //! displacement) and a *metamorphic* invariant (linking a member directly must
 //! equal linking it pulled from a `bcc-tlib` archive).
 
-use bcc_tlink::omf::ModuleBuilder;
+use bcc_tlink::omf::{Frame, ModuleBuilder};
 
 /// Object A: an entry stub that near-calls the external `_helper`, then a stack.
 /// `e8 .. ..` (call _helper) `b8 00 4c cd 21` (mov ax,4c00h; int 21h).
@@ -25,6 +25,38 @@ fn helper_object() -> Vec<u8> {
     let mut b = ModuleBuilder::new("HELPER");
     let text = b.code_segment("_TEXT", &[0xb8, 0x2a, 0x00, 0xc3]);
     b.public("_helper", text, 0);
+    b.emit()
+}
+
+/// A self-contained DGROUP program: set `DS = DGROUP`, then load an
+/// initialized `_DATA` global and store it into an uninitialized `_BSS` global,
+/// both addressed DGROUP-relative. Exercises a group selector (T5, location 2)
+/// and near data references framed against the group (T4, F1).
+///
+/// ```text
+///   b8 .. ..   mov ax, DGROUP     ; group selector (relocated)
+///   8e d8      mov ds, ax
+///   a1 .. ..   mov ax, [_seed]    ; DGROUP-relative load   (_DATA + 0)
+///   a3 .. ..   mov [_result], ax  ; DGROUP-relative store  (_BSS  + 0)
+///   b8 00 4c   mov ax, 4c00h
+///   cd 21      int 21h
+/// ```
+fn dgroup_object() -> Vec<u8> {
+    let mut b = ModuleBuilder::new("DGDATA");
+    let text = b.code_segment(
+        "_TEXT",
+        &[0xb8, 0, 0, 0x8e, 0xd8, 0xa1, 0, 0, 0xa3, 0, 0, 0xb8, 0x00, 0x4c, 0xcd, 0x21],
+    );
+    let data = b.data_segment("_DATA", &[0x2a, 0x00]); // _seed = 42
+    let bss = b.bss_segment("_BSS", 2); // _result
+    let dgroup = b.group("DGROUP", &[data, bss]);
+    b.group_ref(text, 1, 2, true, Frame::Group(dgroup), dgroup); // mov ax, DGROUP
+    b.segment_ref(text, 6, 1, true, Frame::Group(dgroup), data); // mov ax, [_seed]
+    b.segment_ref(text, 9, 1, true, Frame::Group(dgroup), bss); // mov [_result], ax
+    b.public("_seed", data, 0)
+        .public("_result", bss, 0)
+        .public("_start", text, 0)
+        .entry(text, 0);
     b.emit()
 }
 
@@ -50,6 +82,24 @@ fn synthetic_link_is_byte_exact_vs_tlink() {
         "de1f1db5126bbf6479bf116c9a1f92e29fbf96f04ab873edd747a0698c60dafe",
         "synthetic SYN.EXE diverged from TLINK",
     );
+}
+
+/// DGROUP-relative data addressing, byte-exact against TLINK and install-free.
+/// The two globals resolve to group-relative offsets — `_DATA` at the DGROUP
+/// base (0), `_BSS` right after the 2-byte `_DATA` (2) — and the whole EXE
+/// matches a SHA captured once from TLINK.EXE 4.0 linking the emitted object.
+#[test]
+fn synthetic_dgroup_relative_data() {
+    let exe = bcc_tlink::link_objects(&[("DGDATA.OBJ".into(), dgroup_object())], &[])
+        .expect("link DGROUP object");
+    assert_eq!(
+        hex_sha256(&exe),
+        "b7ba34fdfab49183c608cdc3545fb589dc95ade54b125fdef50a3ee1260931a7",
+        "DGROUP object diverged from TLINK",
+    );
+    // `_TEXT` (first CODE segment) loads at image offset 0 → file offset 0x200.
+    assert_eq!(&exe[0x206..0x208], &[0x00, 0x00], "_seed addressed as _DATA+0 in DGROUP");
+    assert_eq!(&exe[0x209..0x20b], &[0x02, 0x00], "_result addressed as _BSS = DGROUP+2");
 }
 
 /// The linker resolves a cross-object near call: `_helper` lands right after the
