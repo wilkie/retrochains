@@ -75,16 +75,38 @@ dictionary entry offsets**:
 Verified against E3 (1 member, 1 `CSEG` segment, 3 publics `P1/P2/P3`): module
 `C!`@0x26, publics at 0x2c/0x32/0x38 — exactly the ext-dict references.
 
-## Still to do (to implement byte-exact `/E`)
+## The hard remaining part: the segment encoding
 
-- Decode the **`packed:u16` segment word** (`0x2d2b` bitfield: `seg<<12 |
-  grp<<8 | class<<1 | …`, fields clamped to 6/0xe/2/6) for arbitrary segments,
-  and confirm **multi-segment** members emit one segment record each.
-- Implement the emitter (all fields above are computable from the parsed members
-  + the regular-dict offsets the writer already produces); wire `/E` through
-  `main.rs`.
-- Fixtures: a `tool = "tlib"` `/E` fixture, then a byte-exact round-trip of a
-  shipped `LIB/*.LIB` (`FP87.LIB`, 5072 B, smallest).
+For a single-segment member (E3: `CSEG`) the segment record is the simple
+`<page> <npubs> 00 <segNameIdx> <packed:u16>` above. For real multi-segment
+members (E4: `_TEXT/_DATA/_BSS` + `DGROUP`) the bytes between the module and
+public records (`0b 01 c0 10 c1 00 c2 00 42 00 02 03`) are produced by a **deep
+nested call tree** in `0x2d2b`:
+
+- `0x27e5` = OMF **variable-length index** writer: value `< 0x80` → 1 byte;
+  `>= 0x80` → 2 bytes `((v>>8)|0x80), (v&0xff)`. (So `c0 10` is *not* `0xc0`
+  then `0x10` — it's one var-index, etc.)
+- `0x2b4b(node+0x1a, +0xe, +0xc)` walks the member's **segment list**, emitting
+  per-segment data via `0x29b0` (reads each seg node's `+4/+6/+0xe`).
+- `0x2c9d(node+0x1c, +0x6, +0x4)` — a second per-member list walk (groups?).
+- further calls on `node+0x16` …
+
+So the segment/group encoding requires reversing `0x2b4b`, `0x29b0`, `0x2c9d`
+**and** reconstructing the in-memory member node (its segment/group lists with
+sizes, alignments, classes). This is a multi-function decode on the scale of the
+regular-dictionary effort by itself.
+
+## Status & remaining work
+
+**Done & documented**: header (all 6 words), bucket table, names list, module +
+public descriptor records, single-segment segment record — verified against
+controlled 1/2/3-member probes. The non-`/E` librarian is complete and byte-exact
+(4263–4266).
+
+**Remaining for byte-exact `/E`**: the multi-segment/group encoding (the nested
+`0x2b4b/0x29b0/0x2c9d` decode + member-node reconstruction), then the emitter,
+a `/E` fixture, and the `FP87.LIB` round-trip. Materially larger than the rest of
+the extended dict combined.
 
 Scope: comparable to the whole regular-dictionary effort. Until done,
 `crates/bcc-tlib` reproduces every *non-`/E`* library byte-exact (4263–4266).
