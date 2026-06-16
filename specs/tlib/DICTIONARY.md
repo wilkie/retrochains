@@ -65,22 +65,33 @@ clean single-step deltas. Structure found so far:
   Evidence: `AD`, `AE`, `AF` all give delta 17 (vary only the last char); a
   single char gives a constant delta **33** (its prefix is empty, so
   `g("") = 33`).
-- **`g` of a single prefix char** `c` is `(c & 0x0F) | 0x10`:
-  `g("A")=17, g("B")=18 … g("F")=22, g("X")=24, g("Y")=25`.
+- **`g` of a single prefix char** `c` (confirmed on 16 letters):
 
-Clean delta data (target → delta), for fitting the full `g`:
+  ```
+  g(c) = c - 0x30 - 0x10 * ((c >> 3) & 1)
+  ```
+
+  i.e. subtract `0x30`, and `0x10` more when bit 3 of `c` is set: `A`–`G`→17–23,
+  `P`–`R`→32–34 (bit3 clear, `c-0x30`); `K`,`M`,`O`→11,13,15 and `X`,`Y`,`Z`→
+  24,25,26 (bit3 set, `c-0x40`). Verified by single-step forced-collision
+  probes (`cQ`/`cZ` targets).
+
+Clean `g(prefix)` data measured (single-step, accounting for the planted filler):
 
 | len | observations |
 |----|---------------|
-| 1  | `D`,`Q`,`R`,`S` → 33 |
-| 2  | `AD`/`AE`/`AF`→17, `BA`→18, `CA`→19, `DA`→20, `EA`→21, `FA`→22, `XY`→24, `YX`→25 |
-| 3  | `CBA`→29, `HHH`→5 |
-| 4  | `MAAA`→16 |
-| 5  | `ABCDE`→2 |
+| 0  | `g("") = 33` |
+| 1  | A17 B18 C19 D20 E21 F22 G23 K11 M13 O15 P32 Q33 R34 X24 Y25 Z26 |
+| 2  | AA9 AB6 AC7 AD12 BA2 BB36 BC1 CA32 CB29 DA15 |
+| 3  | MAA16 ABA16 AAB29 BAA36 |
+| 4  | ABCD2 |
 
-The full `g` (a hash over `name[:-1]`) isn't pinned yet — it isn't the mirror
-forward-rotate of the bucket hash, and the `(c&0xF)|0x10` single-char form is
-unusual. Next: probe `g` over 2- and 3-char prefixes systematically.
+The **multi-character fold of `g` is not yet pinned**: it isn't a single-
+accumulator rotate-xor/add (an exhaustive search over rol/ror × widths ×
+encodings × inits finds nothing), and the single-char form is a piecewise
+arithmetic subtraction rather than a hash step — so `g` is likely a 2-input or
+bit-structured computation. The 2-char table above is the data to fit it; the
+recurrence between `g("A")` and `g("AA")/g("AB")/…` is the next thing to crack.
 
 ## Open — block index (multi-block dictionaries)
 
