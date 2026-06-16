@@ -78,10 +78,8 @@ runtime relocations). The startup object and runtime library are model-keyed
   small-model case — have remainder 0, which is why this only surfaced with far
   models.)
 
-Both `return 0` and `printf` link byte-exact in small, medium, and large
-models. The large-model `.MAP` differs only in the ordering of a couple of
-same-address far/near alias pairs (`_free`/`_farfree`) — see below — so the
-large-model tests gate the EXE, not the MAP.
+Both `return 0` and `printf` link byte-exact — EXE *and* `.MAP` — in small,
+medium, and large models.
 
 ## Group-relative framing (publics *and* fixups)
 
@@ -106,13 +104,22 @@ base paragraph**, not the segment's own paragraph. This shows up in two places:
 - **`Abs` tag** — absolute equates render `  Abs  ` in the 7-column gap after
   the address instead of blanks.
 - **Publics by Value ordering** — absolutes group **first** (sorted by offset),
-  then relocatable symbols by `(frame, offset)`. Ties break by **definition
-  order** (the order PUBDEFs were seen), not alphabetically: `__ScanTodVector`
-  (defined first) precedes `__RealCvtVector` at the shared `00A6:0284`. This
-  matches every tie observed *except* a few same-address far/near alias pairs in
-  the large model (`_free`/`_farfree` at `0000:0B30`), which TLINK lists in an
-  order taken from its internal symbol table that definition order doesn't
-  reproduce. Cosmetic (the EXE is unaffected), so left as a known gap.
+  then relocatable symbols by `(frame, offset)`. Ties break by **symbol-table
+  insertion order**: the order in which TLINK first *enters* each name. A name
+  is entered the first time it's seen scanning modules in link order — as an
+  external reference (EXTDEF) *or* a definition (PUBDEF), whichever comes first.
+  Two consequences, both verified byte-exact:
+  - `__ScanTodVector` (entered first) precedes `__RealCvtVector` at the shared
+    `00A6:0284` — both only defined, in PUBDEF order.
+  - `_free` precedes `_farfree` at `0000:0B30` in the large model even though
+    FARHEAP defines `_farfree`'s PUBDEF first — because `_free` is *referenced*
+    (EXTDEF) by the runtime well before FARHEAP is pulled, so it's entered
+    earlier. Counting PUBDEFs alone gets this backwards.
+
+  This isn't a hashing artifact. A controlled probe (a TASM module with 26
+  same-address publics `SYA`..`SYZ`) showed the by-value order matching the
+  OBJ's PUBDEF record order exactly — TLINK preserves insertion order; the
+  "scrambled" look comes from TASM's own PUBDEF emission order.
 
 ## Library member placement (`lib.rs`)
 

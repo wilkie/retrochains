@@ -13,10 +13,7 @@
 //! bcc`), read from `.bc2/BC2/LIB/` at test time; the tests skip when absent.
 //!
 //! The byte-exact contract is the recorded SHA-256 of the linked `MAIN.EXE`
-//! (and, where it matches, `MAIN.MAP`) captured against TLINK.EXE 4.0. The
-//! large-model `.MAP` is intentionally not gated: TLINK orders a few
-//! same-address far/near alias pairs (`_free`/`_farfree`) by an internal
-//! symbol-table order the linker doesn't model — the EXE is unaffected.
+//! and `MAIN.MAP`, captured against TLINK.EXE 4.0, for every model.
 
 use sha2::{Digest, Sha256};
 
@@ -91,16 +88,16 @@ fn medium_printf_hello_world() {
         Some("52fc4f8ce42f5c06bba1a3c440f33b4c3c3c66ac47dab6fce37d8a0c4562ca5e"));
 }
 
-// Large model: EXE byte-exact; `.MAP` not gated (see module docs — `_free`/
-// `_farfree` alias ordering).
 #[test]
 fn large_return_zero() {
     check('L', "MAIN_L.OBJ",
-        "8565f2a373d43da87e849b8fe73e6d6ed1e2f6afbc91ec65c8190aa929f64048", None);
+        "8565f2a373d43da87e849b8fe73e6d6ed1e2f6afbc91ec65c8190aa929f64048",
+        Some("6ff0fda62c2783114713ce7199d4e0fec6c0db5206a7926bb6487a29f81b149d"));
 }
 
 #[test]
 fn large_printf_hello_world() {
     check('L', "HELLO_L.OBJ",
-        "d2d5c7e03a51dffeed0da98b606c1071324488e6e942469dcf05547b75d5bab6", None);
+        "d2d5c7e03a51dffeed0da98b606c1071324488e6e942469dcf05547b75d5bab6",
+        Some("e393c84c5f04402696d495bcc129f9e498ead27ae34910752a668cb32533ec59"));
 }

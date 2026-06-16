@@ -48,9 +48,9 @@ pub struct MapSegment {
 
 /// One `.MAP` public-symbol entry (`frame:offset`). `name` is already
 /// upper-cased the way TLINK renders it; `absolute` marks an equate, which
-/// the listing tags with `Abs`. `seq` is the symbol's definition order, used
-/// to break `Publics by Value` ties (TLINK lists same-address symbols in
-/// definition order).
+/// the listing tags with `Abs`. `seq` is the symbol's symbol-table insertion
+/// order (first encounter as EXTDEF or PUBDEF), used to break `Publics by
+/// Value` ties the way TLINK does.
 #[derive(Debug)]
 pub struct MapPublic {
     pub frame: u16,
@@ -246,13 +246,8 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
     let mut symbols: HashMap<String, (usize, usize)> = HashMap::new();
     // Absolute publics (base segment 0): a fixed frame:offset, no segment.
     let mut absolutes: HashMap<String, (u16, u16)> = HashMap::new();
-    // Definition order (first occurrence) per symbol, for by-value tie-breaking.
-    let mut seqs: HashMap<String, usize> = HashMap::new();
-    let mut seq_counter = 0usize;
     for (m, module) in modules.iter().enumerate() {
         for pubdef in &module.pubdefs {
-            seqs.entry(pubdef.name.clone()).or_insert(seq_counter);
-            seq_counter += 1;
             if pubdef.base_segment == 0 {
                 absolutes.insert(pubdef.name.clone(), (pubdef.absolute_frame, pubdef.offset));
                 continue;
@@ -264,6 +259,24 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
             {
                 let addr = combined[p.combined].load_offset + p.base + usize::from(pubdef.offset);
                 symbols.insert(pubdef.name.clone(), (p.combined, addr));
+            }
+        }
+    }
+
+    // Symbol-table insertion order, for breaking `Publics by Value` ties — TLINK
+    // lists same-address symbols in the order it first entered them. A name is
+    // entered the first time it's *seen*, as an external reference (EXTDEF) or a
+    // definition (PUBDEF), whichever comes first while scanning modules in link
+    // order. So a symbol referenced before its defining library member is pulled
+    // (e.g. `_free`, called by the runtime) precedes a same-address alias only
+    // defined later in that member (`_farfree`).
+    let mut seqs: HashMap<String, usize> = HashMap::new();
+    let mut seq_counter = 0usize;
+    for module in modules {
+        for name in module.extdefs.iter().skip(1).chain(module.pubdefs.iter().map(|p| &p.name)) {
+            if !seqs.contains_key(name) {
+                seqs.insert(name.clone(), seq_counter);
+                seq_counter += 1;
             }
         }
     }
