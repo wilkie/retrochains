@@ -79,6 +79,31 @@ pub enum Idiom {
     CdeclPop1,
     /// `83 c4 N` — `add sp,N`: discard N bytes of cdecl arguments (MSC's style).
     CdeclPopN,
+    /// `56` / `57` — `push si` / `push di`: save a callee-saved register variable.
+    SaveRegVar,
+    /// `5e` / `5f` — `pop si` / `pop di`: restore a register variable.
+    RestoreRegVar,
+    /// `4c 4c` — `dec sp; dec sp`: BCC reserves 2 stack bytes this way (one byte
+    /// shorter than `sub sp,2`).
+    StackReserve2,
+    /// `8b /r [bp±N]` — `mov r16, [bp±disp]`: load a local or parameter.
+    LoadLocal,
+    /// `89 /r [bp±N]` — `mov [bp±disp], r16`: store a local.
+    StoreLocal,
+    /// `8a /r [bp±N]` — `mov r8, [bp±disp]`: load a `char` local/param.
+    LoadLocalByte,
+    /// `88 /r [bp±N]` — `mov [bp±disp], r8`: store a `char` local.
+    StoreLocalByte,
+    /// `c7 46 N ii ii` — `mov [bp±disp], imm16`: store a literal to a local.
+    StoreImmLocal,
+    /// `c7 06 aa aa ii ii` — `mov [mem], imm16`: store a literal to a global.
+    StoreImmGlobal,
+    /// `a1 aa aa` — `mov ax, [mem]`: load a global into ax.
+    LoadGlobal,
+    /// `a3 aa aa` — `mov [mem], ax`: store ax to a global.
+    StoreGlobal,
+    /// `eb rr` — `jmp rel8`: a short jump (control flow; `eb 00` is the exit jump).
+    ShortJump,
 }
 
 impl Idiom {
@@ -89,9 +114,11 @@ impl Idiom {
     pub fn toolchains(self) -> &'static [Compiler] {
         use Compiler::{Bcc, Msc};
         match self {
-            Idiom::PrologueLocals | Idiom::BccExitJump | Idiom::BccZeroAx | Idiom::CdeclPop1 => {
-                &[Bcc]
-            }
+            Idiom::PrologueLocals
+            | Idiom::BccExitJump
+            | Idiom::BccZeroAx
+            | Idiom::CdeclPop1
+            | Idiom::StackReserve2 => &[Bcc],
             Idiom::MscChkstkPrologue | Idiom::MscChkstkFrameless | Idiom::MscZeroAx => &[Msc],
             _ => &[Bcc, Msc],
         }
@@ -139,15 +166,30 @@ impl Idiom {
             Idiom::FarCall => "call far",
             Idiom::CdeclPop1 => "cdecl cleanup (pop cx)",
             Idiom::CdeclPopN => "cdecl cleanup (add sp,N)",
+            Idiom::SaveRegVar => "save register var (push si/di)",
+            Idiom::RestoreRegVar => "restore register var (pop si/di)",
+            Idiom::StackReserve2 => "reserve 2 stack bytes (dec sp; dec sp)",
+            Idiom::LoadLocal => "load local/param (mov r16, [bp±N])",
+            Idiom::StoreLocal => "store local (mov [bp±N], r16)",
+            Idiom::LoadLocalByte => "load char local (mov r8, [bp±N])",
+            Idiom::StoreLocalByte => "store char local (mov [bp±N], r8)",
+            Idiom::StoreImmLocal => "store imm to local (mov [bp±N], imm16)",
+            Idiom::StoreImmGlobal => "store imm to global (mov [mem], imm16)",
+            Idiom::LoadGlobal => "load global (mov ax, [mem])",
+            Idiom::StoreGlobal => "store global (mov [mem], ax)",
+            Idiom::ShortJump => "short jump (jmp rel8)",
         }
     }
 }
 
-/// One byte of an idiom pattern: a fixed value or an operand wildcard.
+/// One byte of an idiom pattern: a fixed value, an operand wildcard, or a
+/// masked match (`byte & mask == value`) — e.g. a ModR/M byte whose `reg` field
+/// is free but whose mode/`rm` select `[bp±disp]`.
 #[derive(Clone, Copy)]
 enum Bm {
     Lit(u8),
     Any,
+    Mask(u8, u8),
 }
 
 struct Def {
@@ -155,13 +197,17 @@ struct Def {
     pat: &'static [Bm],
 }
 
-use Bm::{Any as A, Lit as L};
+use Bm::{Any as A, Lit as L, Mask as M};
+
+/// ModR/M byte selecting `[bp+disp8]` with any `reg` field (mod=01, rm=110).
+const BP_DISP8: Bm = M(0xc7, 0x46);
 
 /// The idiom catalog, ordered most-specific-first so a longer idiom wins over a
 /// prefix of it at the same offset (e.g. `MscChkstkPrologue` and
-/// `PrologueLocals` before `Prologue`; `MscChkstkFrameless` before `BccZeroAx`).
-/// MSC's chkstk prologue is its `b8.. e8..` — the call follows the size load
-/// *immediately*, where BCC would push an argument (`50`) in between.
+/// `PrologueLocals` before `Prologue`; `MscChkstkFrameless` before `BccZeroAx`;
+/// `BccExitJump` (`eb 00`) before the general `ShortJump`). MSC's chkstk
+/// prologue is its `b8.. e8..` — the call follows the size load *immediately*,
+/// where BCC would push an argument (`50`) in between.
 const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::MscChkstkPrologue, pat: &[L(0x55), L(0x8b), L(0xec), L(0xb8), A, A, L(0xe8), A, A] },
     Def { idiom: Idiom::PrologueLocals, pat: &[L(0x55), L(0x8b), L(0xec), L(0x83), L(0xec), A] },
@@ -173,10 +219,25 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::MscChkstkFrameless, pat: &[L(0x33), L(0xc0), L(0xe8), A, A] },
     Def { idiom: Idiom::BccZeroAx, pat: &[L(0x33), L(0xc0)] },
     Def { idiom: Idiom::MscZeroAx, pat: &[L(0x2b), L(0xc0)] },
+    Def { idiom: Idiom::StackReserve2, pat: &[L(0x4c), L(0x4c)] },
     Def { idiom: Idiom::FarCall, pat: &[L(0x9a), A, A, A, A] },
+    // mov [bp±N]/[mem], imm16 — store a literal to a local or global.
+    Def { idiom: Idiom::StoreImmLocal, pat: &[L(0xc7), L(0x46), A, A, A] },
+    Def { idiom: Idiom::StoreImmGlobal, pat: &[L(0xc7), L(0x06), A, A, A, A] },
+    // bp-relative loads/stores (word and byte).
+    Def { idiom: Idiom::LoadLocal, pat: &[L(0x8b), BP_DISP8, A] },
+    Def { idiom: Idiom::StoreLocal, pat: &[L(0x89), BP_DISP8, A] },
+    Def { idiom: Idiom::LoadLocalByte, pat: &[L(0x8a), BP_DISP8, A] },
+    Def { idiom: Idiom::StoreLocalByte, pat: &[L(0x88), BP_DISP8, A] },
+    // global loads/stores via the accumulator-direct forms.
+    Def { idiom: Idiom::LoadGlobal, pat: &[L(0xa1), A, A] },
+    Def { idiom: Idiom::StoreGlobal, pat: &[L(0xa3), A, A] },
     Def { idiom: Idiom::NearCall, pat: &[L(0xe8), A, A] },
     Def { idiom: Idiom::LoadImmAx, pat: &[L(0xb8), A, A] },
     Def { idiom: Idiom::CdeclPopN, pat: &[L(0x83), L(0xc4), A] },
+    Def { idiom: Idiom::ShortJump, pat: &[L(0xeb), A] },
+    Def { idiom: Idiom::SaveRegVar, pat: &[M(0xfe, 0x56)] }, // push si / push di
+    Def { idiom: Idiom::RestoreRegVar, pat: &[M(0xfe, 0x5e)] }, // pop si / pop di
     Def { idiom: Idiom::PushAx, pat: &[L(0x50)] },
     Def { idiom: Idiom::CdeclPop1, pat: &[L(0x59)] },
 ];
@@ -186,6 +247,7 @@ fn matches_at(code: &[u8], at: usize, pat: &[Bm]) -> bool {
         && pat.iter().enumerate().all(|(k, m)| match m {
             Bm::Lit(b) => code[at + k] == *b,
             Bm::Any => true,
+            Bm::Mask(mask, value) => code[at + k] & mask == *value,
         })
 }
 
