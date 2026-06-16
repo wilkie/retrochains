@@ -49,6 +49,21 @@ subdirectories — following the compilation pipeline:
   catalogs Borland TLINK vs Microsoft LINK MZ output — the EXE-level
   toolchain fingerprints feeding compiler-aware decompilation.
 
+## Analysis and decompilation
+
+The inverse direction — reading binaries *back* into source. Where the
+toolchain specs describe how bytes are produced, these describe how we
+recover what produced them.
+
+- [`FINGERPRINTS.md`](FINGERPRINTS.md) / [`MSC_FINGERPRINTS.md`](MSC_FINGERPRINTS.md)
+  — how `crates/fingerprint/` decides *which* compiler (and which toolchain
+  details) produced an OBJ/LIB/EXE, from both symbol/structure markers and
+  codegen idioms.
+- [`decompiler/`](decompiler/) — turning recognized code back into C.
+  [`IR.md`](decompiler/IR.md) specifies the intermediate representation the
+  decompiler lifts machine code into and emits compiler-accurate C from,
+  verified by recompiling with our byte-exact `bcc`.
+
 ## Shared formats
 
 [`formats/`](formats/) — file-format references that more than one tool
