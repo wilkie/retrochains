@@ -62,20 +62,6 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     if obj_names.is_empty() {
         return Err("no object files given".into());
     }
-    // Overlay linking (the VROOMM manager, per-module INT 3F stubs, the
-    // _EXEINFO_ table, and the appended FBOV overlay area) is reverse-engineered
-    // (see specs/bcc/tlink/OVERLAYS.md) but not yet built. Fail clearly rather
-    // than silently producing a non-overlay image.
-    if !overlaid.is_empty() {
-        let mut names: Vec<&String> = overlaid.iter().collect();
-        names.sort();
-        return Err(format!(
-            "overlay linking (/o) not yet implemented; overlaid modules: {}",
-            names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-        )
-        .into());
-    }
-
     let mut objects = Vec::with_capacity(obj_names.len());
     for name in &obj_names {
         let bytes = std::fs::read(name).map_err(|e| format!("reading {name}: {e}"))?;
@@ -95,6 +81,13 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         with_ext(exe_field, "EXE")
     };
+
+    if !overlaid.is_empty() {
+        let exe_name = Path::new(&exe_path).file_name().and_then(|s| s.to_str()).unwrap_or(&exe_path);
+        let bytes = bcc_tlink::link_overlay(&objects, &libraries, &overlaid, exe_name)?;
+        std::fs::write(&exe_path, bytes).map_err(|e| format!("writing {exe_path}: {e}"))?;
+        return Ok(());
+    }
 
     let image = bcc_tlink::link_image(&objects, &libraries)?;
     std::fs::write(&exe_path, bcc_tlink::mz::write(&image))

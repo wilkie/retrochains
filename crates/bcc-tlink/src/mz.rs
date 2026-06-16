@@ -24,7 +24,7 @@ const TLINK_SIGNATURE: [u8; 6] = [0x01, 0x00, 0xfb, 0x30, 0x6a, 0x72];
 const RELOC_TABLE_OFFSET: usize = 0x3e;
 
 /// TLINK pads the header up to this size (0x20 paragraphs) for small images.
-const HEADER_SIZE: usize = 0x200;
+pub const HEADER_SIZE: usize = 0x200;
 
 fn put_u16(buf: &mut [u8], at: usize, v: u16) {
     buf[at] = (v & 0xFF) as u8;

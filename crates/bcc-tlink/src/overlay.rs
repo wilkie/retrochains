@@ -154,6 +154,39 @@ pub fn fbov_area(overlays: &[Overlay], exeinfo_file_off: usize, segment_count: u
     out
 }
 
+/// Transform an overlaid module in place: reclassify its CODE segment to
+/// `STUBSEG` and replace its bytes with the generated stub, keeping the public
+/// entry points at their original offsets. Returns the overlay (the original
+/// code + entry offsets) for the FBOV area, and the per-public thunk offsets
+/// (`0x20 + i*5`) for the far-call redirect.
+///
+/// Returns `None` if the module has no CODE segment (nothing to overlay).
+pub fn make_stub(module: &mut crate::omf::Module) -> Option<(Overlay, Vec<(String, u16)>)> {
+    let seg_idx = module.segdefs.iter().position(|s| s.class == "CODE")?;
+    let code = module.segdefs[seg_idx].data.clone();
+    // Public entry points in that segment, in ascending offset order.
+    let mut pubs: Vec<(&str, u16)> = module
+        .pubdefs
+        .iter()
+        .filter(|p| usize::from(p.base_segment) == seg_idx)
+        .map(|p| (p.name.as_str(), p.offset))
+        .collect();
+    pubs.sort_by_key(|&(_, off)| off);
+    let entries: Vec<u16> = pubs.iter().map(|&(_, off)| off).collect();
+    let thunks: Vec<(String, u16)> =
+        pubs.iter().enumerate().map(|(i, &(n, _))| (n.to_string(), 0x20 + (i * 5) as u16)).collect();
+
+    let ovl = Overlay { code, entries, rel_offset: 0 };
+    let stub = stub_bytes(&ovl);
+    let seg = &mut module.segdefs[seg_idx];
+    seg.class = "STUBSEG".into();
+    seg.length = stub.len() as u16;
+    seg.data = stub;
+    seg.has_data = true;
+    seg.fixups.clear(); // the real code's fixups belong to the overlay copy, not the stub
+    Some((ovl, thunks))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
