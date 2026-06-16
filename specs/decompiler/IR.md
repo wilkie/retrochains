@@ -194,9 +194,16 @@ turns the recompile check from pass/fail into a repair signal:
    Hi-IR node that produced it — the candidate to re-examine (wrong operator,
    missed promotion, mis-structured branch).
 
-The recompile-verify harness is the engine for this loop; it's specified
-separately (it's decoupled from the IR — it only needs `(candidate C, target
-bytes)`). The IR's job is to be *localizable* so the harness's diffs are
+The recompile-verify harness is the engine for this loop; it's decoupled from
+the IR — it only needs `(candidate C, target bytes)`. It's built:
+[`crates/decompile/src/verify.rs`](../../crates/decompile/src/verify.rs).
+`verify(candidate_c, opts, target)` runs steps 1–3 (compile the candidate the
+same `-c` path `bcc` drives, pull the first CODE segment back out, diff) and
+returns either `Outcome::Match` or an `Outcome::Mismatch` carrying both byte
+runs and `first_diff` — the offset step 4 maps back through provenance. A
+compile failure is a distinct `HarnessError::Compile` (malformed C) rather than
+a mismatch (well-formed C, wrong bytes), because the repair loop reacts to the
+two differently. The IR's job is to be *localizable* so the harness's diffs are
 actionable.
 
 ## 9. Scope, non-goals, open questions

@@ -12,6 +12,7 @@ members = [
     "crates/oracle",
     "crates/fixtures",
     "crates/fingerprint",
+    "crates/decompile",
 ]
 
 [workspace.package]

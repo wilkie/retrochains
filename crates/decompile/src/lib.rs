@@ -1,0 +1,16 @@
+//! The Borland C++ 2.0 decompiler.
+//!
+//! Reads a binary back into compiler-accurate C — C source that, recompiled
+//! with our byte-exact [`bcc`], reproduces the original bytes. The design lives
+//! in [`specs/decompiler/IR.md`](../../../specs/decompiler/IR.md); this crate is
+//! its implementation.
+//!
+//! The first piece built is the **recompile-verify harness** ([`verify`]) — the
+//! engine for the spec's §8 correctness contract. It's deliberately decoupled
+//! from the IR: it only needs a candidate C string and the target bytes, so the
+//! lift can be developed against a concrete pass/fail (and a localizable diff)
+//! before any of Lo-IR or Hi-IR exists.
+
+pub mod verify;
+
+pub use verify::{recompile_text, verify, CompileOpts, Diff, HarnessError, Outcome};

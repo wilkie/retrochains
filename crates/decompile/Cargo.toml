@@ -1,0 +1,24 @@
+[package]
+name = "decompile"
+description = "Decompiler for Borland C++ 2.0 binaries: lift machine code to compiler-accurate C, verified by recompiling with the byte-exact bcc. See specs/decompiler/."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "decompile"
+path = "src/lib.rs"
+
+[dependencies]
+# The recompile-verify harness (§8 of specs/decompiler/IR.md) compiles candidate
+# C with the byte-exact compiler and diffs its `_TEXT` against the target.
+bcc = { path = "../bcc" }
+# `code_of_obj` pulls the first CODE-class segment back out of the OBJ bytes.
+fingerprint = { path = "../fingerprint" }
+thiserror = "2"
+
+[lints]
+workspace = true
