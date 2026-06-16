@@ -75,6 +75,22 @@ dictionary entry offsets**:
 Verified against E3 (1 member, 1 `CSEG` segment, 3 publics `P1/P2/P3`): module
 `C!`@0x26, publics at 0x2c/0x32/0x38 — exactly the ext-dict references.
 
+## Simple-segment descriptor — fully decoded
+
+For members whose segments are *trivial* (standalone, byte-aligned, no class/
+group — e.g. TASM `CSEG SEGMENT`), the per-member descriptor is (verified across
+E1/E3/T1):
+
+```
+00 00 00 <modoff:u16> 00 <segcount:u8> <npubs:u8>
+  segcount × ( 00 <segNameIdx:u8> <packed:u16 = 0x0160> )
+  npubs    × ( <puboff:u16> 00 <page:u8> 00 00 )
+```
+
+`modoff`/`puboff` are the module-name and each public's **regular-dict entry
+offset** (which the writer computes); `segNameIdx` indexes the names list. All
+computable — the simple case could be emitted today.
+
 ## The hard remaining part: the segment encoding
 
 For a single-segment member (E3: `CSEG`) the segment record is the simple
