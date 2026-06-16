@@ -71,33 +71,36 @@ fn overlay_data(rel: &str) -> Vec<u8> {
     std::fs::read(&p).unwrap_or_else(|e| panic!("read overlay/{rel}: {e}"))
 }
 
-/// Link a medium-model overlay program: the named resident + overlaid objects
-/// (data from `tests/data/overlay/`) plus the provisioned C0M/CM/OVERLAY, with
-/// `overlaid_obj` placed after `/o`. Returns the EXE, or `None` if the install
+/// Link a medium-model overlay program: a resident `MAIN.OBJ` (data from
+/// `main_rel`) plus the provisioned C0M/CM/OVERLAY, with each `(obj_name, rel)`
+/// in `overlaid` placed after `/o`. Returns the EXE, or `None` if the install
 /// isn't present.
-fn link_overlay_exe(main_rel: &str, overlaid_obj: &str, overlaid_rel: &str) -> Option<Vec<u8>> {
+fn link_overlay_exe(main_rel: &str, overlaid: &[(&str, &str)]) -> Option<Vec<u8>> {
     let dir = lib_dir();
     let (c0, cm, ovl) = (dir.join("C0M.OBJ"), dir.join("CM.LIB"), dir.join("OVERLAY.LIB"));
     if !c0.exists() || !cm.exists() || !ovl.exists() {
         eprintln!("skipping overlay capstone: install not found at {} (run `oracle provision bcc`)", dir.display());
         return None;
     }
-    let objects = vec![
+    let mut objects = vec![
         ("C0M.OBJ".to_string(), std::fs::read(&c0).expect("read C0M")),
         ("MAIN.OBJ".to_string(), overlay_data(main_rel)),
-        (overlaid_obj.to_string(), overlay_data(overlaid_rel)),
     ];
+    let mut overlaid_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for &(obj, rel) in overlaid {
+        objects.push((obj.to_string(), overlay_data(rel)));
+        overlaid_set.insert(obj.to_string());
+    }
     let libraries = vec![
         ("CM.LIB".to_string(), std::fs::read(&cm).expect("read CM.LIB")),
         ("OVERLAY.LIB".to_string(), std::fs::read(&ovl).expect("read OVERLAY.LIB")),
     ];
-    let overlaid: std::collections::HashSet<String> = [overlaid_obj.to_string()].into_iter().collect();
-    Some(bcc_tlink::link_overlay(&objects, &libraries, &overlaid, "PROG.EXE").expect("overlay link"))
+    Some(bcc_tlink::link_overlay(&objects, &libraries, &overlaid_set, "PROG.EXE").expect("overlay link"))
 }
 
 #[test]
 fn medium_overlay() {
-    let Some(exe) = link_overlay_exe("MAIN.OBJ", "MOD.OBJ", "MOD.OBJ") else { return };
+    let Some(exe) = link_overlay_exe("MAIN.OBJ", &[("MOD.OBJ", "MOD.OBJ")]) else { return };
     assert_eq!(
         hex_sha256(&exe),
         "eee0f5e246f7df19be44b9db632c39cef3cba5431157ddc4d859b89ca9211bc4",
@@ -110,7 +113,9 @@ fn medium_overlay() {
 /// load-time relocation offset, and the stub's reloc-count field.
 #[test]
 fn medium_overlay_intseg_one_ref() {
-    let Some(exe) = link_overlay_exe("intseg/MAIN.OBJ", "MOD.OBJ", "intseg/MOD1.OBJ") else { return };
+    let Some(exe) = link_overlay_exe("intseg/MAIN.OBJ", &[("MOD.OBJ", "intseg/MOD1.OBJ")]) else {
+        return;
+    };
     assert_eq!(
         hex_sha256(&exe),
         "0d70eb7cca83f63894e9d127051d0d8e9a59f40b5744708288c09481189aad1e",
@@ -122,11 +127,28 @@ fn medium_overlay_intseg_one_ref() {
 /// the descending relocation-offset list and the reloc-count scaling.
 #[test]
 fn medium_overlay_intseg_two_refs() {
-    let Some(exe) = link_overlay_exe("intseg/MAIN.OBJ", "MOD.OBJ", "intseg/MOD2.OBJ") else { return };
+    let Some(exe) = link_overlay_exe("intseg/MAIN.OBJ", &[("MOD.OBJ", "intseg/MOD2.OBJ")]) else {
+        return;
+    };
     assert_eq!(
         hex_sha256(&exe),
         "3e6b2ba22e3907e1be6cde20d10838d5834917e5145afd87b37b772bf38ec1a2",
         "two-ref overlay PROG.EXE diverged from TLINK",
+    );
+}
+
+/// Two overlaid modules where one overlaid function far-calls the other
+/// (`square` → `helper`, both overlaid): exercises multi-overlay area-offset
+/// accumulation (the second stub's descriptor points past the first slot) and
+/// an overlay→overlay reference resolved through the callee's stub thunk.
+#[test]
+fn medium_overlay_two_modules() {
+    let overlaid = [("MOD1.OBJ", "multi/MOD1.OBJ"), ("MOD2.OBJ", "multi/MOD2.OBJ")];
+    let Some(exe) = link_overlay_exe("multi/MAIN.OBJ", &overlaid) else { return };
+    assert_eq!(
+        hex_sha256(&exe),
+        "a343e581cf0029c12a49c30900f51f70cbcd920713969cb5a463d61ec76842a1",
+        "two-module overlay PROG.EXE diverged from TLINK",
     );
 }
 

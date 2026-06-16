@@ -95,6 +95,23 @@ Reference (`square` far-calling resident `helper`): one ref → code `… 9A 09 
 08 00 …`, reloc list `0F 00`, descriptor `+0xa = 02`. Two calls → list `16 00 0B
 00` (descending), `+0xa = 04`.
 
+**Overlay→overlay calls** go through the callee's stub: when the target is itself
+overlaid, the offset word is the callee stub's `INT 3F` thunk offset
+(`0x20 + i*5`) and the segment word is that **stub segment's** `__SEGTABLE__`
+index (not the overlay code's). E.g. overlaid `square` calling overlaid `helper`
+→ `9A 20 00 70 00` (thunk `0x20`, MOD2_TEXT stub at table index 14 → `0x70`).
+
+## Multiple overlaid modules
+
+- **Each stub is paragraph-aligned.** `STUBSEG` segments (`_1STUB_`, every
+  `<MOD>_TEXT` stub) start on a fresh paragraph — the manager addresses each as
+  its own segment (one `__SEGTABLE__` entry). They do *not* byte-pack against
+  each other the way `_TEXT`/`<MOD>_TEXT` code segments do.
+- **Stub descriptor +4 = the overlay's offset in the appended area** (the running
+  sum of prior slots), so the second module's stub points past the first's slot.
+  Verified with two overlaid modules: MOD1 slot `0x20` → MOD2 descriptor
+  `+4 = 0x20`.
+
 ## What's pulled vs generated (decoded)
 
 The program objects don't reference the overlay manager at all (the `-Y` OBJs

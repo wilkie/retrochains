@@ -221,7 +221,11 @@ pub fn link(modules: &[Module], thunks: &HashMap<String, u16>) -> Result<Image, 
             }
             _ => false,
         };
-        let to = if first_of_group { 16 } else { align_bytes(c.align) };
+        // A group base must sit on a paragraph; so must each overlaid-module
+        // stub (`STUBSEG`), since the overlay manager addresses it as its own
+        // segment (one `__SEGTABLE__` entry per stub). Everything else honors
+        // its SEGDEF alignment and packs against the previous segment.
+        let to = if first_of_group || c.class == "STUBSEG" { 16 } else { align_bytes(c.align) };
         cursor = align_up(cursor, to);
         c.load_offset = cursor;
         cursor += c.length;

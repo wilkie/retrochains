@@ -186,35 +186,41 @@ pub fn link_overlay(
     }
 
     // Resolve each overlaid module's inter-segment references against the final
-    // layout. A far call / segment selector out of overlaid code can't carry a
-    // real paragraph (the code loads into a runtime buffer, beyond DOS's reloc),
-    // so its segment word becomes the target segment's `__SEGTABLE__` index (load
+    // layout, and accumulate the overlays' positions in the appended area.
+    //
+    // A far call / segment selector out of overlaid code can't carry a real
+    // paragraph (the code loads into a runtime buffer, beyond DOS's reloc), so
+    // its segment word becomes the target segment's `__SEGTABLE__` index (load
     // order × 8) and the offset word becomes the target's segment-relative
-    // offset. The segment word's position is recorded (descending) for the
-    // manager to relocate on load, and the resident stub's reloc-count field
-    // (descriptor +0xa) is back-patched.
-    if overlays.iter().any(|o| !o.pending.is_empty()) {
+    // offset — plus, when the target is itself overlaid, the stub's `INT 3F`
+    // thunk offset (an overlay→overlay call goes through the callee's stub). The
+    // segment word's position is recorded (descending) for the manager to
+    // relocate on load. Then each resident stub's descriptor is back-patched
+    // with the overlay's area offset (+4) and its reloc-count (+0xa).
+    if !overlays.is_empty() {
         let pub_addr: std::collections::HashMap<&str, usize> = image
             .map
             .publics
             .iter()
             .map(|p| (p.name.as_str(), usize::from(p.frame) * 16 + usize::from(p.offset)))
             .collect();
+        let mut area_offset = 0usize;
         for ovl in &mut overlays {
             let mut relocs: Vec<u16> = Vec::new();
             for pr in &ovl.pending {
                 // The `.MAP` publics are upper-cased; TLINK symbol matching is
                 // case-insensitive, so compare on the upper-cased name.
-                let Some(&linear) = pub_addr.get(pr.target.to_ascii_uppercase().as_str()) else {
-                    continue;
-                };
+                let key = pr.target.to_ascii_uppercase();
+                let Some(&linear) = pub_addr.get(key.as_str()) else { continue };
                 let Some((ti, seg)) = image.map.segments.iter().enumerate().find(|(_, s)| {
                     s.length > 0 && (s.start..s.start + s.length).contains(&linear)
                 }) else {
                     continue;
                 };
                 let para = (seg.start >> 4) as u16;
-                let off_val = (linear - usize::from(para) * 16) as u16;
+                // An overlaid callee is reached through its stub thunk.
+                let thunk = thunks.get(&pr.target).copied().unwrap_or(0);
+                let off_val = (linear - usize::from(para) * 16) as u16 + thunk;
                 let seg_val = (ti * 8) as u16;
                 let at = usize::from(pr.data_offset);
                 match pr.location {
@@ -234,15 +240,18 @@ pub fn link_overlay(
             }
             relocs.sort_unstable_by(|a, b| b.cmp(a));
             ovl.relocs = relocs;
+            ovl.rel_offset = area_offset;
             if let Some(stub) =
                 image.map.segments.iter().find(|s| s.name == ovl.stub_name && s.class == "STUBSEG")
             {
-                let a = stub.start + 0xa;
-                if a + 2 <= image.file_image.len() {
-                    let n = (ovl.relocs.len() * 2) as u16;
-                    image.file_image[a..a + 2].copy_from_slice(&n.to_le_bytes());
+                if stub.start + 0xc <= image.file_image.len() {
+                    image.file_image[stub.start + 4..stub.start + 8]
+                        .copy_from_slice(&(area_offset as u32).to_le_bytes());
+                    image.file_image[stub.start + 0xa..stub.start + 0xc]
+                        .copy_from_slice(&((ovl.relocs.len() * 2) as u16).to_le_bytes());
                 }
             }
+            area_offset += overlay::slot_size(ovl.code.len(), ovl.relocs.len());
         }
     }
 
