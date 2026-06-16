@@ -542,6 +542,255 @@ pub fn emit(module: &Module) -> Vec<u8> {
     b.into_bytes()
 }
 
+/// A handle to a segment added to a [`ModuleBuilder`] — its 1-based SEGDEF index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegId(u8);
+
+impl SegId {
+    /// The 1-based SEGDEF index (e.g. for a fixup frame or target datum).
+    #[must_use]
+    pub fn index(self) -> u8 {
+        self.0
+    }
+}
+
+/// A handle to a group added to a [`ModuleBuilder`] — its 1-based GRPDEF index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpId(u8);
+
+impl GrpId {
+    /// The 1-based GRPDEF index (e.g. for an F1 fixup frame datum).
+    #[must_use]
+    pub fn index(self) -> u8 {
+        self.0
+    }
+}
+
+/// Fluent builder for synthetic OMF [`Module`]s. It hides the 1-based index
+/// bookkeeping — the index-0 placeholders and the segment / extern / group
+/// tables — so a test can describe an object in a few lines, then [`emit`] it
+/// (or call [`ModuleBuilder::emit`]) for object bytes. Segment and group adders
+/// return handles ([`SegId`] / [`GrpId`]) used to refer back to them; the other
+/// setters chain via `&mut Self`.
+///
+/// # Panics
+/// Methods panic if more than 255 segments, externs, or groups are added, or a
+/// segment's data exceeds 65535 bytes (the OMF indices and length are single
+/// bytes / a u16) — far beyond any synthetic test object.
+#[derive(Debug)]
+pub struct ModuleBuilder {
+    module: Module,
+}
+
+/// What an [`extern_ref`](ModuleBuilder::extern_ref) fixup is framed against.
+#[derive(Debug, Clone, Copy)]
+pub enum Frame {
+    /// F4 — the patched location's own segment.
+    Location,
+    /// F5 — the target's frame.
+    Target,
+    /// F1 — a named group.
+    Group(GrpId),
+    /// F0 — a named segment.
+    Segment(SegId),
+}
+
+impl Frame {
+    /// The OMF `(frame_method, frame_datum)` pair this frame encodes.
+    fn method_datum(self) -> (u8, Option<u8>) {
+        match self {
+            Frame::Location => (4, None),
+            Frame::Target => (5, None),
+            Frame::Group(g) => (1, Some(g.0)),
+            Frame::Segment(s) => (0, Some(s.0)),
+        }
+    }
+}
+
+#[allow(clippy::missing_panics_doc)] // documented on the struct
+impl ModuleBuilder {
+    /// Start a module named `name` (the THEADR).
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        Self {
+            module: Module {
+                name: name.into(),
+                lnames: vec![String::new()],
+                segdefs: vec![SegDef {
+                    name: String::new(),
+                    class: String::new(),
+                    align: 0,
+                    combine: 0,
+                    length: 0,
+                    data: Vec::new(),
+                    has_data: false,
+                    fixups: Vec::new(),
+                }],
+                extdefs: vec![String::new()],
+                ..Module::default()
+            },
+        }
+    }
+
+    fn push(&mut self, seg: SegDef) -> SegId {
+        self.module.segdefs.push(seg);
+        SegId(u8::try_from(self.module.segdefs.len() - 1).expect("segment index fits in u8"))
+    }
+
+    /// An initialized segment with explicit class / align / combine.
+    pub fn segment(&mut self, name: &str, class: &str, align: u8, combine: u8, data: &[u8]) -> SegId {
+        self.push(SegDef {
+            name: name.into(),
+            class: class.into(),
+            align,
+            combine,
+            length: u16::try_from(data.len()).expect("segment fits in u16"),
+            data: data.to_vec(),
+            has_data: true,
+            fixups: Vec::new(),
+        })
+    }
+
+    /// An uninitialized segment of `len` bytes with explicit class / combine
+    /// (word-aligned) — contributes memory size but no LEDATA.
+    fn uninit(&mut self, name: &str, class: &str, combine: u8, len: u16) -> SegId {
+        self.push(SegDef {
+            name: name.into(),
+            class: class.into(),
+            align: 2,
+            combine,
+            length: len,
+            data: vec![0; usize::from(len)],
+            has_data: false,
+            fixups: Vec::new(),
+        })
+    }
+
+    /// A byte-aligned public CODE segment holding `code` (BCC's `_TEXT` shape).
+    pub fn code_segment(&mut self, name: &str, code: &[u8]) -> SegId {
+        self.segment(name, "CODE", 1, 2, code)
+    }
+
+    /// A word-aligned public DATA segment holding `data`.
+    pub fn data_segment(&mut self, name: &str, data: &[u8]) -> SegId {
+        self.segment(name, "DATA", 2, 2, data)
+    }
+
+    /// A word-aligned uninitialized BSS segment of `len` bytes.
+    pub fn bss_segment(&mut self, name: &str, len: u16) -> SegId {
+        self.uninit(name, "BSS", 2, len)
+    }
+
+    /// A stack segment of `len` bytes (combine = stack).
+    pub fn stack_segment(&mut self, name: &str, len: u16) -> SegId {
+        self.uninit(name, "STACK", 5, len)
+    }
+
+    fn extern_idx(&mut self, name: &str) -> u8 {
+        if let Some(pos) = self.module.extdefs.iter().position(|n| n == name) {
+            u8::try_from(pos).expect("extern index fits in u8")
+        } else {
+            self.module.extdefs.push(name.into());
+            u8::try_from(self.module.extdefs.len() - 1).expect("extern index fits in u8")
+        }
+    }
+
+    /// Register an external symbol (the fixup helpers register theirs too).
+    pub fn extern_(&mut self, name: &str) -> &mut Self {
+        self.extern_idx(name);
+        self
+    }
+
+    /// Define a public symbol at `offset` within `seg`.
+    pub fn public(&mut self, name: &str, seg: SegId, offset: u16) -> &mut Self {
+        self.module.pubdefs.push(PubDef {
+            name: name.into(),
+            base_segment: seg.0,
+            offset,
+            absolute_frame: 0,
+        });
+        self
+    }
+
+    /// Define an absolute public (an equate) at `frame:offset`.
+    pub fn absolute(&mut self, name: &str, frame: u16, offset: u16) -> &mut Self {
+        self.module.pubdefs.push(PubDef {
+            name: name.into(),
+            base_segment: 0,
+            offset,
+            absolute_frame: frame,
+        });
+        self
+    }
+
+    /// Define a group spanning `segs` (e.g. `DGROUP`).
+    pub fn group(&mut self, name: &str, segs: &[SegId]) -> GrpId {
+        self.module
+            .grpdefs
+            .push(GrpDef { name: name.into(), segments: segs.iter().map(|s| s.0).collect() });
+        GrpId(u8::try_from(self.module.grpdefs.len()).expect("group index fits in u8"))
+    }
+
+    /// Set the module entry point to `seg:offset`.
+    pub fn entry(&mut self, seg: SegId, offset: u16) -> &mut Self {
+        self.module.entry = Some(Entry { base_segment: seg.0, offset });
+        self
+    }
+
+    /// Add a fully-specified fixup to `seg`.
+    pub fn fixup(&mut self, seg: SegId, fixup: Fixup) -> &mut Self {
+        self.module.segdefs[usize::from(seg.0)].fixups.push(fixup);
+        self
+    }
+
+    /// A reference to external `target` (target method T6) at `at` within `seg`,
+    /// with the given location type, M (segment-relative) bit, and [`Frame`]. The
+    /// external is registered automatically.
+    pub fn extern_ref(
+        &mut self,
+        seg: SegId,
+        at: u16,
+        location: u8,
+        seg_relative: bool,
+        frame: Frame,
+        target: &str,
+    ) -> &mut Self {
+        let target_datum = Some(self.extern_idx(target));
+        let (frame_method, frame_datum) = frame.method_datum();
+        self.fixup(
+            seg,
+            Fixup {
+                seg: seg.0,
+                data_offset: at,
+                seg_relative,
+                location,
+                frame_method,
+                frame_datum,
+                target_method: 6,
+                target_datum,
+            },
+        )
+    }
+
+    /// A self-relative near call (`e8`) to external `target`; the displacement
+    /// word is at `at` within `seg` (frame [`Frame::Location`]).
+    pub fn near_call(&mut self, seg: SegId, at: u16, target: &str) -> &mut Self {
+        self.extern_ref(seg, at, 1, false, Frame::Location, target)
+    }
+
+    /// Finish, returning the [`Module`].
+    #[must_use]
+    pub fn build(self) -> Module {
+        self.module
+    }
+
+    /// Finish and serialize to OMF object bytes (`emit(&self.build())`).
+    #[must_use]
+    pub fn emit(self) -> Vec<u8> {
+        emit(&self.module)
+    }
+}
+
 #[cfg(test)]
 mod emit_tests {
     use super::*;
@@ -656,5 +905,25 @@ mod emit_tests {
         let original = parse(bytes).expect("real object parses");
         let reparsed = parse(&emit(&original)).expect("re-emitted object parses");
         assert_semantic_eq(&original, &reparsed);
+    }
+
+    /// The `ModuleBuilder` produces an object equivalent to the hand-built one:
+    /// grouped data/bss segments, and external references framed by a group
+    /// (F1) and by a segment (F0). Confirms the builder + every `Frame` variant
+    /// it exercises round-trips through `emit`/`parse`.
+    #[test]
+    fn builder_roundtrip() {
+        let mut b = ModuleBuilder::new("BLD");
+        let text = b.code_segment("_TEXT", &[0xb8, 0, 0, 0x9a, 0, 0, 0, 0]);
+        let data = b.data_segment("_DATA", &[1, 0, 2, 0]);
+        let bss = b.bss_segment("_BSS", 16);
+        let dgroup = b.group("DGROUP", &[data, bss]);
+        b.extern_ref(text, 1, 1, true, Frame::Group(dgroup), "_gv"); // mov ax, OFFSET _gv
+        b.extern_ref(text, 4, 3, true, Frame::Segment(text), "_helper"); // call far _helper
+        b.public("_main", text, 0).entry(text, 0);
+
+        let module = b.build();
+        let reparsed = parse(&emit(&module)).expect("builder object parses");
+        assert_semantic_eq(&module, &reparsed);
     }
 }
