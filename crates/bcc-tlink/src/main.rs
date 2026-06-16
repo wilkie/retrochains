@@ -39,14 +39,41 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let map_field = fields.next().unwrap_or("").trim(); // fields[2] = map file
     let lib_field = fields.next().unwrap_or("").trim(); // fields[3] = libraries
 
-    let obj_names: Vec<String> = obj_field
-        .split('+')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(with_obj_ext)
-        .collect();
+    // The object field is `+`/space-separated module names; a positional `/o`
+    // token turns on overlay mode, so every module after it is overlaid (TLINK
+    // 4.0's overlay selection — not the parenthesis form). `/o-` would turn it
+    // back off.
+    let mut obj_names: Vec<String> = Vec::new();
+    let mut overlaid: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut overlay_mode = false;
+    for token in obj_field.split(['+', ' ', '\t']).map(str::trim).filter(|s| !s.is_empty()) {
+        match token.to_ascii_lowercase().as_str() {
+            "/o" => overlay_mode = true,
+            "/o-" => overlay_mode = false,
+            _ => {
+                let name = with_obj_ext(token);
+                if overlay_mode {
+                    overlaid.insert(name.clone());
+                }
+                obj_names.push(name);
+            }
+        }
+    }
     if obj_names.is_empty() {
         return Err("no object files given".into());
+    }
+    // Overlay linking (the VROOMM manager, per-module INT 3F stubs, the
+    // _EXEINFO_ table, and the appended FBOV overlay area) is reverse-engineered
+    // (see specs/bcc/tlink/OVERLAYS.md) but not yet built. Fail clearly rather
+    // than silently producing a non-overlay image.
+    if !overlaid.is_empty() {
+        let mut names: Vec<&String> = overlaid.iter().collect();
+        names.sort();
+        return Err(format!(
+            "overlay linking (/o) not yet implemented; overlaid modules: {}",
+            names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        )
+        .into());
     }
 
     let mut objects = Vec::with_capacity(obj_names.len());
