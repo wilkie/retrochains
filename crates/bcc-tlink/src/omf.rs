@@ -65,6 +65,21 @@ pub struct Fixup {
     pub target_datum: Option<u8>,
 }
 
+/// A communal (tentative) definition from a COMDEF record. Communal names
+/// share the external-name index space, so `ext_index` is the name's position
+/// in [`Module::extdefs`]; the linker allocates `count * element_size` bytes if
+/// no PUBDEF defines the symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComDef {
+    /// 1-based index of this symbol's name in [`Module::extdefs`].
+    pub ext_index: u8,
+    /// `true` = FAR (`0x61`): `count` elements of `element_size` bytes each.
+    /// `false` = NEAR (`0x62`): `count` total bytes (`element_size` is 1).
+    pub far: bool,
+    pub count: u32,
+    pub element_size: u32,
+}
+
 /// The MODEND start address (logical `seg:offset`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -83,8 +98,11 @@ pub struct Module {
     pub segdefs: Vec<SegDef>,
     pub grpdefs: Vec<GrpDef>,
     pub pubdefs: Vec<PubDef>,
-    /// 1-based EXTDEF names (index 0 unused).
+    /// 1-based EXTDEF names (index 0 unused). Communal (COMDEF) names live here
+    /// too — they share the external-name index space.
     pub extdefs: Vec<String>,
+    /// Communal (tentative) definitions, each pointing at its name in `extdefs`.
+    pub comdefs: Vec<ComDef>,
     pub entry: Option<Entry>,
 }
 
@@ -171,6 +189,7 @@ pub fn parse(bytes: &[u8]) -> Result<Module, ParseError> {
             obj::GRPDEF => parse_grpdef(&mut module, rec.payload)?,
             obj::PUBDEF_16 | obj::LPUBDEF_16 => parse_pubdef(&mut module, rec.payload)?,
             obj::EXTDEF | obj::LEXTDEF => parse_extdef(&mut module, rec.payload)?,
+            obj::COMDEF | obj::LCOMDEF => parse_comdef(&mut module, rec.payload)?,
             obj::LEDATA_16 => {
                 last_ledata = Some(parse_ledata(&mut module, rec.payload)?);
             }
@@ -258,6 +277,51 @@ fn parse_extdef(module: &mut Module, payload: &[u8]) -> Result<(), ParseError> {
         let name = take_pstr(&mut p)?;
         let _type_idx = take_u8(&mut p)?;
         module.extdefs.push(name);
+    }
+    Ok(())
+}
+
+/// Read a COMDEF variable-length number: a leading byte that is either the
+/// value itself (`0x00..=0x80`) or a tag (`0x81`/`0x84`/`0x88`) introducing a
+/// 2/3/4-byte little-endian value.
+fn take_comdef_num(p: &mut &[u8]) -> Result<u32, ParseError> {
+    let lead = take_u8(p)?;
+    match lead {
+        0x00..=0x80 => Ok(u32::from(lead)),
+        0x81 => Ok(u32::from(take_u16(p)?)),
+        0x84 => {
+            let lo = take_u16(p)?;
+            let hi = take_u8(p)?;
+            Ok(u32::from(lo) | (u32::from(hi) << 16))
+        }
+        0x88 => {
+            let lo = take_u16(p)?;
+            let hi = take_u16(p)?;
+            Ok(u32::from(lo) | (u32::from(hi) << 16))
+        }
+        _ => Err(ParseError::Unsupported(obj::COMDEF)),
+    }
+}
+
+fn parse_comdef(module: &mut Module, payload: &[u8]) -> Result<(), ParseError> {
+    let mut p = payload;
+    while !p.is_empty() {
+        let name = take_pstr(&mut p)?;
+        let _type_idx = take_u8(&mut p)?;
+        let data_type = take_u8(&mut p)?;
+        let (far, count, element_size) = match data_type {
+            0x62 => (false, take_comdef_num(&mut p)?, 1), // NEAR: total length
+            0x61 => {
+                let count = take_comdef_num(&mut p)?; // number of elements
+                let element_size = take_comdef_num(&mut p)?; // bytes per element
+                (true, count, element_size)
+            }
+            _ => return Err(ParseError::Unsupported(obj::COMDEF)),
+        };
+        // The communal name occupies the next external-name index.
+        module.extdefs.push(name);
+        let ext_index = u8::try_from(module.extdefs.len() - 1).unwrap_or(0);
+        module.comdefs.push(ComDef { ext_index, far, count, element_size });
     }
     Ok(())
 }
@@ -414,6 +478,57 @@ fn parse_modend(module: &mut Module, payload: &[u8]) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// Write a COMDEF variable-length number: a bare byte for `0..=0x80`, else the
+/// `0x81`/`0x88` tag plus a 2/4-byte little-endian value.
+fn put_comdef_num(payload: &mut Vec<u8>, v: u32) {
+    if v <= 0x80 {
+        payload.push(u8::try_from(v).expect("guarded ≤ 0x80"));
+    } else if v <= 0xFFFF {
+        payload.push(0x81);
+        payload.extend_from_slice(&u16::try_from(v).expect("guarded ≤ 0xFFFF").to_le_bytes());
+    } else {
+        payload.push(0x88);
+        payload.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Emit the external-name records. EXTDEFs and communal COMDEFs share one
+/// index space, so walk it in index order, batching each run of regular
+/// externs into an EXTDEF record and each run of communals into a COMDEF record
+/// (MSC's EXTDEF / COMDEF / EXTDEF split falls out of this naturally).
+fn emit_external_names(b: &mut obj::ObjBuilder, module: &Module) {
+    let is_communal = |i: usize| module.comdefs.iter().any(|c| usize::from(c.ext_index) == i);
+    let mut i = 1usize;
+    while i < module.extdefs.len() {
+        if is_communal(i) {
+            let mut payload = Vec::new();
+            while i < module.extdefs.len() {
+                let Some(cd) = module.comdefs.iter().find(|c| usize::from(c.ext_index) == i) else {
+                    break;
+                };
+                let name = &module.extdefs[i];
+                payload.push(u8::try_from(name.len()).expect("communal name fits in u8"));
+                payload.extend_from_slice(name.as_bytes());
+                payload.push(0); // type index
+                payload.push(if cd.far { 0x61 } else { 0x62 });
+                put_comdef_num(&mut payload, cd.count);
+                if cd.far {
+                    put_comdef_num(&mut payload, cd.element_size);
+                }
+                i += 1;
+            }
+            b.write_record(obj::COMDEF, &payload);
+        } else {
+            let mut names: Vec<&str> = Vec::new();
+            while i < module.extdefs.len() && !is_communal(i) {
+                names.push(module.extdefs[i].as_str());
+                i += 1;
+            }
+            b.write_extdef(&names);
+        }
+    }
+}
+
 /// Serialize a [`Module`] back to OMF object bytes — the inverse of [`parse`].
 ///
 /// This is the foundation for *synthetic* objects: build a `Module` in code
@@ -472,11 +587,7 @@ pub fn emit(module: &Module) -> Vec<u8> {
         b.write_grpdef(grp_name_idx[g], &grp.segments);
     }
 
-    // EXTDEFs (one record listing every external, as BCC does).
-    if module.extdefs.len() > 1 {
-        let refs: Vec<&str> = module.extdefs.iter().skip(1).map(String::as_str).collect();
-        b.write_extdef(&refs);
-    }
+    emit_external_names(&mut b, module);
 
     // PUBDEFs: one record per (base_segment, absolute_frame) run keeps the
     // payload's leading base fields valid; emitting one per symbol is simplest
@@ -701,6 +812,20 @@ impl ModuleBuilder {
         self
     }
 
+    /// Register a NEAR communal (tentative) definition of `length` bytes — a
+    /// file-scope `int g;` style global. The name joins the external-name index
+    /// space; returns its index (usable as a fixup target).
+    pub fn comdef(&mut self, name: &str, length: u16) -> u8 {
+        let ext_index = self.extern_idx(name);
+        self.module.comdefs.push(ComDef {
+            ext_index,
+            far: false,
+            count: u32::from(length),
+            element_size: 1,
+        });
+        ext_index
+    }
+
     /// Define a public symbol at `offset` within `seg`.
     pub fn public(&mut self, name: &str, seg: SegId, offset: u16) -> &mut Self {
         self.module.pubdefs.push(PubDef {
@@ -858,6 +983,7 @@ mod emit_tests {
         assert_eq!(a.grpdefs, b.grpdefs, "grpdefs");
         assert_eq!(a.pubdefs, b.pubdefs, "pubdefs");
         assert_eq!(a.extdefs, b.extdefs, "extdefs");
+        assert_eq!(a.comdefs, b.comdefs, "comdefs");
         assert_eq!(a.entry, b.entry, "entry");
     }
 
@@ -946,6 +1072,7 @@ mod emit_tests {
                 absolute_frame: 0,
             }],
             extdefs: vec![String::new(), "_helper".into()],
+            comdefs: Vec::new(),
             entry: Some(Entry { base_segment: 1, offset: 0 }),
         };
         let reparsed = parse(&emit(&module)).expect("emitted object parses");
@@ -980,5 +1107,50 @@ mod emit_tests {
         let module = b.build();
         let reparsed = parse(&emit(&module)).expect("builder object parses");
         assert_semantic_eq(&module, &reparsed);
+    }
+
+    /// A communal (COMDEF) sandwiched between regular externs round-trips with
+    /// the external-name index order intact — the layout MSC emits for a
+    /// tentative global between runtime helpers — and a fixup targeting the
+    /// communal keeps pointing at it.
+    #[test]
+    fn comdef_roundtrip() {
+        let mut b = ModuleBuilder::new("COMM");
+        let text = b.code_segment("_TEXT", &[0xa1, 0, 0, 0xc3]); // mov ax,[_g]; ret
+        b.extern_("__chkstk"); // ext index 1
+        b.comdef("_g", 2); // ext index 2 (communal)
+        b.extern_("_printf"); // ext index 3
+        b.extern_ref(text, 1, 1, true, Frame::Location, "_g"); // references the communal
+        b.public("_main", text, 0).entry(text, 0);
+
+        let module = b.build();
+        assert_eq!(module.extdefs, ["", "__chkstk", "_g", "_printf"]);
+        assert_eq!(module.comdefs, [ComDef { ext_index: 2, far: false, count: 2, element_size: 1 }]);
+
+        let bytes = emit(&module);
+        // The COMDEF entry matches real MSC byte-for-byte: for `int g;` MSC emits
+        // `02 5f 67 00 62 02` (name "_g", type 0, NEAR 0x62, length 2).
+        assert!(
+            bytes.windows(6).any(|w| w == [0x02, b'_', b'g', 0x00, 0x62, 0x02]),
+            "COMDEF entry matches MSC's `02 5f 67 00 62 02`",
+        );
+        assert_semantic_eq(&module, &parse(&bytes).expect("communal object parses"));
+    }
+
+    /// The COMDEF length field: `≤ 0x80` is a bare byte, larger uses the `0x81`
+    /// tag plus a little-endian u16.
+    #[test]
+    fn comdef_length_encoding() {
+        let mut b = ModuleBuilder::new("C");
+        b.comdef("_small", 2);
+        b.comdef("_big", 0x100);
+        let bytes = b.emit();
+        assert!(bytes.windows(2).any(|w| w == [0x62, 0x02]), "NEAR small length = 0x62 0x02");
+        assert!(
+            bytes.windows(4).any(|w| w == [0x62, 0x81, 0x00, 0x01]),
+            "NEAR big length = 0x62 0x81 <u16 0x0100>",
+        );
+        let m = parse(&bytes).expect("parses");
+        assert_eq!(m.comdefs.iter().map(|c| c.count).collect::<Vec<_>>(), [2, 0x100]);
     }
 }

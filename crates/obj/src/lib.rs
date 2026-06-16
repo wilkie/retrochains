@@ -27,6 +27,13 @@ pub const GRPDEF: u8 = 0x9a;
 pub const FIXUPP_16: u8 = 0x9c;
 pub const LEDATA_16: u8 = 0xa0;
 pub const LIDATA_16: u8 = 0xa2;
+/// `COMDEF` — communal (tentative) definitions. Each entry names an
+/// uninitialized symbol the linker allocates if no PUBDEF defines it; the
+/// names share the external-name index space with EXTDEF. MSC emits these for
+/// file-scope tentative globals (`int g;`).
+pub const COMDEF: u8 = 0xb0;
+/// `LCOMDEF` — local (module-private) communal definitions; same payload shape.
+pub const LCOMDEF: u8 = 0xb8;
 /// `LEXTDEF` — local (module-private) external names. Same payload shape as
 /// EXTDEF; used by MSC for `static` function references.
 pub const LEXTDEF: u8 = 0xb4;
