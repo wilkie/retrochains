@@ -128,8 +128,10 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
     }
     let mem_size = cursor;
 
-    // Pass 3 — resolve public symbols to absolute image addresses.
-    let mut symbols: HashMap<String, usize> = HashMap::new();
+    // Pass 3 — resolve public symbols to (combined segment, absolute address).
+    // The combined segment is kept so far fixups can recover the target's
+    // frame paragraph.
+    let mut symbols: HashMap<String, (usize, usize)> = HashMap::new();
     for (m, module) in modules.iter().enumerate() {
         for pubdef in &module.pubdefs {
             if let Some(p) = placements[m]
@@ -138,24 +140,23 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
                 .flatten()
             {
                 let addr = combined[p.combined].load_offset + p.base + usize::from(pubdef.offset);
-                symbols.insert(pubdef.name.clone(), addr);
+                symbols.insert(pubdef.name.clone(), (p.combined, addr));
             }
         }
     }
 
-    // Pass 4 — apply fixups (patch the merged segment data in place).
+    // Pass 4 — apply fixups (patch the merged segment data in place). Far
+    // fixups also contribute a runtime relocation for their segment word.
+    let mut relocations: Vec<(u16, u16)> = Vec::new();
     for (m, module) in modules.iter().enumerate() {
         for (seg_idx, seg) in module.segdefs.iter().enumerate().skip(1) {
             let Some(place) = placements[m][seg_idx] else { continue };
             for fx in &seg.fixups {
-                apply_fixup(
-                    &mut combined,
-                    place,
-                    fx,
-                    &placements[m],
-                    module,
-                    &symbols,
-                )?;
+                if let Some(reloc) =
+                    apply_fixup(&mut combined, place, fx, &placements[m], module, &symbols)?
+                {
+                    relocations.push(reloc);
+                }
             }
         }
     }
@@ -192,7 +193,7 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
         entry_ip,
         stack_ss,
         stack_sp,
-        relocations: Vec::new(),
+        relocations,
     })
 }
 
@@ -216,78 +217,98 @@ fn resolve_entry(
     Err(LinkError::NoEntry)
 }
 
-/// Patch one fixup into the merged segment data.
+/// Patch one fixup into the merged segment data. Returns a runtime relocation
+/// `(offset, segment)` when the fixup deposits a load-relative segment word
+/// (far pointers); `None` for fully link-resolved near fixups.
 fn apply_fixup(
     combined: &mut [Combined],
     place: Placement,
     fx: &Fixup,
     module_placements: &[Option<Placement>],
     module: &Module,
-    symbols: &HashMap<String, usize>,
-) -> Result<(), LinkError> {
-    if fx.location != 1 {
-        return Err(LinkError::UnsupportedFixup(format!("location type {}", fx.location)));
-    }
+    symbols: &HashMap<String, (usize, usize)>,
+) -> Result<Option<(u16, u16)>, LinkError> {
     // Absolute image address of the bytes being patched.
     let patch_addr = combined[place.combined].load_offset + place.base + usize::from(fx.data_offset);
 
-    // Resolve the target's absolute image address (T4 = SEGDEF, T6 = EXTDEF).
-    let target_addr = match fx.target_method {
+    // Resolve the target to its combined segment and absolute image address
+    // (T4 = SEGDEF, T6 = EXTDEF). The segment recovers the target's frame.
+    let (target_ci, target_addr) = match fx.target_method {
         4 => {
-            let idx = fx.target_datum.ok_or_else(|| {
-                LinkError::UnsupportedFixup("T4 without datum".into())
-            })?;
+            let idx = fx
+                .target_datum
+                .ok_or_else(|| LinkError::UnsupportedFixup("T4 without datum".into()))?;
             let tp = module_placements
                 .get(usize::from(idx))
                 .copied()
                 .flatten()
                 .ok_or(LinkError::BadFixupTarget(idx))?;
-            combined[tp.combined].load_offset + tp.base
+            (tp.combined, combined[tp.combined].load_offset + tp.base)
         }
         6 => {
-            let idx = fx.target_datum.ok_or_else(|| {
-                LinkError::UnsupportedFixup("T6 without datum".into())
-            })?;
+            let idx = fx
+                .target_datum
+                .ok_or_else(|| LinkError::UnsupportedFixup("T6 without datum".into()))?;
             let name = module
                 .extdefs
                 .get(usize::from(idx))
                 .ok_or(LinkError::BadFixupTarget(idx))?;
             *symbols.get(name).ok_or_else(|| LinkError::UnresolvedExternal(name.clone()))?
         }
-        other => {
-            return Err(LinkError::UnsupportedFixup(format!("target method {other}")));
-        }
+        other => return Err(LinkError::UnsupportedFixup(format!("target method {other}"))),
     };
 
-    // The frame the offset is measured against. F5 (target's frame) and F4
-    // (location's frame) both resolve to a paragraph base; for self-relative
-    // near refs within one image the choice cancels out below.
-    let frame_base = match fx.frame_method {
-        1 => {
-            // F1 — group frame. Resolve the group's first segment's frame.
-            let datum = fx.frame_datum.unwrap_or(0);
-            let grp = module.grpdefs.get(usize::from(datum).wrapping_sub(1));
-            grp.and_then(|g| g.segments.first())
-                .and_then(|&s| module_placements.get(usize::from(s)).copied().flatten())
-                .map_or(0, |p| (combined[p.combined].load_offset >> 4) * 16)
-        }
-        4 => (combined[place.combined].load_offset >> 4) * 16,
-        // F5 (target frame) and others: use the target's paragraph.
-        _ => (target_addr >> 4) * 16,
-    };
-
-    let seg = &mut combined[place.combined];
     let off = place.base + usize::from(fx.data_offset);
-    let existing = u16::from(seg.data[off]) | (u16::from(seg.data[off + 1]) << 8);
-    let value = if fx.seg_relative {
-        // Offset of the target within its frame.
-        (target_addr - frame_base) as u16
-    } else {
-        // Self-relative: distance from the byte after this 16-bit field.
-        (target_addr as i32 - (patch_addr as i32 + 2)) as u16
-    };
-    let patched = existing.wrapping_add(value);
-    seg.data[off] = (patched & 0xFF) as u8;
-    seg.data[off + 1] = (patched >> 8) as u8;
-    Ok(())
+    match fx.location {
+        // Near 16-bit offset.
+        1 => {
+            // The frame the offset is measured against. F1 = group frame,
+            // F4 = location's frame; F5 (target frame) and the rest use the
+            // target's paragraph. For self-relative refs the choice cancels.
+            let frame_base = match fx.frame_method {
+                1 => {
+                    let datum = fx.frame_datum.unwrap_or(0);
+                    let grp = module.grpdefs.get(usize::from(datum).wrapping_sub(1));
+                    grp.and_then(|g| g.segments.first())
+                        .and_then(|&s| module_placements.get(usize::from(s)).copied().flatten())
+                        .map_or(0, |p| (combined[p.combined].load_offset >> 4) * 16)
+                }
+                4 => (combined[place.combined].load_offset >> 4) * 16,
+                _ => (target_addr >> 4) * 16,
+            };
+            let seg = &mut combined[place.combined];
+            let existing = u16::from(seg.data[off]) | (u16::from(seg.data[off + 1]) << 8);
+            let value = if fx.seg_relative {
+                (target_addr - frame_base) as u16
+            } else {
+                (target_addr as i32 - (patch_addr as i32 + 2)) as u16
+            };
+            write_u16(seg, off, existing.wrapping_add(value));
+            Ok(None)
+        }
+        // Far pointer: 16-bit offset then 16-bit (load-relative) segment.
+        3 => {
+            // Target frame = the target segment's paragraph; offset is the
+            // target's distance into that segment.
+            let target_frame = (combined[target_ci].load_offset >> 4) as u16;
+            let target_off = (target_addr - combined[target_ci].load_offset) as u16;
+            let seg = &mut combined[place.combined];
+            let existing_off = u16::from(seg.data[off]) | (u16::from(seg.data[off + 1]) << 8);
+            write_u16(seg, off, existing_off.wrapping_add(target_off));
+            write_u16(seg, off + 2, target_frame);
+
+            // Relocate the segment word: its location relative to its own
+            // (paragraph-aligned) frame. The patched segment owns frame
+            // `load_offset >> 4`, so the in-frame offset is just place+off+2.
+            let reloc_frame = (combined[place.combined].load_offset >> 4) as u16;
+            let reloc_off = (place.base + usize::from(fx.data_offset) + 2) as u16;
+            Ok(Some((reloc_off, reloc_frame)))
+        }
+        other => Err(LinkError::UnsupportedFixup(format!("location type {other}"))),
+    }
+}
+
+fn write_u16(seg: &mut Combined, at: usize, v: u16) {
+    seg.data[at] = (v & 0xFF) as u8;
+    seg.data[at + 1] = (v >> 8) as u8;
 }

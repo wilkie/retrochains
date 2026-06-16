@@ -46,10 +46,15 @@ the *OBJ*'s `0xe9` COMENT, not here). Reproduced verbatim as `TLINK_SIGNATURE`.
 `e_lfarlc = 0x3e`: TLINK leaves a gap after the signature and starts the
 relocation table at **0x3e** (MS LINK packs it right after the header at 0x1e —
 see `../linkers/DIFFERENCES.md`). Each relocation is a 4-byte `offset:segment`
-pair. The header is then padded with zeros up to 512 bytes. Both seed fixtures
-have **zero relocations** (near self-relative calls resolve at link time; only
-far/segment-base references would generate runtime relocations), so the table is
-empty and the header is 512 zero bytes apart from the fields above.
+pair, where `segment` is the location's **frame paragraph** and `offset` is its
+distance into that frame. The header is then padded with zeros up to 512 bytes.
+
+4258/4259 have **zero relocations** (near self-relative calls resolve fully at
+link time). **4260** (`tlink-far-call`) is the first with one: a far `CALL` to an
+`EXTRN FAR` proc deposits a load-relative segment word, so TLINK writes
+`e_crlc = 1` and one table entry `offset=0x0003 segment=0x0000` — the `9A` far
+call's segment word, at `_TEXT` offset 3 in frame 0. DOS adds the load segment to
+that word at load time.
 
 > Open: whether the 512-byte header is a hard minimum or `0x3e + reloc_table`
 > rounded up to a paragraph once relocations exceed ~0x1c2 entries. Needs a
@@ -68,6 +73,9 @@ at its own SEGDEF alignment (word for TASM `.CODE`, para for `.STACK`).
   segment; trailing uninitialized segments (BSS, STACK) contribute only to
   `mem_size` (hence `e_minalloc`), not to file bytes. 4258: `_TEXT` = 6 bytes →
   518-byte file. 4259: combined `_TEXT` = MAIN(7) + 1 pad + SUB(4) = 12 bytes.
+  When an *initialized* segment follows the stack (4260's `FARSEG` after
+  `STACK`), the stack region falls *inside* the file image as zero fill, so
+  `mem_size == file_image` and `e_minalloc` drops to 0.
 - **Entry point** comes from a module's MODEND start address (TASM `END START`),
   resolved through segment combination to `CS:IP`. (BCC programs instead entry
   via the C startup's `_main` PUBDEF; not yet exercised standalone.)
@@ -84,7 +92,13 @@ Handled so far (`link.rs::apply_fixup`), location type 1 (near 16-bit offset):
 - **Segment-relative** (M=1), target T4 (SEGDEF) / via group frame F1: value =
   `target − frame_base`. (Exercised by data-pointer loads; BCC's recipes in
   `specs/formats/OMF.md`.)
+- **Far pointer** (location type 3), e.g. a far `CALL` to an `EXTRN FAR` (M=1,
+  frame F5, target T6): the 4-byte field gets `offset = target's distance into
+  its segment` then `segment = target segment's frame paragraph` (load-relative),
+  and the segment word gets a **runtime relocation** entry. 4260's
+  `CALL FARPROC` → `9A 00 00 11 00` + reloc `(0x0003, 0x0000)`.
 
-These near fixups produce **no runtime relocation** — the value is final once
-segments are placed. Far pointers / segment selectors (location types 2/3) will
-add `e_crlc` entries and are the next layer.
+Near fixups produce **no runtime relocation** (the value is final once segments
+are placed); far pointers add one `e_crlc` entry each. Still ahead: segment
+selectors (location type 2, e.g. `MOV AX, SEG x` / `@DATA`) and far data
+pointers, then library resolution.

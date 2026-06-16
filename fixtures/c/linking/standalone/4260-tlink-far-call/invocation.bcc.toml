@@ -1,0 +1,4 @@
+description = "Standalone TLINK far call: MAIN.OBJ does a far CALL to FARPROC, an EXTRN FAR proc that FAR.OBJ defines in its own PARA segment (class FARCODE). The far pointer's segment word is load-relative, so TLINK emits a runtime relocation in the MZ header (e_crlc=1) — the first fixture exercising the relocation table. tool=tlink gates MAIN.EXE."
+tool = "tlink"
+args = ["/m", "MAIN.OBJ+FAR.OBJ,MAIN.EXE,MAIN.MAP"]
+inputs = ["MAIN.OBJ", "FAR.OBJ"]
