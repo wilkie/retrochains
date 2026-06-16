@@ -87,6 +87,26 @@ fn far_data_object() -> Vec<u8> {
     b.emit()
 }
 
+/// Two CODE segments that byte-pack: `SUB_TEXT` is laid down immediately after
+/// the 0x0A-byte `_TEXT` (at image offset 0x0A, *not* paragraph-aligned to
+/// 0x10), the way per-module `<MODULE>_TEXT` code segments do in the far memory
+/// models. A far call from `_TEXT` to `_sub` therefore carries the byte-packed
+/// offset 0x0A in paragraph 0.
+///
+/// ```text
+///   _TEXT:    9a .. .. .. ..   call far _sub
+///             b8 00 4c cd 21   mov ax,4c00h; int 21h
+///   SUB_TEXT: b8 07 00 cb      mov ax,7; retf
+/// ```
+fn packed_code_object() -> Vec<u8> {
+    let mut b = ModuleBuilder::new("PACKED");
+    let text = b.code_segment("_TEXT", &[0x9a, 0, 0, 0, 0, 0xb8, 0x00, 0x4c, 0xcd, 0x21]);
+    let sub = b.code_segment("SUB_TEXT", &[0xb8, 0x07, 0x00, 0xcb]);
+    b.segment_ref(text, 1, 3, true, Frame::Segment(sub), sub); // call far _sub (location 3)
+    b.public("_sub", sub, 0).public("_start", text, 0).entry(text, 0);
+    b.emit()
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
@@ -109,6 +129,24 @@ fn synthetic_link_is_byte_exact_vs_tlink() {
         "de1f1db5126bbf6479bf116c9a1f92e29fbf96f04ab873edd747a0698c60dafe",
         "synthetic SYN.EXE diverged from TLINK",
     );
+}
+
+/// Byte-packed multi-segment code, byte-exact against TLINK and install-free.
+/// `SUB_TEXT` packs right after the 0x0A-byte `_TEXT` (image 0x0A, not the next
+/// paragraph), and the far call to `_sub` carries that byte-packed offset.
+#[test]
+fn synthetic_byte_packed_code() {
+    let exe = bcc_tlink::link_objects(&[("PACKED.OBJ".into(), packed_code_object())], &[])
+        .expect("link packed-code object");
+    assert_eq!(
+        hex_sha256(&exe),
+        "2e0f642620e33bbf03520f77c5dc0fe97e74f29876dd50c60443341378c607ce",
+        "packed-code object diverged from TLINK",
+    );
+    // SUB_TEXT byte-packs at image 0x0A (file 0x20A), not the next paragraph.
+    assert_eq!(&exe[0x20a..0x20e], &[0xb8, 0x07, 0x00, 0xcb], "SUB_TEXT byte-packed at image 0x0A");
+    // The far call resolves to that byte-packed location: 0000:000A.
+    assert_eq!(&exe[0x201..0x205], &[0x0a, 0x00, 0x00, 0x00], "far call _sub = 0000:000A");
 }
 
 /// Far-data addressing, byte-exact against TLINK and install-free. The segment
