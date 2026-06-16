@@ -1,0 +1,4 @@
+description = "Standalone TLIB multi-member: build a 3-member library (tlib MATH +M1 +M2 +M3). Exercises member page numbering across members, multiple publics per member, and the dictionary's global sorted insertion of all members' publics + module-name entries. Inputs M{1,2,3}.OBJ tracked (provenance M{1,2,3}.ASM). tool=tlib gates MATH.LIB."
+tool = "tlib"
+args = ["MATH", "+M1", "+M2", "+M3"]
+inputs = ["M1.OBJ", "M2.OBJ", "M3.OBJ"]

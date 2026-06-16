@@ -1,0 +1,20 @@
+[run]
+exit_code = 0
+stdout_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "MATH.LIB"
+size = 1024
+sha256 = "aaa516394442bf7d7b4d77dae09365e73451ba4f6c5c519f9fdc6d8958b3d387"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "tlib"
+args = [
+    "MATH",
+    "+M1",
+    "+M2",
+    "+M3",
+]
+fake_time = "1991-04-23T12:00:00Z"
