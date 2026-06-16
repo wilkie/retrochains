@@ -93,21 +93,55 @@ pub fn segment_table(segs: &[ResidentSeg], exe_name: &str, date_tail: &[u8]) -> 
     out
 }
 
+/// An inter-segment reference inside overlaid code, recorded by [`make_stub`]
+/// before the resident layout is known and resolved against it afterward (see
+/// [`crate::link_overlay`]). The deposited segment word becomes a `__SEGTABLE__`
+/// index, not a real paragraph; the overlay manager relocates it on load.
+#[derive(Debug, Clone)]
+pub struct PendingRef {
+    /// The fixup's location within `code` (the start of the patched field).
+    pub data_offset: u16,
+    /// OMF location type: 2 = segment selector, 3 = far pointer.
+    pub location: u8,
+    /// The referenced external symbol (resolved post-layout).
+    pub target: String,
+}
+
 /// An overlaid module's code and the public entry points called from resident
 /// code (offsets within `code`). `rel_offset` is where this overlay's code sits
 /// in the appended overlay area, relative to the first overlay's code.
-#[derive(Debug, Clone)]
+///
+/// `pending` holds the module's inter-segment references as recorded at
+/// stub-generation time; [`crate::link_overlay`] resolves them once the resident
+/// layout exists, patching `code` (segment word → `__SEGTABLE__` index, offset
+/// word → segment-relative offset) and filling `relocs` with the descending
+/// code-offsets of the segment words for the manager's load-time relocation.
+/// `stub_name` is the segment hosting the resident stub, so its reloc-count
+/// field can be back-patched.
+#[derive(Debug, Clone, Default)]
 pub struct Overlay {
     pub code: Vec<u8>,
     pub entries: Vec<u16>,
     pub rel_offset: usize,
+    pub pending: Vec<PendingRef>,
+    pub relocs: Vec<u16>,
+    pub stub_name: String,
 }
 
-/// Each overlay's code is padded to this boundary in the overlay area.
+/// Minimum overlay-area slot, and the granularity each slot is padded to.
 const OVERLAY_SLOT: usize = 0x20;
+const SLOT_ALIGN: usize = 0x10;
 
 fn align_up(v: usize, to: usize) -> usize {
     v.div_ceil(to) * to
+}
+
+/// The overlay-area slot size for `code_len` bytes of code followed by
+/// `n_relocs` 2-byte relocation offsets: the code+reloc blob padded to
+/// [`SLOT_ALIGN`], with a [`OVERLAY_SLOT`] floor.
+#[must_use]
+pub fn slot_size(code_len: usize, n_relocs: usize) -> usize {
+    align_up(code_len + n_relocs * 2, SLOT_ALIGN).max(OVERLAY_SLOT)
 }
 
 /// The resident **stub** for an overlaid module: a 0x20-byte descriptor (the
@@ -123,6 +157,9 @@ pub fn stub_bytes(ovl: &Overlay) -> Vec<u8> {
     d[1] = 0x3f; // INT 3F
     d[4..8].copy_from_slice(&(ovl.rel_offset as u32).to_le_bytes());
     d[8..10].copy_from_slice(&(ovl.code.len() as u16).to_le_bytes());
+    // entry+0xa: the relocation list's byte length (one 2-byte offset per
+    // inter-segment reference); the manager halves it to a loop count.
+    d[0xa..0xc].copy_from_slice(&((ovl.relocs.len() * 2) as u16).to_le_bytes());
     d[0xc..0xe].copy_from_slice(&(ovl.entries.len() as u16).to_le_bytes());
     for &off in &ovl.entries {
         d.push(0xcd);
@@ -140,7 +177,8 @@ pub fn stub_bytes(ovl: &Overlay) -> Vec<u8> {
 /// by the overlay manager.
 #[must_use]
 pub fn fbov_area(overlays: &[Overlay], exeinfo_file_off: usize, segment_count: usize) -> Vec<u8> {
-    let total_slots: usize = overlays.iter().map(|o| align_up(o.code.len(), OVERLAY_SLOT)).sum();
+    let total_slots: usize =
+        overlays.iter().map(|o| slot_size(o.code.len(), o.relocs.len())).sum();
     let mut out = Vec::new();
     out.extend_from_slice(b"FBOV");
     out.extend_from_slice(&(total_slots as u32).to_le_bytes());
@@ -149,7 +187,12 @@ pub fn fbov_area(overlays: &[Overlay], exeinfo_file_off: usize, segment_count: u
     for o in overlays {
         let start = out.len();
         out.extend_from_slice(&o.code);
-        out.resize(start + align_up(o.code.len(), OVERLAY_SLOT), 0);
+        // The relocation offsets follow the code (descending), then zero pad to
+        // the slot boundary. The manager reads them at `code_seg:code_len`.
+        for &r in &o.relocs {
+            out.extend_from_slice(&r.to_le_bytes());
+        }
+        out.resize(start + slot_size(o.code.len(), o.relocs.len()), 0);
     }
     out
 }
@@ -164,6 +207,7 @@ pub fn fbov_area(overlays: &[Overlay], exeinfo_file_off: usize, segment_count: u
 pub fn make_stub(module: &mut crate::omf::Module) -> Option<(Overlay, Vec<(String, u16)>)> {
     let seg_idx = module.segdefs.iter().position(|s| s.class == "CODE")?;
     let code = module.segdefs[seg_idx].data.clone();
+    let stub_name = module.segdefs[seg_idx].name.clone();
     // Public entry points in that segment, in ascending offset order.
     let mut pubs: Vec<(&str, u16)> = module
         .pubdefs
@@ -176,7 +220,21 @@ pub fn make_stub(module: &mut crate::omf::Module) -> Option<(Overlay, Vec<(Strin
     let thunks: Vec<(String, u16)> =
         pubs.iter().enumerate().map(|(i, &(n, _))| (n.to_string(), 0x20 + (i * 5) as u16)).collect();
 
-    let ovl = Overlay { code, entries, rel_offset: 0 };
+    // Inter-segment references the overlay manager must relocate on load: the
+    // module's far-pointer / segment-selector fixups against an external. Their
+    // segment words hold `__SEGTABLE__` indices, resolved post-layout.
+    let pending: Vec<PendingRef> = module.segdefs[seg_idx]
+        .fixups
+        .iter()
+        .filter(|f| matches!(f.location, 2 | 3) && f.target_method == 6)
+        .filter_map(|f| {
+            let idx = usize::from(f.target_datum?);
+            let target = module.extdefs.get(idx)?.clone();
+            Some(PendingRef { data_offset: f.data_offset, location: f.location, target })
+        })
+        .collect();
+
+    let ovl = Overlay { code, entries, rel_offset: 0, pending, relocs: Vec::new(), stub_name };
     let stub = stub_bytes(&ovl);
     let seg = &mut module.segdefs[seg_idx];
     seg.class = "STUBSEG".into();
@@ -255,7 +313,7 @@ mod tests {
 
     #[test]
     fn stub_byte_exact() {
-        let ovl = Overlay { code: SQUARE.to_vec(), entries: vec![0], rel_offset: 0 };
+        let ovl = Overlay { code: SQUARE.to_vec(), entries: vec![0], ..Default::default() };
         let want: &[u8] = &[
             0xcd, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -267,7 +325,7 @@ mod tests {
     #[test]
     fn fbov_byte_exact() {
         // Reference: one overlay (MOD/square), _EXEINFO_ at file 0x1c90, 0x19 segments.
-        let overlays = [Overlay { code: SQUARE.to_vec(), entries: vec![0], rel_offset: 0 }];
+        let overlays = [Overlay { code: SQUARE.to_vec(), entries: vec![0], ..Default::default() }];
         let mut want = Vec::new();
         want.extend_from_slice(&[0x46, 0x42, 0x4f, 0x56]); // FBOV
         want.extend_from_slice(&0x20u32.to_le_bytes());
@@ -276,5 +334,31 @@ mod tests {
         want.extend_from_slice(SQUARE);
         want.resize(0x30, 0); // header 0x10 + slot 0x20
         assert_eq!(fbov_area(&overlays, 0x1c90, 0x19), want);
+    }
+
+    /// Slot sizing across the three observed reference cases: code padded to a
+    /// 0x10 boundary after its relocation offsets, with a 0x20 floor.
+    #[test]
+    fn slot_size_cases() {
+        assert_eq!(slot_size(0x10, 0), 0x20); // square: no inter-seg refs
+        assert_eq!(slot_size(0x17, 1), 0x20); // one far call
+        assert_eq!(slot_size(0x23, 2), 0x30); // two far calls
+    }
+
+    /// One inter-segment reference's offsets are appended after the code
+    /// (descending), and the descriptor's reloc-count field is `n * 2`.
+    #[test]
+    fn fbov_with_relocs() {
+        let ovl = Overlay {
+            code: vec![0x90; 0x17],
+            entries: vec![0],
+            relocs: vec![0x0f],
+            ..Default::default()
+        };
+        let area = fbov_area(std::slice::from_ref(&ovl), 0, 1);
+        assert_eq!(&area[0x10..0x10 + 0x17], &[0x90; 0x17]); // code
+        assert_eq!(&area[0x27..0x29], &[0x0f, 0x00]); // reloc offset after code
+        assert_eq!(area.len(), 0x10 + 0x20); // header + 0x20 slot
+        assert_eq!(&stub_bytes(&ovl)[0xa..0xc], &[0x02, 0x00]); // reloc-count field
     }
 }

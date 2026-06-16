@@ -66,37 +66,67 @@ fn check(m: char, obj: &str, exe_sha: &str, map_sha: Option<&str>) {
 /// force-pulling the disk-overlay manager, generating the INT 3F stub, the
 /// `_EXEINFO_`/`__SEGTABLE__` relocation table, and the appended FBOV area — and
 /// asserts the whole EXE (resident image + overlay area) byte-matches TLINK.
-fn overlay_data(name: &str) -> Vec<u8> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/overlay").join(name);
-    std::fs::read(&p).unwrap_or_else(|e| panic!("read overlay/{name}: {e}"))
+fn overlay_data(rel: &str) -> Vec<u8> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/overlay").join(rel);
+    std::fs::read(&p).unwrap_or_else(|e| panic!("read overlay/{rel}: {e}"))
+}
+
+/// Link a medium-model overlay program: the named resident + overlaid objects
+/// (data from `tests/data/overlay/`) plus the provisioned C0M/CM/OVERLAY, with
+/// `overlaid_obj` placed after `/o`. Returns the EXE, or `None` if the install
+/// isn't present.
+fn link_overlay_exe(main_rel: &str, overlaid_obj: &str, overlaid_rel: &str) -> Option<Vec<u8>> {
+    let dir = lib_dir();
+    let (c0, cm, ovl) = (dir.join("C0M.OBJ"), dir.join("CM.LIB"), dir.join("OVERLAY.LIB"));
+    if !c0.exists() || !cm.exists() || !ovl.exists() {
+        eprintln!("skipping overlay capstone: install not found at {} (run `oracle provision bcc`)", dir.display());
+        return None;
+    }
+    let objects = vec![
+        ("C0M.OBJ".to_string(), std::fs::read(&c0).expect("read C0M")),
+        ("MAIN.OBJ".to_string(), overlay_data(main_rel)),
+        (overlaid_obj.to_string(), overlay_data(overlaid_rel)),
+    ];
+    let libraries = vec![
+        ("CM.LIB".to_string(), std::fs::read(&cm).expect("read CM.LIB")),
+        ("OVERLAY.LIB".to_string(), std::fs::read(&ovl).expect("read OVERLAY.LIB")),
+    ];
+    let overlaid: std::collections::HashSet<String> = [overlaid_obj.to_string()].into_iter().collect();
+    Some(bcc_tlink::link_overlay(&objects, &libraries, &overlaid, "PROG.EXE").expect("overlay link"))
 }
 
 #[test]
 fn medium_overlay() {
-    // The startup + runtime + overlay manager libraries come from the
-    // provisioned install; skip when it isn't present (same as the model links).
-    let dir = lib_dir();
-    let (c0_path, cm_path, ovl_path) =
-        (dir.join("C0M.OBJ"), dir.join("CM.LIB"), dir.join("OVERLAY.LIB"));
-    if !c0_path.exists() || !cm_path.exists() || !ovl_path.exists() {
-        eprintln!("skipping overlay capstone: install not found at {} (run `oracle provision bcc`)", dir.display());
-        return;
-    }
-    let objects = vec![
-        ("C0M.OBJ".to_string(), std::fs::read(&c0_path).expect("read C0M")),
-        ("MAIN.OBJ".to_string(), overlay_data("MAIN.OBJ")),
-        ("MOD.OBJ".to_string(), overlay_data("MOD.OBJ")),
-    ];
-    let libraries = vec![
-        ("CM.LIB".to_string(), std::fs::read(&cm_path).expect("read CM.LIB")),
-        ("OVERLAY.LIB".to_string(), std::fs::read(&ovl_path).expect("read OVERLAY.LIB")),
-    ];
-    let overlaid: std::collections::HashSet<String> = ["MOD.OBJ".to_string()].into_iter().collect();
-    let exe = bcc_tlink::link_overlay(&objects, &libraries, &overlaid, "PROG.EXE").expect("overlay link");
+    let Some(exe) = link_overlay_exe("MAIN.OBJ", "MOD.OBJ", "MOD.OBJ") else { return };
     assert_eq!(
         hex_sha256(&exe),
         "eee0f5e246f7df19be44b9db632c39cef3cba5431157ddc4d859b89ca9211bc4",
         "overlay PROG.EXE diverged from TLINK",
+    );
+}
+
+/// Overlaid code with one inter-segment reference (`square` far-calls the
+/// resident `helper`): exercises the `__SEGTABLE__`-index rewrite, the single
+/// load-time relocation offset, and the stub's reloc-count field.
+#[test]
+fn medium_overlay_intseg_one_ref() {
+    let Some(exe) = link_overlay_exe("intseg/MAIN.OBJ", "MOD.OBJ", "intseg/MOD1.OBJ") else { return };
+    assert_eq!(
+        hex_sha256(&exe),
+        "0d70eb7cca83f63894e9d127051d0d8e9a59f40b5744708288c09481189aad1e",
+        "one-ref overlay PROG.EXE diverged from TLINK",
+    );
+}
+
+/// Overlaid code with two inter-segment references (two far calls): exercises
+/// the descending relocation-offset list and the reloc-count scaling.
+#[test]
+fn medium_overlay_intseg_two_refs() {
+    let Some(exe) = link_overlay_exe("intseg/MAIN.OBJ", "MOD.OBJ", "intseg/MOD2.OBJ") else { return };
+    assert_eq!(
+        hex_sha256(&exe),
+        "3e6b2ba22e3907e1be6cde20d10838d5834917e5145afd87b37b772bf38ec1a2",
+        "two-ref overlay PROG.EXE diverged from TLINK",
     );
 }
 

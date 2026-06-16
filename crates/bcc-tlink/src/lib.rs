@@ -185,6 +185,67 @@ pub fn link_overlay(
         }
     }
 
+    // Resolve each overlaid module's inter-segment references against the final
+    // layout. A far call / segment selector out of overlaid code can't carry a
+    // real paragraph (the code loads into a runtime buffer, beyond DOS's reloc),
+    // so its segment word becomes the target segment's `__SEGTABLE__` index (load
+    // order × 8) and the offset word becomes the target's segment-relative
+    // offset. The segment word's position is recorded (descending) for the
+    // manager to relocate on load, and the resident stub's reloc-count field
+    // (descriptor +0xa) is back-patched.
+    if overlays.iter().any(|o| !o.pending.is_empty()) {
+        let pub_addr: std::collections::HashMap<&str, usize> = image
+            .map
+            .publics
+            .iter()
+            .map(|p| (p.name.as_str(), usize::from(p.frame) * 16 + usize::from(p.offset)))
+            .collect();
+        for ovl in &mut overlays {
+            let mut relocs: Vec<u16> = Vec::new();
+            for pr in &ovl.pending {
+                // The `.MAP` publics are upper-cased; TLINK symbol matching is
+                // case-insensitive, so compare on the upper-cased name.
+                let Some(&linear) = pub_addr.get(pr.target.to_ascii_uppercase().as_str()) else {
+                    continue;
+                };
+                let Some((ti, seg)) = image.map.segments.iter().enumerate().find(|(_, s)| {
+                    s.length > 0 && (s.start..s.start + s.length).contains(&linear)
+                }) else {
+                    continue;
+                };
+                let para = (seg.start >> 4) as u16;
+                let off_val = (linear - usize::from(para) * 16) as u16;
+                let seg_val = (ti * 8) as u16;
+                let at = usize::from(pr.data_offset);
+                match pr.location {
+                    // Far pointer: offset word then segment word.
+                    3 => {
+                        ovl.code[at..at + 2].copy_from_slice(&off_val.to_le_bytes());
+                        ovl.code[at + 2..at + 4].copy_from_slice(&seg_val.to_le_bytes());
+                        relocs.push(pr.data_offset + 2);
+                    }
+                    // Segment selector: the segment word alone.
+                    2 => {
+                        ovl.code[at..at + 2].copy_from_slice(&seg_val.to_le_bytes());
+                        relocs.push(pr.data_offset);
+                    }
+                    _ => {}
+                }
+            }
+            relocs.sort_unstable_by(|a, b| b.cmp(a));
+            ovl.relocs = relocs;
+            if let Some(stub) =
+                image.map.segments.iter().find(|s| s.name == ovl.stub_name && s.class == "STUBSEG")
+            {
+                let a = stub.start + 0xa;
+                if a + 2 <= image.file_image.len() {
+                    let n = (ovl.relocs.len() * 2) as u16;
+                    image.file_image[a..a + 2].copy_from_slice(&n.to_le_bytes());
+                }
+            }
+        }
+    }
+
     let mut exe = mz::write(&image);
     // Append the FBOV overlay area (beyond the MZ-declared image).
     let exeinfo_file_off = mz::HEADER_SIZE + exeinfo_start.unwrap_or(0);

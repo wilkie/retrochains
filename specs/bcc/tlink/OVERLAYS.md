@@ -63,6 +63,38 @@ by `square`'s code (`55 8B EC 56 8B 76 06 8B C6 F7 EE … CB` = `push bp; mov
 bp,sp; push si; mov si,[bp+6]; mov ax,si; imul si; …; retf`). The resident stub
 contains `CD 3F` (the `INT 3F` to the manager).
 
+Each overlay's slot is `max(0x20, align_up(code_len + n_relocs*2, 0x10))` —
+code, then the relocation list (below), zero-padded. The header's first `u32` is
+the **sum** of all slots.
+
+## Overlaid-code inter-segment relocations (cracked)
+
+An overlaid module's own far references (a `CALL FAR` to another code segment, a
+segment selector) can't carry a real paragraph: the code loads into a runtime
+buffer beyond DOS's relocation, so the manager must fix the segment words itself
+on load. TLINK rewrites each such reference and records it:
+
+- **Segment word → `__SEGTABLE__` index.** The deposited segment value is
+  `table_index * 8`, where `table_index` is the target segment's position in the
+  segment table (= resident load order). The manager's relocator masks the low 3
+  bits (`and di,-8`) to index the 8-byte entry and writes back `entry.para`.
+  Bit 0, when set, flags a `MOV`-immediate instruction patch (a separate handler
+  path); a plain `CALL FAR` leaves it clear.
+- **Offset word stays segment-relative** — `target_linear - (entry.para << 4)`,
+  i.e. the normal offset within the target's own paragraph frame (e.g. `_helper`
+  at `0107:0009` → offset `0x0009`, segment `0x0008` for table index 1).
+- **Relocation list** = the code-offset of each rewritten segment word, as 2-byte
+  LE values **in descending order**, appended directly after the code in the
+  slot. The manager reads it from `code_seg:code_len`.
+- **Stub descriptor +0xa** = `n_relocs * 2` (the reloc list's byte length). The
+  relocator loop is **count-driven** (`shr cx,1`, then `loop`) — there is no
+  terminator; the trailing slot bytes are plain zero padding. Verified by
+  disassembling the relocator at `_OVRTEXT_:0x41C`.
+
+Reference (`square` far-calling resident `helper`): one ref → code `… 9A 09 00
+08 00 …`, reloc list `0F 00`, descriptor `+0xa = 02`. Two calls → list `16 00 0B
+00` (descending), `+0xa = 04`.
+
 ## What's pulled vs generated (decoded)
 
 The program objects don't reference the overlay manager at all (the `-Y` OBJs
