@@ -252,6 +252,42 @@ fn synthetic_default_library_directive_pulls() {
     assert_eq!(via_directive, via_cmdline, "directive pull equals command-line pull");
 }
 
+/// A synthetic stand-in for MSC's `SLIBCE.LIB`: one `CRT0` member defining the
+/// runtime symbols a real MSC object references (`__chkstk`, `__acrtused`) and a
+/// bit of startup code. No MODEND entry — a library member doesn't set the
+/// program entry (TLINK defaults it to 0000:0000).
+fn slibce_library() -> Vec<u8> {
+    let mut b = ModuleBuilder::new("CRT0");
+    let text = b.code_segment("_TEXT", &[0xc3, 0xe8, 0, 0, 0xb8, 0x00, 0x4c, 0xcd, 0x21]);
+    b.near_call(text, 2, "_main");
+    b.public("__chkstk", text, 0);
+    b.public("_start", text, 1);
+    b.public("__acrtused", text, 1);
+    bcc_tlib::build_library(&[("CRT0".to_string(), b.emit())], false).expect("build SLIBCE.LIB")
+}
+
+/// End-to-end: a real MSC object (`int g; int main(){return g;}`) — with its
+/// FIXUPP threads, COMDEF `_g`, F5 extern references, and `SLIBCE` default-
+/// library directive — links against a synthetic `SLIBCE.LIB` standing in for
+/// the Microsoft runtime, byte-exact vs TLINK and install-free. Proves the
+/// Borland linker reimplementation consumes Microsoft object files end-to-end.
+#[test]
+fn msc_object_links_against_synthetic_library() {
+    let comm = include_bytes!("data/COMM_MSC.OBJ").to_vec();
+    let lib = slibce_library();
+    let exe = bcc_tlink::link_objects_with_default_libs(
+        &[("COMM.OBJ".into(), comm)],
+        &[],
+        &|name| name.eq_ignore_ascii_case("SLIBCE").then(|| lib.clone()),
+    )
+    .expect("MSC object links against synthetic SLIBCE.LIB");
+    assert_eq!(
+        hex_sha256(&exe),
+        "ec49de71844001c6d71adeaaa77d22d669326761e293950791518462b7e04f2f",
+        "MSC-object link diverged from TLINK",
+    );
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()

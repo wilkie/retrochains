@@ -418,7 +418,10 @@ fn resolve_entry(
             return Ok((frame as u16, (addr - frame * 16) as u16));
         }
     }
-    Err(LinkError::NoEntry)
+    // No module supplied a start address. TLINK doesn't error — it defaults the
+    // entry to 0000:0000 (the image start). MSC programs rely on this: the
+    // startup carries no MODEND entry and is simply placed first.
+    Ok((0, 0))
 }
 
 /// The resolved target of a fixup: a concrete image address (segment/extern
