@@ -7,7 +7,7 @@ use obj::{ObjReader, Record};
 
 /// A segment definition plus the bytes LEDATA placed into it and the
 /// fixups attached to those bytes (already resolved to in-segment offsets).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegDef {
     pub name: String,
     pub class: String,
@@ -26,14 +26,14 @@ pub struct SegDef {
 }
 
 /// A group (e.g. `DGROUP`) — a name plus the 1-based segment indices it spans.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrpDef {
     pub name: String,
     pub segments: Vec<u8>,
 }
 
 /// A public symbol: a name at an offset within a base segment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PubDef {
     pub name: String,
     /// 1-based SEGDEF index this symbol is measured from. `0` marks an
@@ -47,7 +47,7 @@ pub struct PubDef {
 
 /// One fixup, normalized: patch `width` bits at `data_offset` within its
 /// segment, pointing at the resolved target, framed per `frame`/`target`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fixup {
     /// 1-based SEGDEF index of the segment whose bytes are patched.
     pub seg: u8,
@@ -66,7 +66,7 @@ pub struct Fixup {
 }
 
 /// The MODEND start address (logical `seg:offset`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// 1-based SEGDEF index the entry is measured from.
     pub base_segment: u8,
@@ -412,4 +412,249 @@ fn parse_modend(module: &mut Module, payload: &[u8]) -> Result<(), ParseError> {
     };
     module.entry = Some(Entry { base_segment, offset });
     Ok(())
+}
+
+/// Serialize a [`Module`] back to OMF object bytes — the inverse of [`parse`].
+///
+/// This is the foundation for *synthetic* objects: build a `Module` in code
+/// (no assembler), `emit` it, and feed it to the linker (or archive it with
+/// `bcc-tlib`). The round-trip `parse(&emit(&m))` reproduces every field `parse`
+/// records (`lnames` is an internal index table, rebuilt here, so it is not
+/// expected to match a hand-set value).
+///
+/// Limitations (sufficient for synthetic test objects, which are small and use
+/// the BCC fixup forms): one `LEDATA` per segment, so a segment's initialized
+/// data must be ≤ 1024 bytes (the FIXUPP data-record-offset is 10 bits); fixups
+/// use the no-displacement target forms (methods 4/5/6), the only ones `parse`
+/// preserves; PUBDEF base-group is emitted as 0.
+///
+/// # Panics
+/// Panics if a name (segment/class/group/public) is longer than 255 bytes or
+/// the module has more than 255 distinct names or segments — none of which a
+/// real or synthetic 16-bit OMF object reaches.
+#[must_use]
+pub fn emit(module: &Module) -> Vec<u8> {
+    let mut b = obj::ObjBuilder::new();
+    b.write_theadr(&module.name);
+
+    // Rebuild the LNAMES table: a leading empty name (BCC's convention), then
+    // every distinct segment name, class, and group name in first-use order.
+    // `name_idx` returns the 1-based index `parse` will see (its index-0
+    // placeholder shifts the record's entries up by one).
+    let mut names: Vec<String> = vec![String::new()];
+    let idx_of = |names: &mut Vec<String>, s: &str| -> u8 {
+        if let Some(pos) = names.iter().position(|n| n == s) {
+            u8::try_from(pos + 1).expect("LNAMES index fits in u8")
+        } else {
+            names.push(s.to_string());
+            u8::try_from(names.len()).expect("LNAMES count fits in u8")
+        }
+    };
+    let mut seg_name_idx = Vec::new();
+    let mut seg_class_idx = Vec::new();
+    for seg in module.segdefs.iter().skip(1) {
+        seg_name_idx.push(idx_of(&mut names, &seg.name));
+        seg_class_idx.push(idx_of(&mut names, &seg.class));
+    }
+    let grp_name_idx: Vec<u8> =
+        module.grpdefs.iter().map(|g| idx_of(&mut names, &g.name)).collect();
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    b.write_lnames(&name_refs);
+
+    // SEGDEFs (rebuild the ACBP byte from align/combine; big/proc bits unused).
+    for (i, seg) in module.segdefs.iter().skip(1).enumerate() {
+        let acbp = (seg.align << 5) | (seg.combine << 2);
+        b.write_segdef16(acbp, seg.length, seg_name_idx[i], seg_class_idx[i], 0);
+    }
+
+    // GRPDEFs.
+    for (g, grp) in module.grpdefs.iter().enumerate() {
+        b.write_grpdef(grp_name_idx[g], &grp.segments);
+    }
+
+    // EXTDEFs (one record listing every external, as BCC does).
+    if module.extdefs.len() > 1 {
+        let refs: Vec<&str> = module.extdefs.iter().skip(1).map(String::as_str).collect();
+        b.write_extdef(&refs);
+    }
+
+    // PUBDEFs: one record per (base_segment, absolute_frame) run keeps the
+    // payload's leading base fields valid; emitting one per symbol is simplest
+    // and re-parses identically.
+    for pubdef in &module.pubdefs {
+        let mut payload = Vec::new();
+        payload.push(0u8); // base group
+        payload.push(pubdef.base_segment);
+        if pubdef.base_segment == 0 {
+            payload.extend_from_slice(&pubdef.absolute_frame.to_le_bytes());
+        }
+        payload.push(u8::try_from(pubdef.name.len()).expect("public name fits in u8"));
+        payload.extend_from_slice(pubdef.name.as_bytes());
+        payload.extend_from_slice(&pubdef.offset.to_le_bytes());
+        payload.push(0); // type index
+        b.write_record(obj::PUBDEF_16, &payload);
+    }
+
+    // Per-segment LEDATA + FIXUPP. A segment with no initialized data (BSS /
+    // STACK) contributes only its declared length, so it gets no LEDATA.
+    for (i, seg) in module.segdefs.iter().skip(1).enumerate() {
+        let seg_idx = u8::try_from(i + 1).expect("segment index fits in u8");
+        if seg.has_data {
+            b.write_ledata16(seg_idx, 0, &seg.data);
+        }
+        if !seg.fixups.is_empty() {
+            let mut payload = Vec::new();
+            for fx in &seg.fixups {
+                let p_bit = (fx.target_method >> 2) & 1;
+                let locat_hi = 0x80
+                    | (u8::from(fx.seg_relative) << 6)
+                    | ((fx.location & 0xf) << 2)
+                    | ((fx.data_offset >> 8) & 0x3) as u8;
+                payload.push(locat_hi);
+                payload.push((fx.data_offset & 0xff) as u8);
+                payload.push((fx.frame_method << 4) | (p_bit << 2) | (fx.target_method & 0x3));
+                if let Some(fd) = fx.frame_datum {
+                    payload.push(fd);
+                }
+                payload.push(fx.target_datum.unwrap_or(0));
+                if p_bit == 0 {
+                    payload.extend_from_slice(&0u16.to_le_bytes()); // displacement (not retained)
+                }
+            }
+            b.write_fixupp(&payload);
+        }
+    }
+
+    // MODEND, with the start address when present (frame = target's group via
+    // F1/T0? — BCC uses a SEGDEF-framed start, method F0/T4 here).
+    if let Some(entry) = &module.entry {
+        // flags 0xc0 = main module + start address present; End Data 0x04 =
+        // frame method F0 (SEGDEF), P=1, target method T4 (SEGDEF index).
+        let mut payload = vec![0xc0u8, 0x04u8];
+        payload.push(entry.base_segment); // frame datum (F0 SEGDEF)
+        payload.push(entry.base_segment); // target datum (T4 SEGDEF)
+        payload.extend_from_slice(&entry.offset.to_le_bytes());
+        b.write_record(obj::MODEND_16, &payload);
+    } else {
+        b.write_modend16_no_entry();
+    }
+
+    b.into_bytes()
+}
+
+#[cfg(test)]
+mod emit_tests {
+    use super::*;
+
+    /// Compare the fields `parse` records — everything but the internal
+    /// `lnames` index table, which `emit` rebuilds.
+    fn assert_semantic_eq(a: &Module, b: &Module) {
+        assert_eq!(a.name, b.name, "module name");
+        assert_eq!(a.segdefs, b.segdefs, "segdefs");
+        assert_eq!(a.grpdefs, b.grpdefs, "grpdefs");
+        assert_eq!(a.pubdefs, b.pubdefs, "pubdefs");
+        assert_eq!(a.extdefs, b.extdefs, "extdefs");
+        assert_eq!(a.entry, b.entry, "entry");
+    }
+
+    fn placeholder_seg() -> SegDef {
+        SegDef {
+            name: String::new(),
+            class: String::new(),
+            align: 0,
+            combine: 0,
+            length: 0,
+            data: Vec::new(),
+            has_data: false,
+            fixups: Vec::new(),
+        }
+    }
+
+    /// A hand-built module — two segments in a group, an extern, publics, an
+    /// entry, and fixups in both the near-offset and far-pointer forms —
+    /// survives `emit` → `parse` unchanged.
+    #[test]
+    fn synthetic_roundtrip() {
+        let module = Module {
+            name: "SYNTH".into(),
+            lnames: vec![String::new()],
+            segdefs: vec![
+                placeholder_seg(),
+                SegDef {
+                    name: "_TEXT".into(),
+                    class: "CODE".into(),
+                    align: 1, // byte
+                    combine: 2, // public
+                    length: 8,
+                    data: vec![0xb8, 0, 0, 0x9a, 0, 0, 0, 0],
+                    has_data: true,
+                    fixups: vec![
+                        // mov ax, OFFSET _gv  (near, segment-relative, F1 group, T6 extern)
+                        Fixup {
+                            seg: 1,
+                            data_offset: 1,
+                            seg_relative: true,
+                            location: 1,
+                            frame_method: 1,
+                            frame_datum: Some(1),
+                            target_method: 6,
+                            target_datum: Some(1),
+                        },
+                        // call far _helper (far pointer, F0 segment, T6 extern)
+                        Fixup {
+                            seg: 1,
+                            data_offset: 4,
+                            seg_relative: true,
+                            location: 3,
+                            frame_method: 0,
+                            frame_datum: Some(1),
+                            target_method: 6,
+                            target_datum: Some(1),
+                        },
+                    ],
+                },
+                SegDef {
+                    name: "_DATA".into(),
+                    class: "DATA".into(),
+                    align: 2, // word
+                    combine: 2,
+                    length: 4,
+                    data: vec![1, 0, 2, 0],
+                    has_data: true,
+                    fixups: Vec::new(),
+                },
+                SegDef {
+                    name: "_BSS".into(),
+                    class: "BSS".into(),
+                    align: 2,
+                    combine: 2,
+                    length: 16,
+                    data: vec![0; 16],
+                    has_data: false,
+                    fixups: Vec::new(),
+                },
+            ],
+            grpdefs: vec![GrpDef { name: "DGROUP".into(), segments: vec![2, 3] }],
+            pubdefs: vec![PubDef {
+                name: "_main".into(),
+                base_segment: 1,
+                offset: 0,
+                absolute_frame: 0,
+            }],
+            extdefs: vec![String::new(), "_helper".into()],
+            entry: Some(Entry { base_segment: 1, offset: 0 }),
+        };
+        let reparsed = parse(&emit(&module)).expect("emitted object parses");
+        assert_semantic_eq(&module, &reparsed);
+    }
+
+    /// A real BCC-compiled object (`int main(){return 0;}`) survives the round
+    /// trip — `emit` handles the record shapes BCC actually produces.
+    #[test]
+    fn real_object_roundtrip() {
+        let bytes = include_bytes!("../tests/data/MAIN.OBJ");
+        let original = parse(bytes).expect("real object parses");
+        let reparsed = parse(&emit(&original)).expect("re-emitted object parses");
+        assert_semantic_eq(&original, &reparsed);
+    }
 }
