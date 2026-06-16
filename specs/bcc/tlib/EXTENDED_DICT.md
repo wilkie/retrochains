@@ -49,15 +49,40 @@ ff×16                        8 empty buckets
 00 00 00 26 00 00 01 02 c0 01 32 00 …    per-member descriptors + symbol records
 ```
 
+## Decoded format (from controlled E1/E2/E3 probes + disassembly)
+
+**Header** (6 words): `2bad`, `member_count`, `total_segment_count`,
+`total_public_count`, `name_count`, `2·name_count + Σ(1+len(name))`.
+
+**Bucket table**: `name_count` words of `0xFFFF` — always empty (TLIB never
+populates it; the linker does at load).
+
+**Names list**: a fixed seed `["", _TEXT, _DATA, _BSS, DGROUP, CODE, DATA, BSS]`
+(indices 0–7) followed by each member's unique segment/class names not already
+present, each length-prefixed, then a `0x00` terminator. `name_count` counts the
+seed + the added names (E1: 8 seed + `CSEG` = 9).
+
+**Descriptors** (per member, in add order), 6-byte records referencing **regular
+dictionary entry offsets**:
+- module record: `00 00 <modoff:u16> 00 00` — `modoff` = the `name!` entry's
+  offset in the regular dict block.
+- segment record: `<page:u8> <npubs:u8> 00 <segNameIdx:u8> <packed:u16>` —
+  `segNameIdx` indexes the names list; `packed` encodes the segment's
+  align/combine/class (the `0x2d2b` bitfield).
+- public records (`npubs` of them): `<dictoff:u16> 00 <page:u8> 00 00` —
+  `dictoff` = the public symbol's entry offset in the regular dict.
+
+Verified against E3 (1 member, 1 `CSEG` segment, 3 publics `P1/P2/P3`): module
+`C!`@0x26, publics at 0x2c/0x32/0x38 — exactly the ext-dict references.
+
 ## Still to do (to implement byte-exact `/E`)
 
-- Decode `0x2975`/`0x33aa` (the symbol-hash insertion → bucket-table contents and
-  the per-symbol records) and `0x3328` (the extended-dict symbol hash).
-- Decode `0x2d2b`'s descriptor packing fully and the node fields it reads
-  (`+0x14`…`+0x1e`) — i.e. reconstruct the in-memory member representation.
-- Pin the header words `[0x5e5]/[0x5e7]/[0x5f3]` and the bucket count `[0x5f1]`
-  (computed before the write; find where they're set).
-- Implement the emitter; wire `/E` through `main.rs`.
+- Decode the **`packed:u16` segment word** (`0x2d2b` bitfield: `seg<<12 |
+  grp<<8 | class<<1 | …`, fields clamped to 6/0xe/2/6) for arbitrary segments,
+  and confirm **multi-segment** members emit one segment record each.
+- Implement the emitter (all fields above are computable from the parsed members
+  + the regular-dict offsets the writer already produces); wire `/E` through
+  `main.rs`.
 - Fixtures: a `tool = "tlib"` `/E` fixture, then a byte-exact round-trip of a
   shipped `LIB/*.LIB` (`FP87.LIB`, 5072 B, smallest).
 
