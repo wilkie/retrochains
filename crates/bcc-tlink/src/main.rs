@@ -36,7 +36,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fields = positional.split(',');
     let obj_field = fields.next().unwrap_or("").trim();
     let exe_field = fields.next().unwrap_or("").trim();
-    let _map_field = fields.next().unwrap_or("").trim(); // fields[2] = map (unused)
+    let map_field = fields.next().unwrap_or("").trim(); // fields[2] = map file
     let lib_field = fields.next().unwrap_or("").trim(); // fields[3] = libraries
 
     let obj_names: Vec<String> = obj_field
@@ -69,8 +69,16 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         with_ext(exe_field, "EXE")
     };
 
-    let exe = bcc_tlink::link_objects(&objects, &libraries)?;
-    std::fs::write(&exe_path, &exe).map_err(|e| format!("writing {exe_path}: {e}"))?;
+    let image = bcc_tlink::link_image(&objects, &libraries)?;
+    std::fs::write(&exe_path, bcc_tlink::mz::write(&image))
+        .map_err(|e| format!("writing {exe_path}: {e}"))?;
+
+    // A `.MAP` listing is written whenever the map field names one.
+    if !map_field.is_empty() {
+        let map_path = with_ext(map_field, "MAP");
+        std::fs::write(&map_path, bcc_tlink::map::format(&image))
+            .map_err(|e| format!("writing {map_path}: {e}"))?;
+    }
     Ok(())
 }
 

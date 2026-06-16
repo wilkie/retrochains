@@ -10,6 +10,7 @@
 
 pub mod archive;
 pub mod link;
+pub mod map;
 pub mod mz;
 pub mod omf;
 
@@ -54,6 +55,18 @@ pub fn link_objects(
     objects: &[(String, Vec<u8>)],
     libraries: &[(String, Vec<u8>)],
 ) -> Result<Vec<u8>, Error> {
+    Ok(mz::write(&link_image(objects, libraries)?))
+}
+
+/// Like [`link_objects`] but returns the full [`link::Image`] — for callers that
+/// also want the `.MAP` listing (via [`map::format`]).
+///
+/// # Errors
+/// Same as [`link_objects`].
+pub fn link_image(
+    objects: &[(String, Vec<u8>)],
+    libraries: &[(String, Vec<u8>)],
+) -> Result<link::Image, Error> {
     let mut modules = Vec::with_capacity(objects.len());
     for (name, bytes) in objects {
         let module =
@@ -99,6 +112,5 @@ pub fn link_objects(
         }
     }
 
-    let image = link::link(&modules)?;
-    Ok(mz::write(&image))
+    Ok(link::link(&modules)?)
 }

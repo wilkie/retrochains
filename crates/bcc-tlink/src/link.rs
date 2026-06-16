@@ -25,6 +25,8 @@ fn align_up(value: usize, to: usize) -> usize {
 /// same (name, class).
 #[derive(Debug)]
 struct Combined {
+    name: String,
+    class: String,
     align: u8,
     is_stack: bool,
     length: usize,
@@ -32,6 +34,31 @@ struct Combined {
     has_data: bool,
     /// Byte offset of this segment within the load image (set during layout).
     load_offset: usize,
+}
+
+/// One row of the `.MAP` segment table.
+#[derive(Debug)]
+pub struct MapSegment {
+    /// Linear load address (the combined segment's `load_offset`).
+    pub start: usize,
+    pub length: usize,
+    pub name: String,
+    pub class: String,
+}
+
+/// One `.MAP` public-symbol entry (`frame:offset`).
+#[derive(Debug)]
+pub struct MapPublic {
+    pub frame: u16,
+    pub offset: u16,
+    pub name: String,
+}
+
+/// Everything the `.MAP` needs beyond the [`Image`]'s entry point.
+#[derive(Debug, Default)]
+pub struct MapInfo {
+    pub segments: Vec<MapSegment>,
+    pub publics: Vec<MapPublic>,
 }
 
 /// Where one module's segment landed inside a combined segment.
@@ -56,6 +83,8 @@ pub struct Image {
     pub stack_sp: u16,
     /// Runtime relocations (segment fixups). Empty for self-contained images.
     pub relocations: Vec<(u16, u16)>,
+    /// Segment table + publics for the `.MAP` listing.
+    pub map: MapInfo,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +117,8 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
             let key = (seg.name.clone(), seg.class.clone());
             let ci = *index.entry(key).or_insert_with(|| {
                 combined.push(Combined {
+                    name: seg.name.clone(),
+                    class: seg.class.clone(),
                     align: seg.align,
                     is_stack: false,
                     length: 0,
@@ -186,6 +217,25 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
         .map(|c| ((c.load_offset >> 4) as u16, c.length as u16))
         .unwrap_or((0, 0));
 
+    // Map listing — the segment table (in load order) and the publics.
+    let segments = combined
+        .iter()
+        .map(|c| MapSegment {
+            start: c.load_offset,
+            length: c.length,
+            name: c.name.clone(),
+            class: c.class.clone(),
+        })
+        .collect();
+    let mut publics: Vec<MapPublic> = symbols
+        .iter()
+        .map(|(name, &(ci, addr))| {
+            let frame = (combined[ci].load_offset >> 4) as u16;
+            MapPublic { frame, offset: (addr - usize::from(frame) * 16) as u16, name: name.clone() }
+        })
+        .collect();
+    publics.sort_by(|a, b| a.name.cmp(&b.name));
+
     Ok(Image {
         file_image,
         mem_size,
@@ -194,6 +244,7 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
         stack_ss,
         stack_sp,
         relocations,
+        map: MapInfo { segments, publics },
     })
 }
 

@@ -134,21 +134,19 @@ pub fn verify_ours(
 /// that tool doesn't (yet) produce it:
 ///
 /// - `.ASM` — always advisory: no tool of ours emits assembly listings.
-/// - `.MAP` — always advisory for now: the linker map is recorded as a
-///   fingerprint reference, but byte-exact map generation is a later milestone.
-/// - `.EXE` — advisory for a *compiler* fixture (`bcc`/`cl` produce the `.OBJ`;
-///   the `.EXE` comes from the oracle's link stage we don't run). For a *linker*
-///   fixture (`tool = tlink`/`link`), the `.EXE` is the gated contract — that's
-///   exactly what the linker reimplementation must reproduce.
+/// - `.EXE`/`.MAP` — advisory for a *compiler* fixture (`bcc`/`cl` produce the
+///   `.OBJ`; the linked `.EXE`/`.MAP` come from the oracle's link stage we don't
+///   run). For a *linker* fixture (`tool = tlink`/`link`) they're the gated
+///   contract — exactly what the linker reimplementation must reproduce.
 ///
 /// The gated byte-exact output is thus the `.OBJ` for compiler fixtures and the
-/// `.EXE` for linker fixtures.
+/// `.EXE`/`.MAP` for linker fixtures.
 fn is_advisory_output(tool: ToolName, name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    if upper.ends_with(".ASM") || upper.ends_with(".MAP") {
+    if upper.ends_with(".ASM") {
         return true;
     }
-    if upper.ends_with(".EXE") {
+    if upper.ends_with(".EXE") || upper.ends_with(".MAP") {
         return !is_linker_tool(tool);
     }
     false
