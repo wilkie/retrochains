@@ -159,16 +159,34 @@ The **`FBOV` writer** sits just after, at file `0x825B`: `mov word[di],0x4246`
 (`'FB'`) + `mov word[di+2],0x564F` (`'OV'`), then a 0xE-byte header whose file
 offset comes from `0x8227` (`(total − 0x10·segParas + 0xF) & ~0xF`).
 
-### The remaining byte-exact gap
+### The `size`/`count` fields — fully cracked
 
-`size` and `count` are now localized to specific TLINK fields (`segrec[0x10]`,
-`segArray[…][0x8]`) rather than mysteries — but their *values* are set during
-TLINK's segment construction (the `+9`/`+0xA` slack: MAIN_TEXT=9, `_OVRTEXT_`=0xA,
-C0 `_TEXT`=0; the irregular DGROUP-tail values). The manager ignores them, so
-they're cosmetic; reproducing them byte-exact is the last item and needs the
-segment-construction code (where `segArray[..][8]`/`segrec[0x10]` are assigned)
-traced. The **functional** model — relocation table, stubs, flags, FBOV — is
-complete, which is what the implementation builds against.
+A third example (a resident module linked *before* MAIN, shifting load
+addresses) settled the last fields. `count` is *not* an index or a fixed
+per-segment value — it is simply:
+
+> **`count` = `segment_start_address & 0xf`** — the segment's sub-paragraph
+> offset. Confirmed 100% (77/77 entries across three programs).
+
+That makes **`size` = `count + len`** for ordinary segments: the byte size
+measured **from the frame paragraph** (`start >> 4`), since the entry's `para`
+field is the frame and the segment sits `count` bytes into it. This is the exact
+same sub-paragraph accounting as the runtime-relocation offset fix
+([`MZ_OUTPUT.md`](MZ_OUTPUT.md)). `size` has a few special cases on top:
+
+- **OVRINFO management** segments (`_STUB_`/`_EXTSEG_`/`_EMSSEG_`/`_VDISKSEG_`/
+  `_EXEINFO_`, flags=4): `size = 0xFFFF` (sentinel).
+- **First DGROUP segment** (`_DATA`): `size` = the DGROUP near-data sum
+  (`_DATA`+`_INIT_`+`_EXIT_`+`_BSS` = 0x324 in the probes), so the manager sees
+  the whole group extent.
+- **Empty DGROUP-tail markers** (`_CVTSEG`…`_BSSEND`, flags=4): `size = count − 1`.
+- **`_OVRDATA_`** (the overlay load list): `size` grows +8 per overlaid module.
+
+So every field is now explained: `para = start >> 4`, `count = start & 0xf`,
+`size = count + len` (with the group/mgmt special cases), `flags = segrec[0x4]`.
+The reverse-engineering is complete — both the functional model (relocation
+table, stubs, FBOV) and the byte-exact table encoding are understood, ready to
+implement.
 
 ## What a byte-exact implementation needs
 
