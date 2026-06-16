@@ -84,4 +84,26 @@ mod tests {
         assert_eq!(hash(b"ADDONE"), hash(b"addone"));
         assert_eq!(hash(b"AbCdEf"), hash(b"ABCDEF"));
     }
+
+    /// The `| 0x20` is applied to *every* byte, not just letters — confirmed
+    /// against TLIB by probing identifier chars where `| 0x20` differs from a
+    /// real tolower(): `@` (0x40→0x60) and `_` (0x5F→0x7F). An alpha-only
+    /// lowercase would put `A@` at bucket 2 and `A_` at 23; TLIB puts them at
+    /// 10 and 31 — the `| 0x20` values.
+    #[test]
+    fn or20_is_unconditional() {
+        assert_eq!(bucket(b"A@"), 10);
+        assert_eq!(bucket(b"A_"), 31);
+        assert_eq!(bucket(b"@A"), 2);
+        assert_eq!(bucket(b"_A"), 22);
+    }
+
+    /// The hash scans every byte (not a bounded first/last-word hash like BCC's
+    /// internal symbol table): changing a *middle* character — same first and
+    /// last 16-bit word — changes the bucket.
+    #[test]
+    fn full_scan_middle_matters() {
+        assert_ne!(bucket(b"ABCDE"), bucket(b"ABXDE")); // 30 vs 21
+        assert_ne!(bucket(b"ABCDEF"), bucket(b"ABZZEF")); // 15 vs 11
+    }
 }
