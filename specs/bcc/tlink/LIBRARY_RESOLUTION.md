@@ -38,7 +38,7 @@ linking, the whole point of an archive.
 
 ## `.LIB` framing we parse
 
-Per `../formats/LIB_ARCHIVE.md`: a `0xF0` header record sets the page size
+Per `../../formats/LIB_ARCHIVE.md`: a `0xF0` header record sets the page size
 (`length field + 3`, =16 for BC2/TLIB libraries) and records the dictionary file
 offset. Members are complete OMF streams (`THEADR … MODEND`) on page boundaries,
 zero-padded between. We walk members from `page_size` to the dictionary offset,

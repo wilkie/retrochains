@@ -30,17 +30,21 @@ update one of them deliberately.
 ## Per-tool discoveries
 
 As we reverse-engineer each tool, observations land in the matching
-subdirectory. The order roughly follows the compilation pipeline:
+subdirectory. The Borland C++ 2.0 **toolchain** specs all live under
+[`bcc/`](bcc/) — the compiler at its root, the auxiliary tools in their own
+subdirectories — following the compilation pipeline:
 
 - [`bcc/`](bcc/) — the C/C++ compiler (`BCC.EXE`). Command-line surface,
   preprocessor behavior, lexer/parser quirks, codegen patterns, optimizer
   effects per flag, the `.ASM` dialect it emits.
-- [`tasm/`](tasm/) — the assembler (`TASM.EXE`). The asm dialect it accepts
-  (mostly what `bcc -S` emits, plus what hand-written `.ASM` looks like) and
-  the OMF it produces.
-- [`tlink/`](tlink/) — the linker (`TLINK.EXE`). The OMF records it
+- [`bcc/tasm/`](bcc/tasm/) — the assembler (`TASM.EXE`). The asm dialect it
+  accepts (mostly what `bcc -S` emits, plus what hand-written `.ASM` looks like)
+  and the OMF it produces.
+- [`bcc/tlink/`](bcc/tlink/) — the linker (`TLINK.EXE`). The OMF records it
   consumes, segment ordering, fixups, and the MZ executable (and
   eventually NewExe) it emits.
+- [`bcc/tlib/`](bcc/tlib/) — the librarian (`TLIB.EXE`). The `.LIB` archive
+  format and its dictionary hashing.
 - [`linkers/`](linkers/) — **cross-linker** discoveries. `DIFFERENCES.md`
   catalogs Borland TLINK vs Microsoft LINK MZ output — the EXE-level
   toolchain fingerprints feeding compiler-aware decompilation.

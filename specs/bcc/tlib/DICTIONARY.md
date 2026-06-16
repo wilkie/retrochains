@@ -3,7 +3,7 @@
 How Turbo Librarian 2.0 hashes symbol names into the `.LIB` dictionary — the
 symbol→page index TLINK uses to locate a defining member without scanning every
 object. Reverse-engineered empirically against TLIB-built archives (probe libs
-built with the now-shipped `TLIB.EXE`; see `../formats/LIB_ARCHIVE.md` for the
+built with the now-shipped `TLIB.EXE`; see `../../formats/LIB_ARCHIVE.md` for the
 surrounding archive framing). Reproduced in `crates/bcc-tlib/src/dict.rs`.
 
 ## Block layout

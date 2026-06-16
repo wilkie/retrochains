@@ -1,6 +1,18 @@
-# BCC — the C/C++ compiler
+# BCC — the C/C++ compiler (and toolchain)
 
-Discoveries about `BCC.EXE` go here.
+Discoveries about `BCC.EXE` go here. The auxiliary tools of the Borland C++ 2.0
+toolchain — assembler, linker, librarian — each have their own subdirectory:
+
+- [`tasm/`](tasm/) — the assembler (`TASM.EXE`): asm dialect + OMF output.
+- [`tlink/`](tlink/) — the linker (`TLINK.EXE`): OMF consumption, segment
+  layout, fixups, MZ executable output, library resolution.
+- [`tlib/`](tlib/) — the librarian (`TLIB.EXE`): `.LIB` archive layout and
+  dictionary hashing.
+
+(Cross-toolchain linker comparisons — TLINK vs MS LINK — live in
+[`../linkers/`](../linkers/); shared file formats in [`../formats/`](../formats/).)
+
+## Compiler (`BCC.EXE`) docs
 
 Existing docs:
 

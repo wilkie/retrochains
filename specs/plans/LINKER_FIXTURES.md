@@ -90,7 +90,7 @@ roll-out skips them and logs the count.
    apply (`link.rs`) → MZ write (`mz.rs`). Both seed fixtures gate green under
    `--toolchain ours` (4258 single OBJ, 4259 two OBJs + cross-module near call).
    Bound in `ToolPaths::from_workspace_debug`. MZ output reverse-engineered in
-   `specs/tlink/MZ_OUTPUT.md`. **Next layers:** far/segment-base fixups (runtime
+   `specs/bcc/tlink/MZ_OUTPUT.md`. **Next layers:** far/segment-base fixups (runtime
    relocations), `.MAP` generation (currently advisory), library resolution, and
    linking BCC-compiled OBJs (C startup + DGROUP) standalone. Grow the
    `standalone/` bucket alongside each.

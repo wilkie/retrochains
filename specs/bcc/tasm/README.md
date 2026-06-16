@@ -12,7 +12,7 @@ into `-c` automatically.
 
 - **Translator string**: TASM 2.0 always injects a COMENT class 0x00
   with the length-prefixed string `TC86 Borland Turbo C++ 2.0` right
-  after THEADR. See [`../formats/OMF.md`](../formats/OMF.md) §COMENT.
+  after THEADR. See [`../../formats/OMF.md`](../../formats/OMF.md) §COMENT.
 - **Memory-model marker**: A COMENT class 0xEA with payload `01 09` is
   injected just before LNAMES for small model (`-ms`). The byte
   meanings aren't fully pinned; non-small-model fixtures will widen

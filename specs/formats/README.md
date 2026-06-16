@@ -18,7 +18,7 @@ conventions.
 
 For each tool's specific use of these formats — what records BCC chooses
 to emit, what TLINK's parser tolerates, what TASM's record ordering quirks
-are — see the tool-specific specs in `../bcc/`, `../tasm/`, `../tlink/`.
+are — see the tool-specific specs in `../bcc/`, `../bcc/tasm/`, `../bcc/tlink/`.
 
 Cite the spec source (Intel TIS, Borland docs, observed-from-fixtures) per
 section so future readers can re-verify. Most fixtures so far have been

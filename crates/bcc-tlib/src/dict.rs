@@ -1,6 +1,6 @@
 //! The OMF library dictionary — the symbol→page hash index TLIB writes at the
 //! end of a `.LIB`. Fully reverse-engineered (probes + disassembly of
-//! `TLIB.EXE`); see `specs/tlib/DICTIONARY.md`.
+//! `TLIB.EXE`); see `specs/bcc/tlib/DICTIONARY.md`.
 //!
 //! A dictionary is one or more 512-byte blocks. Each block is a 37-bucket open
 //! hash table: bytes 0..37 are the bucket table (`htab[b]` = entry offset / 2,
@@ -106,7 +106,7 @@ mod tests {
     use super::*;
 
     /// Bucket indices observed in TLIB-built libraries (collision-free single-
-    /// symbol archives). See specs/tlib/DICTIONARY.md.
+    /// symbol archives). See specs/bcc/tlib/DICTIONARY.md.
     #[test]
     fn confirmed_buckets() {
         let cases: &[(&str, u16)] = &[

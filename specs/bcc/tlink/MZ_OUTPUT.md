@@ -45,7 +45,7 @@ the *OBJ*'s `0xe9` COMENT, not here). Reproduced verbatim as `TLINK_SIGNATURE`.
 
 `e_lfarlc = 0x3e`: TLINK leaves a gap after the signature and starts the
 relocation table at **0x3e** (MS LINK packs it right after the header at 0x1e —
-see `../linkers/DIFFERENCES.md`). Each relocation is a 4-byte `offset:segment`
+see `../../linkers/DIFFERENCES.md`). Each relocation is a 4-byte `offset:segment`
 pair, where `segment` is the location's **frame paragraph** and `offset` is its
 distance into that frame. The header is then padded with zeros up to 512 bytes.
 
