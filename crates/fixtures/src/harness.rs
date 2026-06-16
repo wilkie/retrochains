@@ -90,12 +90,13 @@ pub fn verify_ours(
     let manifest_diffs: Vec<_> = diff_manifests(&expected_manifest, &actual_manifest)
         .into_iter()
         .filter(|d| {
-            // Stream-related sha diffs and ASM-listing diffs are
+            // Stream-related sha diffs and listing/link-output diffs are
             // informational under verify_ours; everything else stays
-            // gating. ASM stays informational until our compilers
-            // learn to emit assembly listings.
+            // gating. ASM stays informational until our compilers learn to
+            // emit assembly listings; EXE/MAP until our linker reimplementation
+            // (bcc-tlink / msc-link) can produce a linked executable.
             !matches!(d, ManifestDiff::StdoutSha { .. } | ManifestDiff::StderrSha { .. })
-                && !is_asm_diff(d)
+                && !is_advisory_output_diff(d)
         })
         .collect();
     let mut diff = Diff { manifest: manifest_diffs, ..Diff::default() };
@@ -117,7 +118,7 @@ pub fn verify_ours(
         if let Some(expected) = expected
             && let Some(file_diff) = diff_bytes(name, &expected, &output.bytes)
         {
-            if is_asm_name(name) {
+            if is_advisory_output_name(name) {
                 diff.advisory.push(file_diff);
             } else {
                 diff.files.push(file_diff);
@@ -127,15 +128,21 @@ pub fn verify_ours(
     Ok(diff)
 }
 
-fn is_asm_name(name: &str) -> bool {
-    name.to_ascii_uppercase().ends_with(".ASM")
+/// Outputs that `verify_ours` treats as advisory (non-gating) because our
+/// reimplementation can't yet produce them: `.ASM` listings (no assembly
+/// emitter) and `.EXE`/`.MAP` (no linker — bcc-tlink/msc-link are stubs).
+/// These outputs come from the oracle's link/listing stages; the gating
+/// byte-exact contract under `--toolchain ours` is the `.OBJ`.
+fn is_advisory_output_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.ends_with(".ASM") || upper.ends_with(".EXE") || upper.ends_with(".MAP")
 }
 
-fn is_asm_diff(d: &ManifestDiff) -> bool {
+fn is_advisory_output_diff(d: &ManifestDiff) -> bool {
     match d {
         ManifestDiff::OutputMissing { name }
         | ManifestDiff::OutputUnexpected { name }
-        | ManifestDiff::OutputMetadata { name, .. } => is_asm_name(name),
+        | ManifestDiff::OutputMetadata { name, .. } => is_advisory_output_name(name),
         _ => false,
     }
 }
