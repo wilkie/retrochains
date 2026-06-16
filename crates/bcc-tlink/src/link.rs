@@ -49,7 +49,8 @@ pub struct MapSegment {
 /// One `.MAP` public-symbol entry (`frame:offset`). `name` is already
 /// upper-cased the way TLINK renders it; `absolute` marks an equate, which
 /// the listing tags with `Abs`. `seq` is the symbol's definition order, used
-/// to break `Publics by Value` ties the way TLINK does (insertion order).
+/// to break `Publics by Value` ties (TLINK lists same-address symbols in
+/// definition order).
 #[derive(Debug)]
 pub struct MapPublic {
     pub frame: u16,
@@ -196,24 +197,27 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
         }
     }
 
-    // Pass 2 — lay out combined segments into the image. A segment that
-    // continues the same group as the one before it is packed at its own
-    // alignment (byte/word/para from the SEGDEF ACBP); every other segment —
-    // the first member of a group, or any ungrouped segment — starts a fresh
-    // paragraph so it owns a clean frame. This matches TLINK: DGROUP's interior
-    // segments pack tight, but each new frame begins on a paragraph boundary.
+    // Pass 2 — lay out combined segments into the image. Every segment honors
+    // its own SEGDEF alignment (byte/word/para) and packs against the previous
+    // one — so per-module CODE segments (large/medium model `<MODULE>_TEXT`)
+    // butt together byte-aligned, and DGROUP's interior segments pack tight.
+    // The one exception: the FIRST member of a group starts a fresh paragraph,
+    // because a group base (DGROUP) must sit on a paragraph boundary to be a
+    // valid frame.
     let mut cursor = 0usize;
-    let mut prev_group: Option<usize> = None;
+    let mut seen_group = vec![false; group_names.len()];
     for (ci, c) in combined.iter_mut().enumerate() {
-        let to = if group_of[ci].is_some() && group_of[ci] == prev_group {
-            align_bytes(c.align)
-        } else {
-            16
+        let first_of_group = match group_of[ci] {
+            Some(g) if !seen_group[g] => {
+                seen_group[g] = true;
+                true
+            }
+            _ => false,
         };
+        let to = if first_of_group { 16 } else { align_bytes(c.align) };
         cursor = align_up(cursor, to);
         c.load_offset = cursor;
         cursor += c.length;
-        prev_group = group_of[ci];
     }
     let mem_size = cursor;
 
@@ -477,8 +481,13 @@ fn apply_fixup(
     let frame_base = usize::from(frame_para) << 4;
 
     let off = place.base + usize::from(fx.data_offset);
-    // Paragraph of the patched location's own segment, for relocation framing.
+    // Relocation framing: the frame is the patched segment's load paragraph,
+    // and the reloc offset is measured from that paragraph. When the segment is
+    // byte-packed (large/medium-model code segments don't start on a paragraph),
+    // its load address carries a sub-paragraph remainder that must be added to
+    // the offset so `frame*16 + offset` still lands on the patched word.
     let loc_frame = (combined[place.combined].load_offset >> 4) as u16;
+    let loc_sub = (combined[place.combined].load_offset & 15) as u16;
     let seg = &mut combined[place.combined];
 
     match fx.location {
@@ -497,14 +506,14 @@ fn apply_fixup(
         2 => {
             let existing = read_u16(seg, off);
             write_u16(seg, off, existing.wrapping_add(frame_para));
-            Ok(Some(((off) as u16, loc_frame)))
+            Ok(Some((off as u16 + loc_sub, loc_frame)))
         }
         // Far pointer — 16-bit offset (in frame) then the frame segment word.
         3 => {
             let existing_off = read_u16(seg, off);
             write_u16(seg, off, existing_off.wrapping_add((target.addr - frame_base) as u16));
             write_u16(seg, off + 2, frame_para);
-            Ok(Some(((off + 2) as u16, loc_frame)))
+            Ok(Some((off as u16 + 2 + loc_sub, loc_frame)))
         }
         other => Err(LinkError::UnsupportedFixup(format!("location type {other}"))),
     }

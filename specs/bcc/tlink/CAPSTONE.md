@@ -48,14 +48,40 @@ TLINK's C0 startup carries the `DOSSEG` linker directive (a COMENT, class
   first-appearance order. So C0's `_DATA, _CVTSEG, _SCNSEG` (all class `DATA`)
   stay together, and `_CONST` (class `CONST`) follows the whole `DATA` run even
   though its SEGDEF appears before `_CVTSEG`.
-- **Alignment — pack within a group, paragraph between frames.** A segment that
-  continues the *same group* as the immediately-preceding segment is placed at
-  its own SEGDEF alignment (byte/word/para), packing tight — DGROUP's interior
-  segments butt against each other (`_DATA` ends at `0xCE3`, `_CVTSEG` starts at
-  `0xCE4`, *not* `0xCF0`). Every other segment — the first member of a group, or
-  any ungrouped segment — starts on a fresh paragraph so it owns a clean frame.
-  (The single-DGROUP-member standalone fixture 4261 depends on this: its
-  `_DATA` paragraph-aligns because it is the first DGROUP member.)
+- **Alignment — honor own alignment; paragraph-align only a group's first
+  member.** Every segment is placed at its own SEGDEF alignment (byte/word/para)
+  and packs against the previous one. The *one* exception: the **first member of
+  a group** starts on a fresh paragraph, because a group base (DGROUP) must sit
+  on a paragraph boundary to be a valid frame. So DGROUP's interior segments
+  butt together (`_DATA` ends at `0xCE3`, `_CVTSEG` starts at `0xCE4`, not
+  `0xCF0`), the standalone fixture 4261's lone `_DATA` paragraph-aligns (it is
+  the first DGROUP member), and — crucially for medium/large model — per-module
+  CODE segments, which are *not* grouped, byte-pack against each other
+  (`MAIN_TEXT` at `0xE6F`, odd, right after the previous code segment).
+
+## Memory models
+
+In medium/compact/large/huge, code and/or data go *far*: each module gets its
+own code segment `<MODULE>_TEXT` (class CODE) instead of a single shared
+`_TEXT`, and calls/pointers across them are far (location-type-3 fixups +
+runtime relocations). The startup object and runtime library are model-keyed
+(`C0M.OBJ`/`CM.LIB`, `C0L.OBJ`/`CL.LIB`, …). Two things fall out:
+
+- **Byte-packed code.** The per-module CODE segments share a class but no group,
+  so by the alignment rule above they pack at their own (byte) alignment — a
+  code segment commonly starts on an odd paragraph-plus address.
+- **Relocation offset carries the sub-paragraph remainder.** A runtime
+  relocation is `(frame, offset)` with `frame = segment_load >> 4`. When the
+  patched segment is byte-packed, `segment_load` isn't a paragraph multiple, so
+  the offset must be `offset_in_segment + (segment_load & 15)` for `frame*16 +
+  offset` to land on the patched word. (Paragraph-aligned segments — every
+  small-model case — have remainder 0, which is why this only surfaced with far
+  models.)
+
+Both `return 0` and `printf` link byte-exact in small, medium, and large
+models. The large-model `.MAP` differs only in the ordering of a couple of
+same-address far/near alias pairs (`_free`/`_farfree`) — see below — so the
+large-model tests gate the EXE, not the MAP.
 
 ## Group-relative framing (publics *and* fixups)
 
@@ -82,7 +108,11 @@ base paragraph**, not the segment's own paragraph. This shows up in two places:
 - **Publics by Value ordering** — absolutes group **first** (sorted by offset),
   then relocatable symbols by `(frame, offset)`. Ties break by **definition
   order** (the order PUBDEFs were seen), not alphabetically: `__ScanTodVector`
-  (defined first) precedes `__RealCvtVector` at the shared `00A6:0284`.
+  (defined first) precedes `__RealCvtVector` at the shared `00A6:0284`. This
+  matches every tie observed *except* a few same-address far/near alias pairs in
+  the large model (`_free`/`_farfree` at `0000:0B30`), which TLINK lists in an
+  order taken from its internal symbol table that definition order doesn't
+  reproduce. Cosmetic (the EXE is unaffected), so left as a known gap.
 
 ## Library member placement (`lib.rs`)
 

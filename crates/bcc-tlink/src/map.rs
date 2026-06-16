@@ -33,6 +33,11 @@ pub fn format(image: &Image) -> Vec<u8> {
     s.push_str("  Address         Publics by Value\r\n\r\n");
     // Absolute equates group first (sorted by offset), then relocatable
     // symbols by (frame, offset); ties break by definition order.
+    //
+    // (One known cosmetic exception: a handful of same-address far/near alias
+    // pairs — e.g. large-model `_free`/`_farfree` — list in an order TLINK
+    // takes from its internal symbol table, which definition order doesn't
+    // capture. The EXE is unaffected.)
     let mut by_value: Vec<&MapPublic> = image.map.publics.iter().collect();
     by_value.sort_by_key(|p| (!p.absolute, p.frame, p.offset, p.seq));
     for p in by_value {

@@ -1,83 +1,106 @@
 //! End-to-end capstone: link real BCC-compiled programs against the real
 //! Borland C++ 2.0 runtime and assert the output is byte-for-byte what TLINK
-//! produces.
+//! produces, across memory models.
 //!
-//! The object files are small and tracked under `tests/data/`:
-//! - `MAIN.OBJ` — `int main(void){return 0;}` (`bcc -c -ms`), 211 bytes.
-//! - `HELLO.OBJ` — `printf("Hello, world\n")` (`bcc -c -ms -IC:\INCLUDE`),
-//!   298 bytes; pulls the formatted-output / stdio chain out of CS.LIB.
+//! The object files are small and tracked under `tests/data/`; the model
+//! suffix (`_M`/`_L`) marks the compile model:
+//! - `MAIN*.OBJ`  — `int main(void){return 0;}`.
+//! - `HELLO*.OBJ` — `printf("Hello, world\n")`; pulls the stdio chain.
+//! - small (`-ms`, no suffix), medium (`-mm`, `_M`), large (`-ml`, `_L`).
 //!
-//! The startup `C0S.OBJ` and the runtime library `CS.LIB` are *not* tracked —
-//! they are large, reproducible artifacts of the provisioned install
-//! (`oracle provision bcc`), so we read them from `.bc2/BC2/LIB/` at test time
-//! and skip cleanly when the install is absent.
+//! The startup `C0<m>.OBJ` and runtime `C<m>.LIB` are *not* tracked — they are
+//! large, reproducible artifacts of the provisioned install (`oracle provision
+//! bcc`), read from `.bc2/BC2/LIB/` at test time; the tests skip when absent.
 //!
-//! The byte-exact contract is the recorded SHA-256 of the linked `MAIN.EXE` and
-//! `MAIN.MAP`, captured against TLINK.EXE 4.0. Matching these exercises the
-//! whole pipeline: OMF parsing (incl. absolute PUBDEFs and LIDATA), DOSSEG
-//! segment ordering, own-alignment packing, library-order member placement,
-//! group-relative framing (of both publics and fixups), MZ relocation
-//! emission, and the `.MAP` listing.
+//! The byte-exact contract is the recorded SHA-256 of the linked `MAIN.EXE`
+//! (and, where it matches, `MAIN.MAP`) captured against TLINK.EXE 4.0. The
+//! large-model `.MAP` is intentionally not gated: TLINK orders a few
+//! same-address far/near alias pairs (`_free`/`_farfree`) by an internal
+//! symbol-table order the linker doesn't model — the EXE is unaffected.
 
 use sha2::{Digest, Sha256};
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Link `tests/data/<obj_name>` against the provisioned C0S.OBJ + CS.LIB and
-/// assert the linked EXE/MAP match the recorded TLINK hashes. Skips (returns)
-/// when the install isn't present.
-fn check_link(obj_name: &str, exe_sha: &str, map_sha: &str) {
-    let root = {
-        let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.pop();
-        p.pop();
-        p
-    };
-    let lib_dir = root.join(".bc2/BC2/LIB");
-    let (c0s_path, cslib_path) = (lib_dir.join("C0S.OBJ"), lib_dir.join("CS.LIB"));
-    if !c0s_path.exists() || !cslib_path.exists() {
-        eprintln!(
-            "skipping capstone: provisioned install not found at {} \
-             (run `oracle provision bcc`)",
-            lib_dir.display()
-        );
-        return;
-    }
+fn lib_dir() -> std::path::PathBuf {
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop();
+    p.pop();
+    p.join(".bc2/BC2/LIB")
+}
 
-    let c0s = std::fs::read(&c0s_path).expect("read C0S.OBJ");
-    let cslib = std::fs::read(&cslib_path).expect("read CS.LIB");
+/// Link `tests/data/<obj_name>` in memory model `m` (`'S'`/`'M'`/`'L'`) against
+/// the provisioned `C0<m>.OBJ` + `C<m>.LIB`, returning the linked (EXE, MAP) or
+/// `None` when the install isn't present.
+fn link_in_model(m: char, obj_name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let dir = lib_dir();
+    let c0_name = format!("C0{m}.OBJ");
+    let lib_name = format!("C{m}.LIB");
+    let (c0_path, lib_path) = (dir.join(&c0_name), dir.join(&lib_name));
+    if !c0_path.exists() || !lib_path.exists() {
+        eprintln!("skipping capstone: install not found at {} (run `oracle provision bcc`)", dir.display());
+        return None;
+    }
+    let c0 = std::fs::read(&c0_path).expect("read C0");
+    let lib = std::fs::read(&lib_path).expect("read lib");
     let obj_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(obj_name);
     let obj = std::fs::read(&obj_path).unwrap_or_else(|e| panic!("read {obj_name}: {e}"));
 
-    // TLINK command line: `C0S.OBJ+<obj>, MAIN.EXE, MAIN.MAP, CS.LIB`.
-    let objects = vec![("C0S.OBJ".to_string(), c0s), (obj_name.to_string(), obj)];
-    let libraries = vec![("CS.LIB".to_string(), cslib)];
-
+    let objects = vec![(c0_name, c0), (obj_name.to_string(), obj)];
+    let libraries = vec![(lib_name, lib)];
     let image = bcc_tlink::link_image(&objects, &libraries).expect("link");
-    let exe = bcc_tlink::mz::write(&image);
-    let map = bcc_tlink::map::format(&image);
+    Some((bcc_tlink::mz::write(&image), bcc_tlink::map::format(&image)))
+}
 
-    assert_eq!(hex_sha256(&exe), exe_sha, "{obj_name}: MAIN.EXE diverged from TLINK");
-    assert_eq!(hex_sha256(&map), map_sha, "{obj_name}: MAIN.MAP diverged from TLINK");
+/// Assert the linked EXE (and, when `map_sha` is `Some`, the MAP) match TLINK.
+fn check(m: char, obj: &str, exe_sha: &str, map_sha: Option<&str>) {
+    let Some((exe, map)) = link_in_model(m, obj) else { return };
+    assert_eq!(hex_sha256(&exe), exe_sha, "{obj} ({m}): MAIN.EXE diverged from TLINK");
+    if let Some(map_sha) = map_sha {
+        assert_eq!(hex_sha256(&map), map_sha, "{obj} ({m}): MAIN.MAP diverged from TLINK");
+    }
 }
 
 #[test]
-fn capstone_return_zero_byte_exact() {
-    check_link(
-        "MAIN.OBJ",
+fn small_return_zero() {
+    check('S', "MAIN.OBJ",
         "a429690a97fd5b956f77f596c1057062310b82aa550bfa66f02f4466a68c5727",
-        "e45b3af6fc469bd0bfc58c23a9dca8fbb0448edc1496528974b3cf38f853628c",
-    );
+        Some("e45b3af6fc469bd0bfc58c23a9dca8fbb0448edc1496528974b3cf38f853628c"));
 }
 
 #[test]
-fn capstone_printf_hello_world_byte_exact() {
-    check_link(
-        "HELLO.OBJ",
+fn small_printf_hello_world() {
+    check('S', "HELLO.OBJ",
         "4e3af60028660868f0e30283bca8a7c31fe798fcbd71f07c0ecbd034f8d26ed2",
-        "f8cd2ac8bba4c7499c0d30b06d79220914ba269612f42f440287fd0211e48aa0",
-    );
+        Some("f8cd2ac8bba4c7499c0d30b06d79220914ba269612f42f440287fd0211e48aa0"));
+}
+
+#[test]
+fn medium_return_zero() {
+    check('M', "MAIN_M.OBJ",
+        "c209f7044039d4c9cabb0a426f435c6dd64813ffcd809907c0f99a3559c871b9",
+        Some("039c48f49915c1bdfb6c00472a8e399a83390a783796335df9dc13ed5a192e58"));
+}
+
+#[test]
+fn medium_printf_hello_world() {
+    check('M', "HELLO_M.OBJ",
+        "36e0924c7ac9fabeadec42f771bab1acab55d80ac485515fafc11c9f912c8342",
+        Some("52fc4f8ce42f5c06bba1a3c440f33b4c3c3c66ac47dab6fce37d8a0c4562ca5e"));
+}
+
+// Large model: EXE byte-exact; `.MAP` not gated (see module docs — `_free`/
+// `_farfree` alias ordering).
+#[test]
+fn large_return_zero() {
+    check('L', "MAIN_L.OBJ",
+        "8565f2a373d43da87e849b8fe73e6d6ed1e2f6afbc91ec65c8190aa929f64048", None);
+}
+
+#[test]
+fn large_printf_hello_world() {
+    check('L', "HELLO_L.OBJ",
+        "d2d5c7e03a51dffeed0da98b606c1071324488e6e942469dcf05547b75d5bab6", None);
 }
