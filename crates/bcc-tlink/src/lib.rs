@@ -80,6 +80,20 @@ pub fn resolved_modules(
     objects: &[(String, Vec<u8>)],
     libraries: &[(String, Vec<u8>)],
 ) -> Result<Vec<Module>, Error> {
+    resolve(objects, libraries, &[])
+}
+
+/// Like [`resolved_modules`] but seeds resolution with extra external references
+/// that aren't named by any object — used to force-pull the overlay manager
+/// from `OVERLAY.LIB` when `/o` is active (TLINK injects these references).
+///
+/// # Errors
+/// Same as [`resolved_modules`].
+pub fn resolve(
+    objects: &[(String, Vec<u8>)],
+    libraries: &[(String, Vec<u8>)],
+    forced: &[&str],
+) -> Result<Vec<Module>, Error> {
     let mut modules = Vec::with_capacity(objects.len());
     for (name, bytes) in objects {
         let module =
@@ -103,11 +117,12 @@ pub fn resolved_modules(
     let mut pulled_keys: Vec<usize> = Vec::new();
     loop {
         let defined: HashSet<&str> = modules.iter().flat_map(defined_in).collect();
-        let unresolved: HashSet<&str> = modules
+        let mut unresolved: HashSet<&str> = modules
             .iter()
             .flat_map(needed_in)
             .filter(|s| !defined.contains(s))
             .collect();
+        unresolved.extend(forced.iter().copied().filter(|s| !defined.contains(s)));
         if unresolved.is_empty() {
             break;
         }
