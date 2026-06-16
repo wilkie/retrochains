@@ -83,6 +83,7 @@ fn print_text(args: &Args, any_unknown: &mut bool) -> Result<(), Box<dyn std::er
             Analysis::Obj(o) => {
                 if args.verbose {
                     print_obj_evidence(o, "  ");
+                    print_idioms(&data, "  ");
                 }
                 if matches!(o.tier(), FingerprintTier::Unknown) {
                     *any_unknown = true;
@@ -123,6 +124,24 @@ fn print_obj_evidence(o: &ObjAnalysis, indent: &str) {
         let hex: Vec<String> = head.iter().map(|b| format!("{b:02x}")).collect();
         println!("{indent}first_code_bytes: {}", hex.join(" "));
     }
+}
+
+/// Recognize codegen idioms in the object's CODE segment and print the
+/// compiler verdict plus a per-idiom lift of the `_TEXT`.
+fn print_idioms(obj: &[u8], indent: &str) {
+    let code = fingerprint::idioms::code_of_obj(obj);
+    if code.is_empty() {
+        return;
+    }
+    let c = fingerprint::classify(&code);
+    println!(
+        "{indent}codegen: {:?} (bcc-idioms={}, msc-idioms={}, {:.0}% recognized)",
+        c.verdict,
+        c.bcc_evidence,
+        c.msc_evidence,
+        f64::from(fingerprint::idioms::coverage(&code)) * 100.0,
+    );
+    print!("{}", fingerprint::idioms::summarize(&code));
 }
 
 fn yn(b: bool) -> &'static str {

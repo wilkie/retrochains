@@ -11,9 +11,11 @@
 
 use obj::ObjReader;
 
+pub mod idioms;
 mod lib_archive;
 mod obj_analysis;
 
+pub use idioms::{classify, recognize, Classification, Compiler, Idiom, IdiomMatch, Verdict};
 pub use lib_archive::{LibAnalysis, LibMember};
 pub use obj_analysis::{MemoryModel, ObjAnalysis};
 
