@@ -32,10 +32,20 @@ into = "INCLUDE"
 archives = ["CLIB.ZIP", "SLIB.ZIP", "MLIB.ZIP", "LLIB.ZIP", "HLIB.ZIP", "XLIB.ZIP", "WINLIB.ZIP"]
 into = "LIB"
 
+# The full command-line toolchain ships in TASM.ZIP: the assembler (TASM,
+# TASMX), linker (TLINK), librarian (TLIB), make (MAKE), and the small build
+# utilities (GREP, TOUCH, OBJXREF, TCREF, DPMILOAD). We extract all of it so the
+# oracle is a complete CLI toolchain — TLIB in particular drives the library
+# fixtures in fixtures/c/linking/.
 [[install.extract]]
 archives = ["TASM.ZIP"]
 into = "BIN"
-only = ["TASM.EXE", "TLINK.EXE"]
+
+# The protected-mode compiler (BCCX.EXE + its overlay) ships separately from the
+# real-mode BCC.EXE (which spans CMDLINE.CA*, below).
+[[install.extract]]
+archives = ["BCC.ZIP"]
+into = "BIN"
 
 # Multi-volume Borland span: concatenate the parts in order, reconstruct the
 # archive with `zip -FF`, then extract the listed members. BCC.EXE spans

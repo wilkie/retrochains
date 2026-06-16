@@ -23,6 +23,8 @@ pub enum ToolName {
     Bcc,
     Tasm,
     Tlink,
+    /// Turbo Librarian (`TLIB.EXE`). BCC oracle only — builds `.LIB` archives.
+    Tlib,
     /// Microsoft C 5.0 driver (`CL.EXE`). MSC oracle only.
     Cl,
     /// MASM 5.x (`MASM.EXE`). MSC oracle.
@@ -38,6 +40,7 @@ impl ToolName {
             Self::Bcc => Tool::Bcc,
             Self::Tasm => Tool::Tasm,
             Self::Tlink => Tool::Tlink,
+            Self::Tlib => Tool::Tlib,
             Self::Cl => Tool::Cl,
             Self::Masm => Tool::Masm,
             Self::Link => Tool::Link,
@@ -50,6 +53,7 @@ impl ToolName {
             Self::Bcc => "bcc",
             Self::Tasm => "tasm",
             Self::Tlink => "tlink",
+            Self::Tlib => "tlib",
             Self::Cl => "cl",
             Self::Masm => "masm",
             Self::Link => "link",

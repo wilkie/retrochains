@@ -26,6 +26,8 @@ pub enum Tool {
     Bcc,
     Tasm,
     Tlink,
+    /// Turbo Librarian (`TLIB.EXE`) — builds/maintains `.LIB` archives. BC2.
+    Tlib,
     /// Microsoft C 5.0 driver. Shells out to C1/C2/C3 internally,
     /// then to MASM and LINK as needed.
     Cl,
@@ -43,6 +45,7 @@ impl Tool {
             Self::Bcc => "BCC",
             Self::Tasm => "TASM",
             Self::Tlink => "TLINK",
+            Self::Tlib => "TLIB",
             Self::Cl => "CL",
             Self::Masm => "MASM",
             Self::Link => "LINK",

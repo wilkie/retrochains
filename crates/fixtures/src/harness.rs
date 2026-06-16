@@ -313,10 +313,10 @@ impl ToolPaths {
             ToolName::Tasm => &self.tasm,
             ToolName::Tlink => &self.tlink,
             ToolName::Cl => &self.msc,
-            // MSC ships MASM and LINK with a separate driver; we'll
-            // grow these slots when `crates/msc` lands proper
-            // reimplementations.
-            ToolName::Masm | ToolName::Link => &None,
+            // Oracle-only tools with no host reimplementation (TLIB builds the
+            // library inputs; MASM/LINK are MSC's). Fixtures using them as the
+            // primary tool are not-applicable under `--toolchain ours`.
+            ToolName::Tlib | ToolName::Masm | ToolName::Link => &None,
         };
         opt.as_deref().ok_or(HarnessError::ToolNotImplemented(tool.as_str().to_owned()))
     }
