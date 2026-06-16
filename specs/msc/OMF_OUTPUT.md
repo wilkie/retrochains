@@ -73,6 +73,16 @@ after the SEGDEFs.
 See [`msc-fixup-shapes`](../../~/.claude/.../msc_fixup_shapes.md) for
 the placeholder-byte semantics of each.
 
+The frame methods MSC emits are **F0** (segment), **F1** (group, for
+DGROUP-relative data) and **F5** (the target's own frame, for extern
+references — the `… 56 …` shapes). It never emits **F2** (extern-named
+frame). `bcc-tlink`'s `apply_fixup` resolves all three byte-exact: F5
+falls to `target.frame_para` (the group base for a grouped target, the
+segment paragraph otherwise), so a grouped extern reference framed F5
+deposits the same DGROUP-relative offset as the equivalent F1 form —
+verified install-free by `synthetic_msc_f5_frame` in
+`crates/bcc-tlink/tests/synthetic.rs`.
+
 ## CONST layout
 
 One LEDATA per string, each at a 2-byte-aligned offset. Odd-length

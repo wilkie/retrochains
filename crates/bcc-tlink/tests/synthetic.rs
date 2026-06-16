@@ -111,6 +111,13 @@ fn packed_code_object() -> Vec<u8> {
 /// that no PUBDEF defines, referenced DGROUP-relative. The linker must allocate
 /// storage for the communal.
 fn comdef_object() -> Vec<u8> {
+    comdef_object_framed(false)
+}
+
+/// The COMDEF program, with the `_g` reference framed by either DGROUP (F1) or
+/// the target's own frame (F5 — MSC's `c4 off 56 idx` extern idiom). For a
+/// grouped communal both resolve to the same DGROUP-relative offset.
+fn comdef_object_framed(g_via_f5: bool) -> Vec<u8> {
     let mut b = ModuleBuilder::new("COMG");
     let text = b.code_segment(
         "_TEXT",
@@ -121,7 +128,8 @@ fn comdef_object() -> Vec<u8> {
     let dgroup = b.group("DGROUP", &[data, bss]);
     b.comdef("_g", 2);
     b.group_ref(text, 1, 2, true, Frame::Group(dgroup), dgroup); // mov ax, DGROUP
-    b.extern_ref(text, 6, 1, true, Frame::Group(dgroup), "_g"); // mov ax, [_g]
+    let g_frame = if g_via_f5 { Frame::Target } else { Frame::Group(dgroup) };
+    b.extern_ref(text, 6, 1, true, g_frame, "_g"); // mov ax, [_g]
     b.public("_start", text, 0).entry(text, 0);
     b.emit()
 }
@@ -158,6 +166,25 @@ fn synthetic_comdef_allocation() {
     // (no paragraph-aligned member), so _g is at DGROUP offset 0x12 (file 0x206
     // is the `mov ax, [_g]` operand).
     assert_eq!(&exe[0x206..0x208], &[0x12, 0x00], "_g resolved to its _COMDEF_ slot");
+}
+
+/// MSC's frame idiom for an extern reference is **F5** (the target's own frame),
+/// emitted as `c4 off 56 idx` — not F2 (MSC never emits F2). For a grouped
+/// communal, F5 resolves to the same DGROUP-relative offset as F1, so the F5
+/// program links byte-identically to the F1 one and byte-exact to TLINK. This
+/// exercises `apply_fixup`'s F5 path (`target.frame_para` = the group base).
+#[test]
+fn synthetic_msc_f5_frame() {
+    let via_f5 = bcc_tlink::link_objects(&[("F5G.OBJ".into(), comdef_object_framed(true))], &[])
+        .expect("link F5-framed object");
+    let via_f1 = bcc_tlink::link_objects(&[("COMG.OBJ".into(), comdef_object_framed(false))], &[])
+        .expect("link F1-framed object");
+    assert_eq!(via_f5, via_f1, "F5 (target frame) links identically to F1 for a grouped target");
+    assert_eq!(
+        hex_sha256(&via_f5),
+        "67e3c8acbac86920ea3b011338cdd525e3a4000fbb69e8511338810248965bda",
+        "F5-framed COMDEF object diverged from TLINK",
+    );
 }
 
 /// Multiple communals are laid out byte-packed in record order (not name-sorted,
