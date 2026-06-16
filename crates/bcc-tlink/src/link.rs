@@ -510,8 +510,12 @@ fn apply_fixup(
     // byte-packed (large/medium-model code segments don't start on a paragraph),
     // its load address carries a sub-paragraph remainder that must be added to
     // the offset so `frame*16 + offset` still lands on the patched word.
-    let loc_frame = (combined[place.combined].load_offset >> 4) as u16;
-    let loc_sub = (combined[place.combined].load_offset & 15) as u16;
+    // The relocation frames its patched word against the segment's canonical
+    // frame (group base where grouped, own paragraph otherwise), the same as
+    // fixup target framing; `loc_off_base` is the word's distance from that
+    // frame paragraph.
+    let loc_frame = combined_frame[place.combined];
+    let loc_off_base = combined[place.combined].load_offset - (usize::from(loc_frame) << 4);
     let seg = &mut combined[place.combined];
 
     match fx.location {
@@ -530,14 +534,14 @@ fn apply_fixup(
         2 => {
             let existing = read_u16(seg, off);
             write_u16(seg, off, existing.wrapping_add(frame_para));
-            Ok(Some((off as u16 + loc_sub, loc_frame)))
+            Ok(Some(((off + loc_off_base) as u16, loc_frame)))
         }
         // Far pointer — 16-bit offset (in frame) then the frame segment word.
         3 => {
             let existing_off = read_u16(seg, off);
             write_u16(seg, off, existing_off.wrapping_add((target.addr - frame_base) as u16));
             write_u16(seg, off + 2, frame_para);
-            Ok(Some((off as u16 + 2 + loc_sub, loc_frame)))
+            Ok(Some(((off + 2 + loc_off_base) as u16, loc_frame)))
         }
         other => Err(LinkError::UnsupportedFixup(format!("location type {other}"))),
     }

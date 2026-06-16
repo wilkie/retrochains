@@ -166,6 +166,13 @@ pub fn link_overlay(
     image.file_image.resize(image.mem_size, 0);
     if let Some(start) = exeinfo_start {
         image.file_image[start..start + table.len()].copy_from_slice(&table);
+        // Each table entry's `para` field is a load-relative segment value; DOS
+        // relocates it. Append one relocation per entry (offset i*8 within the
+        // _EXEINFO_ frame), after the resident relocations.
+        let frame = (start >> 4) as u16;
+        for i in 0..seg_count {
+            image.relocations.push(((i * 8) as u16, frame));
+        }
     }
 
     let mut exe = mz::write(&image);
