@@ -18,6 +18,8 @@ Discoveries about `TLINK.EXE` go here. Suggested files:
   real `C0S.OBJ` startup + `CS.LIB` runtime, byte-exact. Collects the segment
   ordering / alignment / framing / member-placement rules that the small
   standalone fixtures don't reach.
-- `OVERLAYS.md` — overlay support if/when we encounter it.
+- `OVERLAYS.md` — VROOMM overlay support: the positional-`/o` invocation, the
+  resident layout (manager + per-module `INT 3F` stubs), and the `FBOV` overlay
+  area format. Reverse-engineered; not yet implemented.
 
 Always link discoveries back to the fixture that demonstrates them.
