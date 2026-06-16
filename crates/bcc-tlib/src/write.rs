@@ -25,7 +25,7 @@ pub enum WriteError {
     NoTheadr(String),
     #[error("OMF framing in member {0:?}: {1}")]
     Framing(String, obj::ReadError),
-    #[error("dictionary overflow: {0} entries need more than one block (not yet supported)")]
+    #[error("dictionary overflow: {0} entries did not fit the allocated blocks")]
     DictOverflow(usize),
 }
 
@@ -113,6 +113,7 @@ pub fn build_library(objects: &[(String, Vec<u8>)]) -> Result<Vec<u8>, WriteErro
     }
 
     // LIBEND record pads the member area out to the 512-aligned dictionary.
+    let nblocks = dict_block_count(&entries);
     let libend_pos = out.len();
     let dict_offset = align_up(libend_pos, BLOCK);
     let libend_len = dict_offset - libend_pos - 3;
@@ -121,52 +122,90 @@ pub fn build_library(objects: &[(String, Vec<u8>)]) -> Result<Vec<u8>, WriteErro
     out.push((libend_len >> 8) as u8);
     out.resize(dict_offset, 0);
 
-    // Dictionary (single block for now).
-    let block = build_dict_block(&entries)?;
-    out.extend_from_slice(&block);
+    // Dictionary: `nblocks` 512-byte blocks.
+    let dict = build_dict(&entries, nblocks)?;
+    out.extend_from_slice(&dict);
 
-    // Fill the header record: F0, length (page-3), dict offset, blocks, flags.
-    write_header(&mut out, dict_offset as u32, 1);
+    write_header(&mut out, dict_offset as u32, nblocks as u16);
     Ok(out)
 }
 
-/// Lay out one 512-byte dictionary block. Entries are inserted in sorted name
-/// order; on a bucket collision the rehash steps by `bucket_delta`.
-fn build_dict_block(entries: &[(String, u16)]) -> Result<[u8; BLOCK], WriteError> {
+/// The byte size an entry occupies, as TLIB counts it for block sizing:
+/// `(namelen + 4)` rounded down to even (equivalently the even-aligned
+/// `<len><name><page>` record).
+fn entry_bytes(name: &str) -> usize {
+    (name.len() + 4) & !1
+}
+
+/// Number of 512-byte dictionary blocks TLIB allocates (from the disassembled
+/// sizing routine): `max(1, ceil(count/35), ceil((bytes-128)/346))`, where the
+/// bucket bound divides by 35 (not 37 — two buckets of headroom) and the byte
+/// bound reserves 128 bytes per block.
+fn dict_block_count(entries: &[(String, u16)]) -> usize {
+    let count = entries.len();
+    let bytes: usize = entries.iter().map(|(n, _)| entry_bytes(n)).sum();
+    let bucket_based = (count + 34) / 35;
+    let byte_based = (bytes + 217) / 346; // ceil((bytes - 128) / 346)
+    bucket_based.max(byte_based).max(1)
+}
+
+/// Lay out the dictionary. Entries are inserted in sorted name order; each
+/// hashes to a `(block, bucket)` and, on collision, rehashes by `bucket_delta`
+/// within the block, advancing to `(block + block_delta) % nblocks` when a
+/// block's buckets are exhausted.
+fn build_dict(entries: &[(String, u16)], nblocks: usize) -> Result<Vec<u8>, WriteError> {
     let mut sorted: Vec<&(String, u16)> = entries.iter().collect();
     sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
 
-    let mut block = [0u8; BLOCK];
-    let mut free = DICT_HEADER;
+    let mut dict = vec![0u8; nblocks * BLOCK];
+    let mut free = vec![DICT_HEADER; nblocks]; // per-block free offset
+    let nbuckets = usize::from(dict::BUCKETS);
+
     for (name, page) in sorted {
         let nb = name.as_bytes();
-        // Find the bucket (primary, then rehash by bucket_delta).
-        let mut bucket = usize::from(dict::bucket(nb));
-        let delta = usize::from(dict::bucket_delta(nb));
+        let bucket0 = usize::from(dict::bucket(nb));
+        let bdelta = usize::from(dict::bucket_delta(nb));
+        let block0 = usize::from(dict::block(nb, nblocks as u16));
+        let blkdelta = usize::from(dict::block_delta(nb, nblocks as u16));
+
+        // Probe for a free bucket.
+        let (mut block, mut bucket) = (block0, bucket0);
         let mut guard = 0;
-        while block[bucket] != 0 {
-            bucket = (bucket + delta) % usize::from(dict::BUCKETS);
+        while dict[block * BLOCK + bucket] != 0 {
+            bucket = (bucket + bdelta) % nbuckets;
+            if bucket == bucket0 {
+                block = (block + blkdelta) % nblocks;
+                bucket = bucket0;
+                if block == block0 {
+                    return Err(WriteError::DictOverflow(entries.len()));
+                }
+            }
             guard += 1;
-            if guard > usize::from(dict::BUCKETS) {
+            if guard > nblocks * nbuckets {
                 return Err(WriteError::DictOverflow(entries.len()));
             }
         }
-        // Entries sit on even offsets; htab stores offset/2.
-        free = align_up(free, 2);
+
+        // Place the entry at the chosen block's free offset (even-aligned).
+        let base = block * BLOCK;
+        let off = align_up(free[block], 2);
         let entry_len = 1 + nb.len() + 2;
-        if free + entry_len > BLOCK {
+        if off + entry_len > BLOCK {
             return Err(WriteError::DictOverflow(entries.len()));
         }
-        block[bucket] = (free / 2) as u8;
-        block[free] = nb.len() as u8;
-        block[free + 1..free + 1 + nb.len()].copy_from_slice(nb);
-        block[free + 1 + nb.len()] = (*page & 0xff) as u8;
-        block[free + 2 + nb.len()] = (*page >> 8) as u8;
-        free += entry_len;
+        dict[base + bucket] = (off / 2) as u8;
+        dict[base + off] = nb.len() as u8;
+        dict[base + off + 1..base + off + 1 + nb.len()].copy_from_slice(nb);
+        dict[base + off + 1 + nb.len()] = (*page & 0xff) as u8;
+        dict[base + off + 2 + nb.len()] = (*page >> 8) as u8;
+        free[block] = off + entry_len;
     }
-    // Free-space pointer (next even offset / 2).
-    block[37] = (align_up(free, 2) / 2) as u8;
-    Ok(block)
+
+    // Each block's free-space pointer (byte 37) = next even offset / 2.
+    for (i, f) in free.iter().enumerate() {
+        dict[i * BLOCK + 37] = (align_up(*f, 2) / 2) as u8;
+    }
+    Ok(dict)
 }
 
 /// Write the `0xF0` header record into the reserved first page.

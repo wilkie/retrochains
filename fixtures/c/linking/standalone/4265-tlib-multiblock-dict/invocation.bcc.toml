@@ -1,0 +1,4 @@
+description = "Standalone TLIB multi-block dictionary: archive a module with 72 publics so the symbol dictionary spans 3 blocks (nblocks=max(1, ceil(count/35), ceil((bytes-128)/346))). Pins multi-block block-index/block-delta placement and the block-count sizing rule. Input BIG.OBJ tracked (provenance BIG.ASM). tool=tlib gates BIGLIB.LIB."
+tool = "tlib"
+args = ["BIGLIB", "+BIG"]
+inputs = ["BIG.OBJ"]

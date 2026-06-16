@@ -24,6 +24,31 @@ Reproduced by `crates/bcc-tlib` (`write.rs`), gated byte-exact by fixture
   **module name + `!`**, with the member's 1-based page number; entries inserted
   in sorted (ASCII) order.
 
+### Block count (`nblocks`) — from TLIB.EXE
+
+The number of 512-byte dictionary blocks (disassembled sizing routine, entry
+`0x23bc`): for `count` entries totalling `bytes` (each entry sized
+`(namelen + 4) & ~1`),
+
+```
+nblocks = max( 1,
+               ceil(count / 35),          // bucket bound — 35, not 37 (headroom)
+               ceil((bytes - 128) / 346) )  // byte bound — 128 reserved, 346 = 474-128
+```
+
+e.g. a 73-entry archive: `ceil(73/35)=3`, `ceil((584-128)/346)=2` → **3 blocks**
+(`4265-tlib-multiblock-dict`).
+
+### Multi-block placement
+
+Each entry hashes to a primary `(block, bucket)` via the block index and bucket
+index. On a bucket collision the bucket advances by `bucket_delta` within the
+block; when the probe cycles back to the primary bucket (block's 37 buckets
+exhausted) the block advances by `block_delta` (`block = (block + block_delta) %
+nblocks`) and the bucket resets to the primary. Each block packs its assigned
+entries (in sorted order) from byte 38, even-aligned, with its own free pointer.
+Confirmed reproducing all 73 entries of the 3-block `4265` dictionary exactly.
+
 ## Block layout
 
 A dictionary is one or more **512-byte blocks**. Within a block:
