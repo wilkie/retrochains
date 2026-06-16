@@ -504,10 +504,16 @@ fn apply_fixup(
         other => return Err(LinkError::UnsupportedFixup(format!("target method {other}"))),
     };
 
-    // The frame the reference is measured against. F1 = a named group,
-    // F4 = the patched location's own segment (framed against its group if it
-    // has one), F5 = the target's frame.
+    // The frame the reference is measured against. F0 = an explicitly named
+    // segment (so even a grouped target is measured against that segment's own
+    // paragraph, not the group base), F1 = a named group, F4 = the patched
+    // location's own segment (framed against its group if it has one), F5 = the
+    // target's frame.
     let frame_para = match fx.frame_method {
+        0 => fx
+            .frame_datum
+            .and_then(|s| module_placements.get(usize::from(s)).copied().flatten())
+            .map_or(target.frame_para, |p| (combined[p.combined].load_offset >> 4) as u16),
         1 => group_base_para(module, module_placements, combined, fx.frame_datum.unwrap_or(0)),
         4 => combined_frame[place.combined],
         _ => target.frame_para,
