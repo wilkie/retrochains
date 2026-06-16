@@ -182,11 +182,27 @@ same sub-paragraph accounting as the runtime-relocation offset fix
 - **Empty DGROUP-tail markers** (`_CVTSEG`…`_BSSEND`, flags=4): `size = count − 1`.
 - **`_OVRDATA_`** (the overlay load list): `size` grows +8 per overlaid module.
 
-So every field is now explained: `para = start >> 4`, `count = start & 0xf`,
-`size = count + len` (with the group/mgmt special cases), `flags = segrec[0x4]`.
-The reverse-engineering is complete — both the functional model (relocation
-table, stubs, FBOV) and the byte-exact table encoding are understood, ready to
-implement.
+So the addressing fields are explained: `para = start >> 4`, `count = start &
+0xf`, `size = count + len` (with the group/mgmt special cases). The `flags` field
+(`segrec[0x4]`) is the one rule not yet pinned for emission: the manager only
+reads its bit1 (overlay-stub), but the full byte-exact values are 0/1/3/4 and
+*not* a clean function of class — e.g. `_STUB_` is paragraph-aligned yet flags=4,
+`_OVRDATA_` is aligned yet flags=0, and within DGROUP `_DATA`=0 but `_CVTSEG`=4.
+Observed values (probe A):
+
+| flags | segments |
+|---|---|
+| 1 | CODE (`_TEXT`/`MAIN_TEXT`/`_OVRTEXT_`), empty `_1STUB_` |
+| 3 | the overlaid module's resident stub (`MOD_TEXT` STUBSEG) |
+| 0 | `_FARDATA` `_FARBSS` `_OVERLAY_` `_OVRDATA_` `_DATA` `_STACK` |
+| 4 | `_STUB_` `_EXTSEG_` `_EMSSEG_` `_VDISKSEG_` `_EXEINFO_`, and the DGROUP tail `_CVTSEG`…`_BSSEND` |
+
+This is the last field whose *computation* rule is open (the value comes from
+TLINK's internal segment typing during SEGDEF/combine). It wants the same
+treatment that cracked `count` — a targeted probe set, or disassembling TLINK's
+SEGDEF processor — and is the remaining decode item before `_EXEINFO_` can be
+emitted byte-exact. The functional model (relocation table, stubs, FBOV) and the
+addressing fields are complete.
 
 ## What a byte-exact implementation needs
 
