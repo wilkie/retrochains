@@ -91,6 +91,30 @@ fn helper_object() -> Vec<u8> {
     omf::emit(&module)
 }
 
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Byte-exact against real TLINK, but install-free: the two objects are
+/// generated in code by `emit`, and the linked EXE's SHA-256 is asserted
+/// against a value captured **once** from TLINK.EXE 4.0 linking those exact
+/// emitted bytes (`PROG.OBJ+HELPER.OBJ`). Re-bless via the oracle (drive real
+/// TLINK on the emitted objects) only if the synthetic objects change.
+#[test]
+fn synthetic_link_is_byte_exact_vs_tlink() {
+    let exe = bcc_tlink::link_objects(
+        &[("PROG.OBJ".into(), prog_object()), ("HELPER.OBJ".into(), helper_object())],
+        &[],
+    )
+    .expect("link synthetic objects");
+    assert_eq!(
+        hex_sha256(&exe),
+        "de1f1db5126bbf6479bf116c9a1f92e29fbf96f04ab873edd747a0698c60dafe",
+        "synthetic SYN.EXE diverged from TLINK",
+    );
+}
+
 /// The linker resolves a cross-object near call: `_helper` lands right after the
 /// 8-byte entry stub in the combined `_TEXT`, so the `e8` displacement is
 /// `8 - 3 = 5` (target minus the address past the call instruction).
