@@ -20,5 +20,12 @@ path = "src/main.rs"
 obj = { path = "../obj" }
 thiserror = "2"
 
+# The idiom gap-miner (`examples/mine.rs`) compiles the fixture corpus with the
+# byte-exact compiler to find the most common unrecognized idioms. Kept to
+# dev-dependencies so the recognizer itself stays lightweight.
+[dev-dependencies]
+bcc = { path = "../bcc" }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+
 [lints]
 workspace = true

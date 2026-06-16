@@ -19,13 +19,16 @@
 
 use std::fmt::Write as _;
 
-/// Which compiler an idiom points at.
+/// A toolchain whose codegen idioms we recognize. Each idiom is tagged with the
+/// *set* of toolchains that emit it (see [`Idiom::toolchains`]); a "shared"
+/// idiom is simply one whose set has more than one member, so there is no
+/// dedicated `Shared` variant. (Compiler *versions* are a future refinement —
+/// model a toolchain as a family plus an optional version, tag idioms at the
+/// coarsest scope they're characteristic of, and resolve family before version.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compiler {
     Bcc,
     Msc,
-    /// Structural / generic — emitted by both (and most era compilers).
-    Shared,
 }
 
 /// How distinctive an idiom is of its compiler (mirrors `specs/FINGERPRINTS.md`).
@@ -79,15 +82,28 @@ pub enum Idiom {
 }
 
 impl Idiom {
-    /// Which compiler this idiom points at.
+    /// The toolchains that emit this idiom. A single-element set is a
+    /// discriminator; a multi-element set is structural (shared) and tells the
+    /// toolchains apart from nothing.
     #[must_use]
-    pub fn compiler(self) -> Compiler {
+    pub fn toolchains(self) -> &'static [Compiler] {
+        use Compiler::{Bcc, Msc};
         match self {
             Idiom::PrologueLocals | Idiom::BccExitJump | Idiom::BccZeroAx | Idiom::CdeclPop1 => {
-                Compiler::Bcc
+                &[Bcc]
             }
-            Idiom::MscChkstkPrologue | Idiom::MscChkstkFrameless | Idiom::MscZeroAx => Compiler::Msc,
-            _ => Compiler::Shared,
+            Idiom::MscChkstkPrologue | Idiom::MscChkstkFrameless | Idiom::MscZeroAx => &[Msc],
+            _ => &[Bcc, Msc],
+        }
+    }
+
+    /// The single toolchain this idiom is exclusive to (its set is a singleton),
+    /// if any — i.e. the toolchain it discriminates in favor of.
+    #[must_use]
+    pub fn exclusive_to(self) -> Option<Compiler> {
+        match self.toolchains() {
+            [only] => Some(*only),
+            _ => None,
         }
     }
 
@@ -227,14 +243,15 @@ pub struct Classification {
 #[must_use]
 pub fn classify(code: &[u8]) -> Classification {
     let matches = recognize(code);
-    let strong = |c: Compiler| {
+    // Evidence for a toolchain = strong idioms it alone emits (exclusive set).
+    let exclusive_strong = |t: Compiler| {
         matches
             .iter()
-            .filter(|m| m.idiom.strength() == Strength::Strong && m.idiom.compiler() == c)
+            .filter(|m| m.idiom.strength() == Strength::Strong && m.idiom.exclusive_to() == Some(t))
             .count()
     };
-    let bcc_evidence = strong(Compiler::Bcc);
-    let msc_evidence = strong(Compiler::Msc);
+    let bcc_evidence = exclusive_strong(Compiler::Bcc);
+    let msc_evidence = exclusive_strong(Compiler::Msc);
     let verdict = match (bcc_evidence > 0, msc_evidence > 0) {
         (true, false) => Verdict::Bcc,
         (false, true) => Verdict::Msc,
@@ -316,7 +333,8 @@ fn take_index(p: &[u8], i: &mut usize) -> u16 {
 pub fn code_of_obj(obj: &[u8]) -> Vec<u8> {
     let mut reader = obj::ObjReader::new(obj);
     let mut lnames: Vec<String> = vec![String::new()];
-    let mut seg_is_code: Vec<bool> = vec![false]; // 1-based, index 0 unused
+    let mut seg_count: u8 = 0;
+    let mut first_code_seg: Option<u8> = None;
     let mut code: Vec<u8> = Vec::new();
     while let Ok(Some(rec)) = reader.next() {
         match rec.ty {
@@ -339,12 +357,15 @@ pub fn code_of_obj(obj: &[u8]) -> Vec<u8> {
                 i += 2; // length
                 let _name = take_index(p, &mut i);
                 let class = take_index(p, &mut i);
+                seg_count += 1;
                 let is_code = lnames.get(usize::from(class)).is_some_and(|c| c == "CODE");
-                seg_is_code.push(is_code);
+                if is_code && first_code_seg.is_none() {
+                    first_code_seg = Some(seg_count);
+                }
             }
             obj::LEDATA_16 => {
                 let p = rec.payload;
-                if p.len() >= 3 && seg_is_code.get(usize::from(p[0])).copied().unwrap_or(false) {
+                if p.len() >= 3 && Some(p[0]) == first_code_seg {
                     let off = usize::from(p[1]) | (usize::from(p[2]) << 8);
                     let data = &p[3..];
                     if off + data.len() > code.len() {
