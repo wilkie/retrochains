@@ -23,9 +23,7 @@ pkg/
 # The provisionable archives live beside their descriptors under oracles/<c>/;
 # the rest (other compilers not yet on the provisioner) sit at the repo root.
 oracles/**/*.zip
-/BC*.zip
-/MSC*.zip
-/LATTICE*.zip
+/*.zip
 .bc2/
 .msc500/
 .lattice2/
