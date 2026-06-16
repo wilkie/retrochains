@@ -1,0 +1,24 @@
+[run]
+exit_code = 0
+stdout_sha256 = "494cef73f4efba70df7f1ee33a0abf1f1caf5c3fb1830902914401533fca3fbf"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "MAIN.EXE"
+size = 524
+sha256 = "2e32c8e92b4348b8e43f086500c34daf4de1b7507c9fb7ef24ad0bb672845eee"
+mtime = "1991-04-23T12:00:00Z"
+
+[[outputs]]
+name = "MAIN.MAP"
+size = 361
+sha256 = "e7c6ae460940735939fd0588b9d6cd057e85d2f34bef80bc7dd8e16057ec348b"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "tlink"
+args = [
+    "/m",
+    "MAIN.OBJ,MAIN.EXE,MAIN.MAP,MYLIB.LIB",
+]
+fake_time = "1991-04-23T12:00:00Z"

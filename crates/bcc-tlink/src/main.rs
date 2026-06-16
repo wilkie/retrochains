@@ -36,7 +36,8 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fields = positional.split(',');
     let obj_field = fields.next().unwrap_or("").trim();
     let exe_field = fields.next().unwrap_or("").trim();
-    // fields[2] = map, fields[3] = libs — not consumed yet.
+    let _map_field = fields.next().unwrap_or("").trim(); // fields[2] = map (unused)
+    let lib_field = fields.next().unwrap_or("").trim(); // fields[3] = libraries
 
     let obj_names: Vec<String> = obj_field
         .split('+')
@@ -54,13 +55,21 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         objects.push((name.clone(), bytes));
     }
 
+    // Libraries (`+`-joined, default extension `.LIB`).
+    let mut libraries = Vec::new();
+    for name in lib_field.split('+').map(str::trim).filter(|s| !s.is_empty()) {
+        let name = with_ext(name, "LIB");
+        let bytes = std::fs::read(&name).map_err(|e| format!("reading {name}: {e}"))?;
+        libraries.push((name, bytes));
+    }
+
     let exe_path = if exe_field.is_empty() {
         default_exe_name(&obj_names[0])
     } else {
         with_ext(exe_field, "EXE")
     };
 
-    let exe = bcc_tlink::link_objects(&objects)?;
+    let exe = bcc_tlink::link_objects(&objects, &libraries)?;
     std::fs::write(&exe_path, &exe).map_err(|e| format!("writing {exe_path}: {e}"))?;
     Ok(())
 }

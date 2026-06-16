@@ -1,0 +1,4 @@
+description = "Standalone TLINK library resolution: MAIN.OBJ calls ADDONE, which is NOT named on the link line — it lives in a member of MYLIB.LIB (built by `tlib MYLIB +ADD`). TLINK searches the library, pulls the defining member, and links it. Inputs MAIN.OBJ + MYLIB.LIB are tracked (provenance: MAIN.ASM/ADD.ASM). tool=tlink gates MAIN.EXE."
+tool = "tlink"
+args = ["/m", "MAIN.OBJ,MAIN.EXE,MAIN.MAP,MYLIB.LIB"]
+inputs = ["MAIN.OBJ", "MYLIB.LIB"]
