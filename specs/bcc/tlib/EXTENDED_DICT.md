@@ -78,18 +78,19 @@ Verified against E3 (1 member, 1 `CSEG` segment, 3 publics `P1/P2/P3`): module
 ## Simple-segment descriptor — fully decoded
 
 For members whose segments are *trivial* (standalone, byte-aligned, no class/
-group — e.g. TASM `CSEG SEGMENT`), the per-member descriptor is (verified across
-E1/E3/T1):
+group — e.g. TASM `CSEG SEGMENT`), the descriptor section is a one-time 3-byte
+prefix `00 00 00` then, per member (verified byte-exact, fixture 4267):
 
 ```
-00 00 00 <modoff:u16> 00 <segcount:u8> <npubs:u8>
+<modoff:u16> 00 <segcount:u8> <npubs:u8>
   segcount × ( 00 <segNameIdx:u8> <packed:u16 = 0x0160> )
-  npubs    × ( <puboff:u16> 00 <page:u8> 00 00 )
+  npubs    × ( <puboff:u16> 00 01 00 00 )
 ```
 
 `modoff`/`puboff` are the module-name and each public's **regular-dict entry
-offset** (which the writer computes); `segNameIdx` indexes the names list. All
-computable — the simple case could be emitted today.
+offset** (which the writer computes); `segNameIdx` indexes the names list; the
+public record's third byte is a constant `01` (not the member page). Implemented
+in `write.rs` (`build_extended_dict`), gated by `4267-tlib-extended-dict`.
 
 ## The hard remaining part: the segment encoding
 

@@ -1,0 +1,20 @@
+[run]
+exit_code = 0
+stdout_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "XLIB.LIB"
+size = 1145
+sha256 = "11d021f16fca6c165aa2045f26958794a45ca8d7ac2f3cf83d67aab943fee77a"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "tlib"
+args = [
+    "XLIB",
+    "/E",
+    "+UA",
+    "+UB",
+]
+fake_time = "1991-04-23T12:00:00Z"

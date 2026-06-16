@@ -1,0 +1,4 @@
+description = "Standalone TLIB extended dictionary (/E): build a library with the /E symbol→member index from two trivial-segment members (tlib XLIB /E +UA +UB). Pins the extended-dict header, empty bucket table, names list (seed + member segments), and the simple-segment per-member descriptors. tool=tlib gates XLIB.LIB."
+tool = "tlib"
+args = ["XLIB", "/E", "+UA", "+UB"]
+inputs = ["UA.OBJ", "UB.OBJ"]

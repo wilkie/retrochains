@@ -1,0 +1,6 @@
+DSEG SEGMENT
+        PUBLIC GAMMA
+GAMMA LABEL BYTE
+        DB 0
+DSEG ENDS
+        END

@@ -24,7 +24,16 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let lib_path = with_ext(&lib_arg, "LIB");
 
     let mut objects = Vec::new();
+    let mut extended = false;
     for op in args {
+        // `/E` requests an extended dictionary; other `/`,`-` options are ignored.
+        if op.eq_ignore_ascii_case("/E") || op.eq_ignore_ascii_case("-E") {
+            extended = true;
+            continue;
+        }
+        if op.starts_with('/') || op.starts_with('-') {
+            continue;
+        }
         let Some(module) = op.strip_prefix('+') else {
             return Err(format!("unsupported operation {op:?} (only +module is implemented)").into());
         };
@@ -38,7 +47,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("no +module operations given".into());
     }
 
-    let lib = bcc_tlib::build_library(&objects)?;
+    let lib = bcc_tlib::build_library(&objects, extended)?;
     std::fs::write(&lib_path, &lib).map_err(|e| format!("writing {lib_path}: {e}"))?;
     Ok(())
 }
