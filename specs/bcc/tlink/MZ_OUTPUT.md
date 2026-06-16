@@ -47,7 +47,9 @@ the *OBJ*'s `0xe9` COMENT, not here). Reproduced verbatim as `TLINK_SIGNATURE`.
 relocation table at **0x3e** (MS LINK packs it right after the header at 0x1e —
 see `../../linkers/DIFFERENCES.md`). Each relocation is a 4-byte `offset:segment`
 pair, where `segment` is the location's **frame paragraph** and `offset` is its
-distance into that frame. The header is then padded with zeros up to 512 bytes.
+distance into that frame. The header — the 28-byte MZ header plus the relocation
+table at `0x3e` — is then padded with zeros up to a **512-byte page boundary**:
+`header_size = ceil((0x3e + 4·e_crlc) / 512) · 512`, minimum one page.
 
 4258/4259 have **zero relocations** (near self-relative calls resolve fully at
 link time). **4260** (`tlink-far-call`) is the first with one: a far `CALL` to an
@@ -56,9 +58,12 @@ link time). **4260** (`tlink-far-call`) is the first with one: a far `CALL` to a
 call's segment word, at `_TEXT` offset 3 in frame 0. DOS adds the load segment to
 that word at load time.
 
-> Open: whether the 512-byte header is a hard minimum or `0x3e + reloc_table`
-> rounded up to a paragraph once relocations exceed ~0x1c2 entries. Needs a
-> fixture with many relocations to pin.
+The padding is a **512-byte page, not a paragraph** — resolved with the
+memory-model capstones. A huge-model `printf` has 114 relocations →
+`0x3e + 114·4 = 0x206` bytes of header content, which rounds to a `0x400`
+(two-page, `e_cparhdr = 0x40`) header, not `0x210`. Near images keep their
+content under one page, which is why every small/near link still shows the
+`0x200` header.
 
 ## Load image & layout
 

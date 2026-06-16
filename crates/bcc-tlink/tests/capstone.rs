@@ -3,10 +3,11 @@
 //! produces, across memory models.
 //!
 //! The object files are small and tracked under `tests/data/`; the model
-//! suffix (`_M`/`_L`) marks the compile model:
+//! suffix marks the compile model:
 //! - `MAIN*.OBJ`  — `int main(void){return 0;}`.
 //! - `HELLO*.OBJ` — `printf("Hello, world\n")`; pulls the stdio chain.
-//! - small (`-ms`, no suffix), medium (`-mm`, `_M`), large (`-ml`, `_L`).
+//! - small (`-ms`, no suffix), medium (`-mm`, `_M`), compact (`-mc`, `_C`),
+//!   large (`-ml`, `_L`), huge (`-mh`, `_H`).
 //!
 //! The startup `C0<m>.OBJ` and runtime `C<m>.LIB` are *not* tracked — they are
 //! large, reproducible artifacts of the provisioned install (`oracle provision
@@ -89,6 +90,20 @@ fn medium_printf_hello_world() {
 }
 
 #[test]
+fn compact_return_zero() {
+    check('C', "MAIN_C.OBJ",
+        "faf2dda41bba82b594db065875ed6cab2cd0694bc145abbadc0920d5a5a7ebb8",
+        Some("d75dc94fd4afbae5fc53b9aa62543eecb9f963bca1c3e70dbfd5f60ec20a8b26"));
+}
+
+#[test]
+fn compact_printf_hello_world() {
+    check('C', "HELLO_C.OBJ",
+        "0265e45d443c9d8175a6d75bdf2931552bcdb0cde9c414ac4aea2132d58c7052",
+        Some("9baf868e24ee547886df5676a9b579a627b2803be2ee4bcd30b68714c7f8097c"));
+}
+
+#[test]
 fn large_return_zero() {
     check('L', "MAIN_L.OBJ",
         "8565f2a373d43da87e849b8fe73e6d6ed1e2f6afbc91ec65c8190aa929f64048",
@@ -100,4 +115,18 @@ fn large_printf_hello_world() {
     check('L', "HELLO_L.OBJ",
         "d2d5c7e03a51dffeed0da98b606c1071324488e6e942469dcf05547b75d5bab6",
         Some("e393c84c5f04402696d495bcc129f9e498ead27ae34910752a668cb32533ec59"));
+}
+
+#[test]
+fn huge_return_zero() {
+    check('H', "MAIN_H.OBJ",
+        "6a730e10ccfed647b1df40e88b128a9721219f0c561d00ffd543f49dd4593d8a",
+        Some("134cd20321d661e3a192d1368229edd67e39ac31c67fba740d1dd4487d8d3fdc"));
+}
+
+#[test]
+fn huge_printf_hello_world() {
+    check('H', "HELLO_H.OBJ",
+        "99aea3945a03d3b7e0abf5ddd48c0382e795328a0b10e138dadf34c48fc1fa95",
+        Some("0ceeea5a8c4f71ec0e8c61bc9ae229ccb89c1b572a340af90acf79804c6eeca5"));
 }

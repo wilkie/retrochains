@@ -6,8 +6,10 @@
 //! - bytes 0x1c..0x22: a fixed 6-byte TLINK signature (constant across links;
 //!   see [`TLINK_SIGNATURE`]).
 //! - byte 0x3e onward: the relocation table (`e_lfarlc` points here).
-//! - the whole header is padded up to 512 bytes (0x20 paragraphs); the load
-//!   image follows.
+//! - the whole header is padded up to a 512-byte page boundary (minimum one
+//!   page); the load image follows. Far models with many runtime relocations
+//!   can push the table past the first page, taking a second (e.g. a huge-model
+//!   program with 114 relocations needs `0x206` bytes → a `0x400` header).
 
 use crate::link::Image;
 
@@ -32,12 +34,11 @@ fn put_u16(buf: &mut [u8], at: usize, v: u16) {
 /// Serialize `image` to MZ executable bytes.
 #[must_use]
 pub fn write(image: &Image) -> Vec<u8> {
-    // The relocation table must fit before the padded header end; for the
-    // self-contained images we handle today it's empty.
+    // The relocation table sits at 0x3e; the header is padded up to a whole
+    // 512-byte page after it (minimum one page). A far-model image with enough
+    // relocations to overrun the first page takes a second.
     let reloc_bytes = image.relocations.len() * 4;
-    let header_size = (RELOC_TABLE_OFFSET + reloc_bytes).max(HEADER_SIZE);
-    // Header is paragraph-aligned (it already is when == HEADER_SIZE).
-    let header_size = header_size.div_ceil(16) * 16;
+    let header_size = (RELOC_TABLE_OFFSET + reloc_bytes).div_ceil(HEADER_SIZE) * HEADER_SIZE;
 
     let file_size = header_size + image.file_image.len();
     let mut out = vec![0u8; file_size];

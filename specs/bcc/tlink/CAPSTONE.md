@@ -65,7 +65,9 @@ In medium/compact/large/huge, code and/or data go *far*: each module gets its
 own code segment `<MODULE>_TEXT` (class CODE) instead of a single shared
 `_TEXT`, and calls/pointers across them are far (location-type-3 fixups +
 runtime relocations). The startup object and runtime library are model-keyed
-(`C0M.OBJ`/`CM.LIB`, `C0L.OBJ`/`CL.LIB`, …). Two things fall out:
+(`C0M.OBJ`/`CM.LIB`, `C0L.OBJ`/`CL.LIB`, …). All five models — small, medium,
+compact, large, huge — link byte-exact (EXE + MAP) for both programs. Three
+things fall out:
 
 - **Byte-packed code.** The per-module CODE segments share a class but no group,
   so by the alignment rule above they pack at their own (byte) alignment — a
@@ -77,9 +79,14 @@ runtime relocations). The startup object and runtime library are model-keyed
   offset` to land on the patched word. (Paragraph-aligned segments — every
   small-model case — have remainder 0, which is why this only surfaced with far
   models.)
-
-Both `return 0` and `printf` link byte-exact — EXE *and* `.MAP` — in small,
-medium, and large models.
+- **The MZ header rounds up to a 512-byte page, not a paragraph.** TLINK pads
+  the header (the 28-byte MZ header + the relocation table at `0x3e`) up to a
+  whole 512-byte page, minimum one page. A huge-model `printf` has 114 runtime
+  relocations → `0x3e + 114*4 = 0x206` bytes of header content, which rounds to
+  a `0x400` (two-page) header. Rounding to a paragraph instead (`0x210`) shifts
+  the whole load image and corrupts the file. Small/near images keep their
+  content under `0x200`, so the bug only appears once the relocation table
+  overruns the first page — see [`MZ_OUTPUT.md`](MZ_OUTPUT.md).
 
 ## Group-relative framing (publics *and* fixups)
 
