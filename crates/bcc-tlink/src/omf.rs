@@ -114,8 +114,19 @@ pub enum ParseError {
     Truncated { record: &'static str },
     #[error("LEDATA references segment {0}, which has no SEGDEF")]
     BadSegmentIndex(u8),
+    #[error("FIXUPP references {kind} thread {num}, which was never defined")]
+    UndefinedThread { kind: &'static str, num: u8 },
     #[error("unsupported OMF record {0:#x} in linker input")]
     Unsupported(u8),
+}
+
+/// FIXUPP thread state: frame and target method+datum pairs a THREAD subrecord
+/// pre-registers, referenced by number (0-3) by later FIXUP subrecords. Threads
+/// persist across the module's FIXUPP records until redefined.
+#[derive(Default)]
+struct Threads {
+    frame: [Option<(u8, Option<u8>)>; 4],
+    target: [Option<(u8, Option<u8>)>; 4],
 }
 
 /// Read a length-prefixed (Pascal) string from the front of `p`, advancing it.
@@ -170,6 +181,7 @@ pub fn parse(bytes: &[u8]) -> Result<Module, ParseError> {
     // The segment index of the most recent LEDATA, so a following FIXUPP
     // knows which segment (and base offset) its data offsets are relative to.
     let mut last_ledata: Option<(u8, u16)> = None;
+    let mut threads = Threads::default();
 
     let mut reader = ObjReader::new(bytes);
     while let Some(rec) = reader.next()? {
@@ -196,7 +208,7 @@ pub fn parse(bytes: &[u8]) -> Result<Module, ParseError> {
             obj::LIDATA_16 => {
                 last_ledata = Some(parse_lidata(&mut module, rec.payload)?);
             }
-            obj::FIXUPP_16 => parse_fixupp(&mut module, rec.payload, last_ledata)?,
+            obj::FIXUPP_16 => parse_fixupp(&mut module, rec.payload, last_ledata, &mut threads)?,
             obj::MODEND_16 => parse_modend(&mut module, rec.payload)?,
             other => return Err(unsupported(other, &rec)),
         }
@@ -399,36 +411,61 @@ fn parse_fixupp(
     module: &mut Module,
     payload: &[u8],
     last_ledata: Option<(u8, u16)>,
+    threads: &mut Threads,
 ) -> Result<(), ParseError> {
-    let (seg_idx, ledata_offset) =
-        last_ledata.ok_or(ParseError::Truncated { record: "FIXUPP (no LEDATA)" })?;
     let mut p = payload;
     while !p.is_empty() {
-        let locat_hi = take_u8(&mut p)?;
-        // THREAD subrecords (bit 7 = 0) are unused by BCC/TASM here.
-        if locat_hi & 0x80 == 0 {
-            return Err(ParseError::Unsupported(obj::FIXUPP_16));
+        let head = take_u8(&mut p)?;
+        // A THREAD subrecord (bit 7 = 0) pre-registers a frame or target
+        // method+datum under a thread number; it carries no fixup itself. MSC
+        // defines all its threads in an early, LEDATA-less FIXUPP record.
+        if head & 0x80 == 0 {
+            let is_frame = (head & 0x40) != 0;
+            let method = (head >> 2) & 0x07;
+            let num = usize::from(head & 0x03);
+            // Methods that name a segment/group/extern carry an index datum.
+            let needs_datum = if is_frame { method <= 2 } else { (method & 0x03) <= 2 };
+            let datum = if needs_datum { Some(take_u8(&mut p)?) } else { None };
+            if is_frame {
+                threads.frame[num] = Some((method, datum));
+            } else {
+                threads.target[num] = Some((method & 0x03, datum));
+            }
+            continue;
         }
+
+        // A FIXUP subrecord patches the most recent LEDATA's segment.
+        let (seg_idx, ledata_offset) =
+            last_ledata.ok_or(ParseError::Truncated { record: "FIXUPP (no LEDATA)" })?;
         let locat_lo = take_u8(&mut p)?;
-        let seg_relative = (locat_hi & 0x40) != 0;
-        let location = (locat_hi >> 2) & 0x0F;
-        let data_record_offset = (u16::from(locat_hi & 0x03) << 8) | u16::from(locat_lo);
+        let seg_relative = (head & 0x40) != 0;
+        let location = (head >> 2) & 0x0F;
+        let data_record_offset = (u16::from(head & 0x03) << 8) | u16::from(locat_lo);
 
         let fix_data = take_u8(&mut p)?;
         let frame_thread = (fix_data & 0x80) != 0;
-        let frame_method = (fix_data >> 4) & 0x07;
         let target_thread = (fix_data & 0x08) != 0;
         let p_bit = (fix_data >> 2) & 0x01;
-        let target_method = (p_bit << 2) | (fix_data & 0x03);
-        if frame_thread || target_thread {
-            return Err(ParseError::Unsupported(obj::FIXUPP_16));
-        }
-        // Frame datum present for methods 0/1/2 (segment/group/extern frame).
-        let frame_datum = if frame_method <= 2 { Some(take_u8(&mut p)?) } else { None };
-        // Target datum present for methods 0/1/2/4/5/6 (i.e. all but reserved).
-        let target_datum = Some(take_u8(&mut p)?);
-        // Explicit-displacement target methods (P=0 → low method 0-2) carry a
-        // 16-bit displacement. BCC/TASM use the no-displacement forms (T4-T6).
+
+        // Frame from a thread, or inline (datum for methods 0/1/2).
+        let (frame_method, frame_datum) = if frame_thread {
+            let num = (fix_data >> 4) & 0x03;
+            threads.frame[usize::from(num)].ok_or(ParseError::UndefinedThread { kind: "frame", num })?
+        } else {
+            let frame_method = (fix_data >> 4) & 0x07;
+            let frame_datum = if frame_method <= 2 { Some(take_u8(&mut p)?) } else { None };
+            (frame_method, frame_datum)
+        };
+
+        // Target from a thread (a 2-bit method) or inline; the P bit (from this
+        // fixup) extends it to T4-T6 and governs the displacement.
+        let (target_low, target_datum) = if target_thread {
+            let num = fix_data & 0x03;
+            threads.target[usize::from(num)].ok_or(ParseError::UndefinedThread { kind: "target", num })?
+        } else {
+            (fix_data & 0x03, Some(take_u8(&mut p)?))
+        };
+        let target_method = (p_bit << 2) | target_low;
         if p_bit == 0 {
             let _disp = take_u16(&mut p)?;
         }
@@ -1135,6 +1172,51 @@ mod emit_tests {
             "COMDEF entry matches MSC's `02 5f 67 00 62 02`",
         );
         assert_semantic_eq(&module, &parse(&bytes).expect("communal object parses"));
+    }
+
+    /// A FIXUP that references a pre-registered target THREAD resolves to the
+    /// same fixup an inline encoding would, with the P bit extending the
+    /// thread's 2-bit method to T6.
+    #[test]
+    fn fixupp_thread_resolves() {
+        let mut b = obj::ObjBuilder::new();
+        b.write_theadr("THR");
+        b.write_lnames(&["", "_TEXT", "CODE"]);
+        b.write_segdef16(0x28, 3, 2, 3, 0); // _TEXT, CODE, byte/public
+        b.write_extdef(&["_ext"]); // extern index 1
+        b.write_fixupp(&[0x08, 0x01]); // THREAD: target 0 = EXTDEF (method 2), datum 1
+        b.write_ledata16(1, 0, &[0xe8, 0, 0]); // call _ext
+        // FIXUP: loc 1 (offset), seg-rel; frame F4 inline; target via thread 0, P=1.
+        b.write_fixupp(&[0xc4, 0x01, 0x4c]);
+        b.write_modend16_no_entry();
+
+        let module = parse(&b.into_bytes()).expect("thread object parses");
+        assert_eq!(
+            module.segdefs[1].fixups,
+            [Fixup {
+                seg: 1,
+                data_offset: 1,
+                seg_relative: true,
+                location: 1,
+                frame_method: 4,
+                frame_datum: None,
+                target_method: 6, // (P=1 << 2) | thread method 2
+                target_datum: Some(1), // _ext, from the thread
+            }],
+        );
+    }
+
+    /// A real MSC object (`int g; int main(){return g;}`) — which carries the
+    /// pre-registered FIXUPP threads and a COMDEF that previously stopped the
+    /// parser — parses and survives the round trip.
+    #[test]
+    fn msc_object_with_threads_roundtrip() {
+        let bytes = include_bytes!("../tests/data/COMM_MSC.OBJ");
+        let original = parse(bytes).expect("MSC object parses");
+        assert_eq!(&original.extdefs[1..], ["__acrtused", "__chkstk", "_g", "_main"]);
+        assert_eq!(original.comdefs, [ComDef { ext_index: 3, far: false, count: 2, element_size: 1 }]);
+        let reparsed = parse(&emit(&original)).expect("re-emitted MSC object parses");
+        assert_semantic_eq(&original, &reparsed);
     }
 
     /// The COMDEF length field: `≤ 0x80` is a bare byte, larger uses the `0x81`
