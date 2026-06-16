@@ -60,6 +60,33 @@ fn dgroup_object() -> Vec<u8> {
     b.emit()
 }
 
+/// A self-contained far-data program: build a far pointer (`ES:BX`) to a global
+/// in its own paragraph-aligned `FAR_DATA` segment, then read through it.
+/// Unlike DGROUP data, the segment word relocates to that segment's *own*
+/// paragraph (not the data group) and the offset is segment-relative.
+///
+/// ```text
+///   b8 .. ..      mov ax, SEG _fdata    ; far segment selector (relocated)
+///   8e c0         mov es, ax
+///   bb .. ..      mov bx, OFFSET _fdata ; offset within FAR_DATA
+///   26 8b 07      mov ax, [es:bx]
+///   b8 00 4c      mov ax, 4c00h
+///   cd 21         int 21h
+/// ```
+fn far_data_object() -> Vec<u8> {
+    let mut b = ModuleBuilder::new("FARDAT");
+    let text = b.code_segment(
+        "_TEXT",
+        &[0xb8, 0, 0, 0x8e, 0xc0, 0xbb, 0, 0, 0x26, 0x8b, 0x07, 0xb8, 0x00, 0x4c, 0xcd, 0x21],
+    );
+    // Paragraph-aligned far segment (align 3) so its base is a clean frame.
+    let far = b.segment("FAR_DATA", "FAR_DATA", 3, 2, &[0x34, 0x12]); // _fdata = 0x1234
+    b.segment_ref(text, 1, 2, true, Frame::Segment(far), far); // SEG _fdata (selector)
+    b.segment_ref(text, 6, 1, true, Frame::Segment(far), far); // OFFSET _fdata
+    b.public("_fdata", far, 0).public("_start", text, 0).entry(text, 0);
+    b.emit()
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
@@ -82,6 +109,24 @@ fn synthetic_link_is_byte_exact_vs_tlink() {
         "de1f1db5126bbf6479bf116c9a1f92e29fbf96f04ab873edd747a0698c60dafe",
         "synthetic SYN.EXE diverged from TLINK",
     );
+}
+
+/// Far-data addressing, byte-exact against TLINK and install-free. The segment
+/// selector relocates to `FAR_DATA`'s own paragraph (it sits right after the
+/// 0x10-byte `_TEXT`, at image paragraph 1, and is fixed up by one MZ
+/// relocation), and the offset is segment-relative (`_fdata` at FAR_DATA+0).
+#[test]
+fn synthetic_far_data_pointer() {
+    let exe = bcc_tlink::link_objects(&[("FARDAT.OBJ".into(), far_data_object())], &[])
+        .expect("link far-data object");
+    assert_eq!(
+        hex_sha256(&exe),
+        "459cd89800d566f2022fecccffd385b9faefc89c927b7896cc2a80fc566db50c",
+        "far-data object diverged from TLINK",
+    );
+    assert_eq!(&exe[0x201..0x203], &[0x01, 0x00], "SEG _fdata = FAR_DATA's own paragraph");
+    assert_eq!(&exe[0x206..0x208], &[0x00, 0x00], "OFFSET _fdata = FAR_DATA+0");
+    assert_eq!(u16::from_le_bytes([exe[6], exe[7]]), 1, "the far segment word is relocated once");
 }
 
 /// DGROUP-relative data addressing, byte-exact against TLINK and install-free.
