@@ -1,0 +1,4 @@
+description = "Standalone TLIB on a BCC-compiled member: archive HELLO.OBJ (bcc -c output, with its TC86 translator/0xE9/0xEA COMENTs) into a library. Confirms TLIB rewrites only the THEADR (hello.c -> HELLO) and copies the rest verbatim — it does NOT strip BCC's COMENTs. Input HELLO.OBJ tracked (provenance HELLO.C). tool=tlib gates HLIB.LIB."
+tool = "tlib"
+args = ["HLIB", "+HELLO"]
+inputs = ["HELLO.OBJ"]

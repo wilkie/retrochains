@@ -1,0 +1,18 @@
+[run]
+exit_code = 0
+stdout_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "HLIB.LIB"
+size = 1024
+sha256 = "d792b74055c7e5310d418b9bde18972b5f444207dc1d5b0b93a1bfa91a6cf03f"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "tlib"
+args = [
+    "HLIB",
+    "+HELLO",
+]
+fake_time = "1991-04-23T12:00:00Z"
