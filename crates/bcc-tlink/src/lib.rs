@@ -13,6 +13,7 @@ pub mod link;
 pub mod map;
 pub mod mz;
 pub mod omf;
+pub mod overlay;
 
 use std::collections::HashSet;
 
