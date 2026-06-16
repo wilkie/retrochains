@@ -54,50 +54,47 @@ Two corroborations rule out simpler hashes:
 - Each member contributes its **public symbols** plus its **module name with a
   trailing `!`** (`ADD` → `ADD!`), hashed by the same function.
 
-## Collision rehash delta (partially characterized)
+## The full algorithm (from TLIB.EXE disassembly)
 
-On a taken bucket TLIB advances by a per-symbol step: `bucket =
-(bucket + delta(name)) % 37`, repeated until free. Forced-collision probes (a
-filler symbol planted on the primary bucket, the target rehashing once) give
-clean single-step deltas. Structure found so far:
+`TLIB.EXE`'s hash routine (BC2, file offset `0x24aa`) computes **all four**
+values in one pass, confirming and completing the probe results. The decisive
+detail — only visible in the code — is that the name is a **Pascal
+(length-prefixed) string** and the two scan pointers cover *different* ranges:
 
-- **The delta ignores the *last* character**: `delta(name) = g(name[:-1])`.
-  Evidence: `AD`, `AE`, `AF` all give delta 17 (vary only the last char); a
-  single char gives a constant delta **33** (its prefix is empty, so
-  `g("") = 33`).
-- **`g` of a single prefix char** `c` (confirmed on 16 letters):
+- the **backward** pointer starts at `name + len` and walks down to `name[1]`,
+  so it folds `charL, …, char1` — every char, reversed, **without** the length
+  byte;
+- the **forward** pointer starts at `name[0]` — the **length byte** — and the
+  loop runs `len` times, so it folds `[len, char1, …, char(len-1)]` — the length
+  byte plus every char **except the last**.
 
-  ```
-  g(c) = c - 0x30 - 0x10 * ((c >> 3) & 1)
-  ```
+Each byte is folded `acc = rotate(acc, 2) ^ (byte | 0x20)` (the `| 0x20` hits
+the length byte too). The four results:
 
-  i.e. subtract `0x30`, and `0x10` more when bit 3 of `c` is set: `A`–`G`→17–23,
-  `P`–`R`→32–34 (bit3 clear, `c-0x30`); `K`,`M`,`O`→11,13,15 and `X`,`Y`,`Z`→
-  24,25,26 (bit3 set, `c-0x40`). Verified by single-step forced-collision
-  probes (`cQ`/`cZ` targets).
+| value        | bytes folded            | rotate | reduce                |
+|--------------|-------------------------|--------|-----------------------|
+| bucket index | `charL … char1`         | `ror`  | `% 37`                |
+| bucket delta | `[len] char1 … char(L-1)`| `ror` | `% 37`, →1 if 0       |
+| block index  | `[len] char1 … char(L-1)`| `rol` | `% nblocks`           |
+| block delta  | `charL … char1`         | `rol`  | `% nblocks`, →1 if 0  |
 
-Clean `g(prefix)` data measured (single-step, accounting for the planted filler):
+On a collision: `bucket = (bucket + bucket_delta) % 37`, retried until free; if
+the probe cycles back to the original bucket the block advances by `block_delta`
+(`block = (block + block_delta) % nblocks`).
 
-| len | observations |
-|----|---------------|
-| 0  | `g("") = 33` |
-| 1  | A17 B18 C19 D20 E21 F22 G23 K11 M13 O15 P32 Q33 R34 X24 Y25 Z26 |
-| 2  | AA9 AB6 AC7 AD12 BA2 BB36 BC1 CA32 CB29 DA15 |
-| 3  | MAA16 ABA16 AAB29 BAA36 |
-| 4  | ABCD2 |
+This explains the probe puzzles exactly:
 
-The **multi-character fold of `g` is not yet pinned**: it isn't a single-
-accumulator rotate-xor/add (an exhaustive search over rol/ror × widths ×
-encodings × inits finds nothing), and the single-char form is a piecewise
-arithmetic subtraction rather than a hash step — so `g` is likely a 2-input or
-bit-structured computation. The 2-char table above is the data to fit it; the
-recurrence between `g("A")` and `g("AA")/g("AB")/…` is the next thing to crack.
+- The **bucket delta ignores the last char** because the forward scan stops one
+  short of it — `AD`/`AE`/`AF` all fold `[2, 'A']` → 17.
+- A **single char's delta is constant 33** because the forward scan then folds
+  only the length byte: `ror2(0) ^ (0x01 | 0x20) = 0x21 = 33`.
 
-## Open — block index (multi-block dictionaries)
+Both the delta and `g(prefix)` formulas reproduce **every** measured data point
+(verified in `dict.rs` tests). The earlier "`g(c) = c-0x30-0x10·bit3`" was a
+correct-but-opaque fit to this; the real form is the length-byte fold above.
 
-All probes so far fit one 512-byte block (`block = 0`). A library large enough
-to need ≥2 blocks is required to derive the block hash and block-rehash delta.
-
-These gate byte-exact reproduction of *colliding* / *large* libraries; small
-collision-free archives (e.g. fixture 4262's `MYLIB.LIB`) are fully determined
-by the bucket hash + sorted insertion + the layout above.
+Reproduced in `crates/bcc-tlib/src/dict.rs` (`bucket`, `bucket_delta`, `block`,
+`block_delta`). With sorted insertion + the block layout, the dictionary is now
+fully determined — including colliding and multi-block libraries (the latter
+still wants one captured ≥2-block lib as a belt-and-suspenders check, but the
+code is unambiguous).
