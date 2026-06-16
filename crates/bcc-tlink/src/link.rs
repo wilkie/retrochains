@@ -164,8 +164,11 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
         let next = class_rank.len();
         class_rank.entry(class.clone()).or_insert(next);
     }
+    // `_EXEINFO_` (the generated overlay segment table) is placed last within its
+    // class — TLINK appends it after the pulled overlay-manager segments.
+    let last_in_class: Vec<bool> = combined.iter().map(|c| c.name == "_EXEINFO_").collect();
     let mut order: Vec<usize> = (0..combined.len()).collect();
-    order.sort_by_key(|&i| (class_rank[&classes[i]], i));
+    order.sort_by_key(|&i| (class_rank[&classes[i]], last_in_class[i], i));
     let mut remap = vec![0usize; combined.len()];
     for (new_pos, &old) in order.iter().enumerate() {
         remap[old] = new_pos;
