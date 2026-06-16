@@ -427,13 +427,26 @@ pub fn classify(code: &[u8]) -> Classification {
     };
     let bcc_evidence = exclusive_strong(Compiler::Bcc);
     let msc_evidence = exclusive_strong(Compiler::Msc);
-    let verdict = match (bcc_evidence > 0, msc_evidence > 0) {
-        (true, false) => Verdict::Bcc,
-        (false, true) => Verdict::Msc,
-        (true, true) => Verdict::Ambiguous,
-        (false, false) => Verdict::Unknown,
-    };
-    Classification { verdict, bcc_evidence, msc_evidence, matches }
+    Classification { verdict: decide_verdict(bcc_evidence, msc_evidence), bcc_evidence, msc_evidence, matches }
+}
+
+/// How many times one toolchain's evidence must exceed the other's to win
+/// outright. A real program accrues a few coincidental matches for the *wrong*
+/// compiler (data bytes that happen to look like an idiom), so a verdict needs
+/// clear dominance, not just a nonzero lead — e.g. the JETPACK game scores 61
+/// BCC idioms to 2 MSC, which is BCC, not "ambiguous".
+const DOMINANCE: usize = 3;
+
+fn decide_verdict(bcc: usize, msc: usize) -> Verdict {
+    if bcc == 0 && msc == 0 {
+        Verdict::Unknown
+    } else if bcc > msc && bcc >= msc.saturating_mul(DOMINANCE) {
+        Verdict::Bcc
+    } else if msc > bcc && msc >= bcc.saturating_mul(DOMINANCE) {
+        Verdict::Msc
+    } else {
+        Verdict::Ambiguous
+    }
 }
 
 /// Fraction of `code` bytes the idiom catalog explained (0.0–1.0).
@@ -602,6 +615,19 @@ mod tests {
     }
 
     // --- MSC samples (real bytes from our byte-exact MSC compiler) ---
+
+    /// The verdict needs clear dominance, not just a nonzero lead — so a real
+    /// program's coincidental wrong-compiler matches don't force "ambiguous".
+    #[test]
+    fn verdict_margin() {
+        use super::Verdict::{Ambiguous, Bcc, Msc, Unknown};
+        assert_eq!(decide_verdict(0, 0), Unknown);
+        assert_eq!(decide_verdict(1, 0), Bcc);
+        assert_eq!(decide_verdict(61, 2), Bcc); // the JETPACK game: dominant despite noise
+        assert_eq!(decide_verdict(0, 2), Msc);
+        assert_eq!(decide_verdict(2, 2), Ambiguous);
+        assert_eq!(decide_verdict(5, 2), Ambiguous); // a lead, but not 3x dominance
+    }
 
     /// `int z(void){return 0;}` (MZ.OBJ): the frameless chkstk prologue then
     /// MSC's `sub ax,ax` zero — both MSC-distinctive.

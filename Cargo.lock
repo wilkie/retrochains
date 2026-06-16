@@ -358,6 +358,7 @@ dependencies = [
  "obj",
  "thiserror",
  "toml",
+ "zip",
 ]
 
 [[package]]

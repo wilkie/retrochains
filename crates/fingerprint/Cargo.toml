@@ -26,6 +26,9 @@ thiserror = "2"
 [dev-dependencies]
 bcc = { path = "../bcc" }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+# The generalization guard (`tests/jetpack.rs`) reads JETPACK.EXE out of the
+# gitignored `jetpak15.zip` at the repo root, skipping when it isn't present.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true
