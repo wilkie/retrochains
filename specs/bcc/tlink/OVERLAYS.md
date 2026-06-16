@@ -115,11 +115,39 @@ Confirmed by diffing two programs (1 overlay vs 2 overlays, varied call counts):
   (probe B); `_OVRTEXT_`=0xA; `_TEXT` (C0)=0. So `count` tracks neither call
   count nor relocation count nor OBJ fixup count.
 
-**Still opaque (needs OVRMAN disassembly, not more diffing):** the `count`
-derivation for code segments, and the DGROUP-tail entries (`_CVTSEG`…`_BSSEND`)
-whose `size`/`count` are small irregular values (1/2, 0xD/0xE, 3/4) unrelated to
-their lengths. The next step is to disassemble `OVRMAN`'s `__SEGTABLE__` reader
-(in `_OVRTEXT_`) to learn what each field actually feeds.
+### What the table is *for* (from disassembling OVRMAN)
+
+Disassembling the manager (`__INITMODULES` at `_OVRTEXT_:0x2A0`, the relocator at
+`0x426`) settled the semantics:
+
+- **`__SEGTABLE__` is a relocation table.** When an overlaid segment is loaded,
+  its inter-segment references hold *indices* into `__SEGTABLE__`, not real
+  paragraphs. The relocator masks each reference value to an 8-byte boundary
+  (`and di,-8`), looks it up in the table (`mov ds,<segtab frame>; mov dx,[di]`),
+  and writes back `entry.para`. Bit 0 of the reference value flags a special
+  `MOV ax,imm`-instruction patch. *This* is why every resident segment gets one
+  8-byte entry in load order — the entry index `×8` is its overlay "selector".
+- **`__INITMODULES`** walks the table (`si` = `0xC0` → `0x188`, step 8) and acts
+  only on entries with **`flags & 0x2`** (the overlay-stub bit): it points the
+  stub's handler word (stub:0x18) at `__READOVRDISK`, adds the overlay file base
+  into the stub's file-offset words (stub:0x4/0x6), and keys off the `0xFF`
+  marker at stub:0x1A.
+- **Field usage:** only `para` (+0) and `flags` (+4) are read for ordinary
+  entries; `size` (+2) is read **only** for stub entries (an `!= 0` test);
+  **`count` (+6) is never read.** So `flags` is the one functional classifier:
+  bit0 = code/relocatable, bit1 = overlay stub, bit2 = OVRINFO-mgmt.
+
+### The remaining byte-exact gap
+
+`size`/`count` for non-stub segments are pure TLINK bookkeeping the manager
+ignores — but a byte-exact EXE still needs them. SEGDEF length equals the
+LEDATA-filled length (no uninitialized tail), so the `size = len + count` slack
+(`+9` for MAIN_TEXT, `+0xA` for `_OVRTEXT_`, `+0` for C0's `_TEXT`; the irregular
+DGROUP-tail values) is *added by TLINK* from something not visible in the link
+output or the manager. Pinning these last cosmetic fields needs TLINK's own
+table writer disassembled (a separate effort from OVRMAN) — but the functional
+model (relocation table + stubs + flags) is now fully understood, which is what
+the implementation actually builds against.
 
 ## What a byte-exact implementation needs
 
