@@ -59,6 +59,22 @@ pub fn link_objects(
     Ok(mz::write(&link_image(objects, libraries)?))
 }
 
+/// Like [`link_objects`], but a module may pull in a default library it names
+/// via a class-`0x9F` COMENT (e.g. MSC's `SLIBCE`): `load_default_lib` is called
+/// with that name and returns the library's bytes, searched after the
+/// command-line `libraries`. See `specs/bcc/tlink/LIBRARY_RESOLUTION.md`.
+///
+/// # Errors
+/// Same as [`link_objects`].
+pub fn link_objects_with_default_libs(
+    objects: &[(String, Vec<u8>)],
+    libraries: &[(String, Vec<u8>)],
+    load_default_lib: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<Vec<u8>, Error> {
+    let modules = resolve(objects, libraries, &[], load_default_lib)?;
+    Ok(mz::write(&link::link(&modules, &std::collections::HashMap::new())?))
+}
+
 /// Link with VROOMM overlays: the modules after `/o` (named in `overlaid`, by
 /// object filename) are moved into an appended `FBOV` overlay area behind
 /// `INT 3F` stubs, with the disk-overlay manager force-pulled from `OVERLAY.LIB`.
@@ -72,7 +88,7 @@ pub fn link_overlay(
     overlaid: &HashSet<String>,
     exe_name: &str,
 ) -> Result<Vec<u8>, Error> {
-    let mut modules = resolve(objects, libraries, &[overlay::MANAGER_ROOT])?;
+    let mut modules = resolve(objects, libraries, &[overlay::MANAGER_ROOT], &|_| None)?;
 
     // Transform each overlaid object's code into a stub; collect the overlays
     // (for the FBOV area) and the per-symbol thunk offsets (for the redirect).
@@ -275,6 +291,20 @@ pub fn link_image(
     Ok(link::link(&resolved_modules(objects, libraries)?, &std::collections::HashMap::new())?)
 }
 
+/// Like [`link_image`] but honors class-`0x9F` default-library directives via
+/// `load_default_lib` (see [`link_objects_with_default_libs`]).
+///
+/// # Errors
+/// Same as [`link_image`].
+pub fn link_image_with_default_libs(
+    objects: &[(String, Vec<u8>)],
+    libraries: &[(String, Vec<u8>)],
+    load_default_lib: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<link::Image, Error> {
+    let modules = resolve(objects, libraries, &[], load_default_lib)?;
+    Ok(link::link(&modules, &std::collections::HashMap::new())?)
+}
+
 /// Parse the named objects and pull the library members they require, returning
 /// the modules in final link order (named objects first, then pulled members in
 /// library order). Exposed for tools that inspect the linked module set.
@@ -285,12 +315,15 @@ pub fn resolved_modules(
     objects: &[(String, Vec<u8>)],
     libraries: &[(String, Vec<u8>)],
 ) -> Result<Vec<Module>, Error> {
-    resolve(objects, libraries, &[])
+    resolve(objects, libraries, &[], &|_| None)
 }
 
 /// Like [`resolved_modules`] but seeds resolution with extra external references
-/// that aren't named by any object — used to force-pull the overlay manager
-/// from `OVERLAY.LIB` when `/o` is active (TLINK injects these references).
+/// that aren't named by any object (used to force-pull the overlay manager when
+/// `/o` is active), and takes `load_default_lib` — invoked with a library name a
+/// module requests via a class-`0x9F` COMENT (e.g. MSC's `SLIBCE`) when the
+/// command-line libraries can't satisfy a symbol. Return the named library's
+/// bytes, or `None` to skip it. Pass `&|_| None` for no default-library search.
 ///
 /// # Errors
 /// Same as [`resolved_modules`].
@@ -298,6 +331,7 @@ pub fn resolve(
     objects: &[(String, Vec<u8>)],
     libraries: &[(String, Vec<u8>)],
     forced: &[&str],
+    load_default_lib: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<Vec<Module>, Error> {
     let mut modules = Vec::with_capacity(objects.len());
     for (name, bytes) in objects {
@@ -307,6 +341,8 @@ pub fn resolve(
     }
 
     // Parse each library's members up front; pull them in on demand below.
+    // Default libraries requested via COMENT are loaded lazily and appended, so
+    // they're searched after the command-line libraries.
     let mut members: Vec<Option<Module>> = Vec::new();
     for (name, bytes) in libraries {
         let parsed =
@@ -320,6 +356,7 @@ pub fn resolve(
     // placement can follow library order, not pull order.
     let object_count = modules.len();
     let mut pulled_keys: Vec<usize> = Vec::new();
+    let mut tried_default_libs: HashSet<String> = HashSet::new();
     loop {
         let defined: HashSet<&str> = modules.iter().flat_map(defined_in).collect();
         let mut unresolved: HashSet<&str> = modules
@@ -343,10 +380,28 @@ pub fn resolve(
                 break;
             }
         }
-        if !pulled {
-            // Nothing left to satisfy the remaining externals — let the layout
-            // pass surface the unresolved symbol with its name.
+        if pulled {
+            continue;
+        }
+        // No command-line member resolved a remaining external. Before giving
+        // up, load any default libraries the modules request (their members are
+        // appended, so they rank after the command-line libraries), then retry.
+        let wanted: Vec<String> = modules
+            .iter()
+            .flat_map(|m| m.default_libs.iter())
+            .filter(|n| !tried_default_libs.contains(*n))
+            .cloned()
+            .collect();
+        if wanted.is_empty() {
             break;
+        }
+        for name in wanted {
+            tried_default_libs.insert(name.clone());
+            if let Some(bytes) = load_default_lib(&name) {
+                let parsed = archive::members(&bytes)
+                    .map_err(|source| Error::Library { lib: name.clone(), source })?;
+                members.extend(parsed.into_iter().map(Some));
+            }
         }
     }
 

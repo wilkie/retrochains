@@ -89,7 +89,11 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let image = bcc_tlink::link_image(&objects, &libraries)?;
+    // A module may name a default library (a class-0x9F COMENT, e.g. MSC's
+    // `SLIBCE`); load it from disk with the default `.LIB` extension, searched
+    // after the command-line libraries.
+    let load_default_lib = |name: &str| std::fs::read(with_ext(name, "LIB")).ok();
+    let image = bcc_tlink::link_image_with_default_libs(&objects, &libraries, &load_default_lib)?;
     std::fs::write(&exe_path, bcc_tlink::mz::write(&image))
         .map_err(|e| format!("writing {exe_path}: {e}"))?;
 

@@ -53,7 +53,7 @@ exact hashing. (The dictionary remains relevant if we ever reimplement TLIB.)
 > oracle's `BIN/` — `tlib MYLIB +ADD`) and tracked alongside the `.ASM`
 > provenance, like the standalone OBJ inputs.
 
-## Default-library COMENT (class `0x9F`) — observed, not yet implemented
+## Default-library COMENT (class `0x9F`)
 
 TLINK also pulls libraries a translation unit *requests of its own accord*, via
 a **default-library directive**: a `COMENT` record of class `0x9F` whose body is
@@ -81,11 +81,20 @@ TLINK could read), not a different object format.
 debug/dependency COMENTs — no `0x9F`. Borland names the runtime explicitly on the
 link line (`CS.LIB`), so this directive never fires for the BCC fixtures.
 
-**Our gap.** `omf::parse` drops every COMENT (`omf.rs`: *"comments don't affect
-linking"*) — correct for the BCC pool, but it means we'd silently ignore a
-`0x9F` directive. To consume objects that rely on one (MSC's, or a Borland object
-that does emit it), parse class `0x9F` into a per-module default-library list and
-feed those names into the library-pull set (searched after the command-line
-libraries, before declaring a symbol unresolved). The bytes are already in hand
-— `crates/bcc-tlink/tests/data/COMM_MSC.OBJ` is a tracked MSC object whose `0x9F`
-body is `SLIBCE`.
+**What we implement.** `omf::parse` collects class-`0x9F` COMENT bodies into
+`Module::default_libs` (and `omf::emit` re-emits them). When the command-line
+libraries leave a symbol unresolved, [`resolve`](../../../crates/bcc-tlink/src/lib.rs)
+loads each requested default library through a caller-supplied
+`load_default_lib(name) -> Option<Vec<u8>>` and appends its members — so they're
+searched *after* the command-line libraries, and a default library named by a
+*pulled* member is honored too (the wanted set is recomputed each pass). The CLI
+loader reads `<name>.LIB` from disk; `link_objects`/`link_image` pass a no-op
+loader (the BCC pool names no default libraries, so nothing changes there). A
+library that can't be loaded is simply skipped — the unresolved symbol then
+surfaces with its name, rather than TLINK's eager `Unable to open …` fatal.
+
+Verified by `synthetic_default_library_directive_pulls`: an object that names
+`MYRT` and references a symbol only `MYRT.LIB` defines links *only* when the
+loader supplies it, and the result is byte-identical to naming `MYRT.LIB` on the
+command line. A real example is tracked at
+`crates/bcc-tlink/tests/data/COMM_MSC.OBJ` (`0x9F` body `SLIBCE`).

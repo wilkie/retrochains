@@ -107,6 +107,56 @@ fn packed_code_object() -> Vec<u8> {
     b.emit()
 }
 
+/// An app object that references `_rt` but defines it nowhere, and names a
+/// default library `MYRT` (a class-0x9F COMENT) to satisfy it — the way MSC
+/// objects name `SLIBCE`.
+fn app_needs_default_lib() -> Vec<u8> {
+    let mut b = ModuleBuilder::new("APP");
+    let text = b.code_segment("_TEXT", &[0xe8, 0, 0, 0xb8, 0x00, 0x4c, 0xcd, 0x21]);
+    b.near_call(text, 1, "_rt");
+    b.default_lib("MYRT");
+    b.public("_start", text, 0).entry(text, 0);
+    b.emit()
+}
+
+/// A `MYRT.LIB` archive whose one member defines `_rt`.
+fn rt_library() -> Vec<u8> {
+    let mut b = ModuleBuilder::new("RT");
+    let text = b.code_segment("_TEXT", &[0xb8, 0x07, 0x00, 0xc3]); // mov ax,7; ret
+    b.public("_rt", text, 0);
+    bcc_tlib::build_library(&[("RT".to_string(), b.emit())], false).expect("build MYRT.LIB")
+}
+
+/// A class-0x9F default-library directive is honored: the linker pulls the named
+/// library (loaded on demand) to satisfy an otherwise-unresolved symbol, and the
+/// result is identical to naming that library on the command line.
+#[test]
+fn synthetic_default_library_directive_pulls() {
+    let app = app_needs_default_lib();
+    let lib = rt_library();
+
+    // Without honoring the directive (and no command-line library), `_rt` is
+    // unresolved and the link fails.
+    assert!(bcc_tlink::link_objects(&[("APP.OBJ".into(), app.clone())], &[]).is_err());
+
+    // The directive pulls MYRT (provided by the loader) and resolves `_rt`,
+    // which lands right after the 8-byte `_TEXT`: the near call resolves to 5.
+    let via_directive = bcc_tlink::link_objects_with_default_libs(
+        &[("APP.OBJ".into(), app.clone())],
+        &[],
+        &|name| name.eq_ignore_ascii_case("MYRT").then(|| lib.clone()),
+    )
+    .expect("default-library directive resolves _rt");
+    assert_eq!(&via_directive[0..2], b"MZ");
+    assert_eq!(&via_directive[0x201..0x203], &[0x05, 0x00], "_rt resolved via default library");
+
+    // Pulling via the directive is byte-identical to naming MYRT explicitly.
+    let via_cmdline =
+        bcc_tlink::link_objects(&[("APP.OBJ".into(), app)], &[("MYRT.LIB".into(), lib)])
+            .expect("explicit library resolves _rt");
+    assert_eq!(via_directive, via_cmdline, "directive pull equals command-line pull");
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()

@@ -103,6 +103,9 @@ pub struct Module {
     pub extdefs: Vec<String>,
     /// Communal (tentative) definitions, each pointing at its name in `extdefs`.
     pub comdefs: Vec<ComDef>,
+    /// Default libraries the module requests via class-`0x9F` COMENTs (e.g. MSC's
+    /// `SLIBCE`). The linker searches these after the command-line libraries.
+    pub default_libs: Vec<String>,
     pub entry: Option<Entry>,
 }
 
@@ -190,11 +193,15 @@ pub fn parse(bytes: &[u8]) -> Result<Module, ParseError> {
                 let mut p = rec.payload;
                 module.name = take_pstr(&mut p)?;
             }
-            // COMENTs don't affect linking for the BCC pool. One exception we
-            // don't yet honor: a class-0x9F default-library directive, which
-            // TLINK acts on (e.g. MSC's `SLIBCE`). See
+            // Most COMENTs don't affect linking; the exception is a class-0x9F
+            // default-library directive (e.g. MSC's `SLIBCE`), whose body is a
+            // library name the linker also searches. See
             // specs/bcc/tlink/LIBRARY_RESOLUTION.md.
-            obj::COMENT => {}
+            obj::COMENT => {
+                if rec.payload.len() > 2 && rec.payload[1] == 0x9f {
+                    module.default_libs.push(String::from_utf8_lossy(&rec.payload[2..]).into_owned());
+                }
+            }
             obj::LNAMES => {
                 let mut p = rec.payload;
                 while !p.is_empty() {
@@ -593,6 +600,14 @@ pub fn emit(module: &Module) -> Vec<u8> {
     let mut b = obj::ObjBuilder::new();
     b.write_theadr(&module.name);
 
+    // Default-library directives (class 0x9F): flags 0x00, class 0x9F, then the
+    // library name as raw bytes (no length prefix).
+    for lib in &module.default_libs {
+        let mut payload = vec![0x00u8, 0x9f];
+        payload.extend_from_slice(lib.as_bytes());
+        b.write_coment(&payload);
+    }
+
     // Rebuild the LNAMES table: a leading empty name (BCC's convention), then
     // every distinct segment name, class, and group name in first-use order.
     // `name_idx` returns the 1-based index `parse` will see (its index-0
@@ -853,6 +868,14 @@ impl ModuleBuilder {
         self
     }
 
+    /// Request a default library by name (a class-`0x9F` COMENT) — the linker
+    /// searches it after the command-line libraries, the way MSC ties its
+    /// objects to `SLIBCE`.
+    pub fn default_lib(&mut self, name: &str) -> &mut Self {
+        self.module.default_libs.push(name.to_string());
+        self
+    }
+
     /// Register a NEAR communal (tentative) definition of `length` bytes — a
     /// file-scope `int g;` style global. The name joins the external-name index
     /// space; returns its index (usable as a fixup target).
@@ -1025,6 +1048,7 @@ mod emit_tests {
         assert_eq!(a.pubdefs, b.pubdefs, "pubdefs");
         assert_eq!(a.extdefs, b.extdefs, "extdefs");
         assert_eq!(a.comdefs, b.comdefs, "comdefs");
+        assert_eq!(a.default_libs, b.default_libs, "default_libs");
         assert_eq!(a.entry, b.entry, "entry");
     }
 
@@ -1114,6 +1138,7 @@ mod emit_tests {
             }],
             extdefs: vec![String::new(), "_helper".into()],
             comdefs: Vec::new(),
+            default_libs: Vec::new(),
             entry: Some(Entry { base_segment: 1, offset: 0 }),
         };
         let reparsed = parse(&emit(&module)).expect("emitted object parses");
