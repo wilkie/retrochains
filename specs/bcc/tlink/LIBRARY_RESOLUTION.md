@@ -52,3 +52,40 @@ exact hashing. (The dictionary remains relevant if we ever reimplement TLIB.)
 > The library inputs are built by the real **TLIB.EXE** (now shipped in the BC2
 > oracle's `BIN/` — `tlib MYLIB +ADD`) and tracked alongside the `.ASM`
 > provenance, like the standalone OBJ inputs.
+
+## Default-library COMENT (class `0x9F`) — observed, not yet implemented
+
+TLINK also pulls libraries a translation unit *requests of its own accord*, via
+a **default-library directive**: a `COMENT` record of class `0x9F` whose body is
+a library name. The linker adds that name to the set it searches, after the
+libraries named on the command line.
+
+This is how a compiler ties its objects to its runtime without the user naming
+the library. **MSC** stamps one into every object — `COMENT 88 … 9F "SLIBCE"`
+for `/AS` (the small-model C runtime), `LLIBCE` for large, etc. (see
+`../../MSC_FINGERPRINTS.md`). Real TLINK honours it: handed a lone MSC object it
+parses the whole module — threads, COMDEF, and all — and then fails not on the
+*format* but with
+
+```
+Fatal: Unable to open file 'slibce.lib'
+```
+
+i.e. it got far enough to act on the embedded directive and go looking for the
+Microsoft runtime. So the OMF *format* is portable across the two toolchains;
+what a complete MSC program needs is the MS C library (itself an OMF `.LIB`
+TLINK could read), not a different object format.
+
+**BCC 2.0 does not use this.** The compile-only objects we track (`MAIN.OBJ`,
+`HELLO.OBJ`) carry only class `0x00` (`TC86 …`) and Borland's `0xE8`/`0xE9`/`0xEA`
+debug/dependency COMENTs — no `0x9F`. Borland names the runtime explicitly on the
+link line (`CS.LIB`), so this directive never fires for the BCC fixtures.
+
+**Our gap.** `omf::parse` drops every COMENT (`omf.rs`: *"comments don't affect
+linking"*) — correct for the BCC pool, but it means we'd silently ignore a
+`0x9F` directive. To consume objects that rely on one (MSC's, or a Borland object
+that does emit it), parse class `0x9F` into a per-module default-library list and
+feed those names into the library-pull set (searched after the command-line
+libraries, before declaring a symbol unresolved). The bytes are already in hand
+— `crates/bcc-tlink/tests/data/COMM_MSC.OBJ` is a tracked MSC object whose `0x9F`
+body is `SLIBCE`.

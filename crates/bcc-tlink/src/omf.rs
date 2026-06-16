@@ -190,7 +190,11 @@ pub fn parse(bytes: &[u8]) -> Result<Module, ParseError> {
                 let mut p = rec.payload;
                 module.name = take_pstr(&mut p)?;
             }
-            obj::COMENT => { /* comments don't affect linking */ }
+            // COMENTs don't affect linking for the BCC pool. One exception we
+            // don't yet honor: a class-0x9F default-library directive, which
+            // TLINK acts on (e.g. MSC's `SLIBCE`). See
+            // specs/bcc/tlink/LIBRARY_RESOLUTION.md.
+            obj::COMENT => {}
             obj::LNAMES => {
                 let mut p = rec.payload;
                 while !p.is_empty() {
