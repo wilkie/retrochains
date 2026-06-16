@@ -217,6 +217,25 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
     }
     let mem_size = cursor;
 
+    // The canonical frame paragraph of each combined segment: the base of the
+    // group it belongs to (so a reference to a grouped segment is framed
+    // against the group, e.g. DGROUP), or the segment's own load paragraph when
+    // ungrouped. Used by both fixup framing and the `.MAP` public listing.
+    let mut group_base: Vec<Option<u16>> = vec![None; group_names.len()];
+    for (ci, &gid) in group_of.iter().enumerate() {
+        if let Some(gid) = gid {
+            let para = (combined[ci].load_offset >> 4) as u16;
+            group_base[gid] = Some(group_base[gid].map_or(para, |b| b.min(para)));
+        }
+    }
+    let combined_frame: Vec<u16> = (0..combined.len())
+        .map(|ci| {
+            group_of[ci]
+                .and_then(|g| group_base[g])
+                .unwrap_or((combined[ci].load_offset >> 4) as u16)
+        })
+        .collect();
+
     // Pass 3 — resolve public symbols to (combined segment, absolute address).
     // The combined segment is kept so far fixups can recover the target's
     // frame paragraph.
@@ -252,9 +271,16 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
         for (seg_idx, seg) in module.segdefs.iter().enumerate().skip(1) {
             let Some(place) = placements[m][seg_idx] else { continue };
             for fx in &seg.fixups {
-                if let Some(reloc) =
-                    apply_fixup(&mut combined, place, fx, &placements[m], module, &symbols, &absolutes)?
-                {
+                if let Some(reloc) = apply_fixup(
+                    &mut combined,
+                    place,
+                    fx,
+                    &placements[m],
+                    module,
+                    &symbols,
+                    &absolutes,
+                    &combined_frame,
+                )? {
                     relocations.push(reloc);
                 }
             }
@@ -297,25 +323,7 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
         })
         .collect();
     // A public defined in a grouped segment (e.g. DGROUP) is reported relative
-    // to the group's base paragraph, not its own segment's paragraph. Build a
-    // per-combined-segment frame paragraph: the group base where grouped, else
-    // the segment's own load paragraph.
-    let mut combined_frame: Vec<u16> =
-        combined.iter().map(|c| (c.load_offset >> 4) as u16).collect();
-    // Per-group base paragraph: the lowest load paragraph among its segments.
-    let mut group_base: Vec<Option<u16>> = vec![None; group_names.len()];
-    for (ci, &gid) in group_of.iter().enumerate() {
-        if let Some(gid) = gid {
-            let para = (combined[ci].load_offset >> 4) as u16;
-            group_base[gid] = Some(group_base[gid].map_or(para, |b| b.min(para)));
-        }
-    }
-    for (ci, &gid) in group_of.iter().enumerate() {
-        if let Some(base) = gid.and_then(|g| group_base[g]) {
-            combined_frame[ci] = base;
-        }
-    }
-
+    // to the group's base paragraph (see `combined_frame`, built after layout).
     let mut publics: Vec<MapPublic> = symbols
         .iter()
         .map(|(name, &(ci, addr))| {
@@ -409,12 +417,14 @@ fn apply_fixup(
     module: &Module,
     symbols: &HashMap<String, (usize, usize)>,
     absolutes: &HashMap<String, (u16, u16)>,
+    combined_frame: &[u16],
 ) -> Result<Option<(u16, u16)>, LinkError> {
     // Absolute image address of the bytes being patched.
     let patch_addr = combined[place.combined].load_offset + place.base + usize::from(fx.data_offset);
 
     // Resolve the target. T4 = SEGDEF, T5 = GRPDEF (group selector, no own
-    // address), T6 = EXTDEF.
+    // address), T6 = EXTDEF. A target in a grouped segment is framed against
+    // the group (`combined_frame`), not the segment's own paragraph.
     let target = match fx.target_method {
         4 => {
             let idx = fx
@@ -427,7 +437,7 @@ fn apply_fixup(
                 .ok_or(LinkError::BadFixupTarget(idx))?;
             Target {
                 addr: combined[tp.combined].load_offset + tp.base,
-                frame_para: (combined[tp.combined].load_offset >> 4) as u16,
+                frame_para: combined_frame[tp.combined],
             }
         }
         5 => {
@@ -446,7 +456,7 @@ fn apply_fixup(
                 .get(usize::from(idx))
                 .ok_or(LinkError::BadFixupTarget(idx))?;
             if let Some(&(ci, addr)) = symbols.get(name) {
-                Target { addr, frame_para: (combined[ci].load_offset >> 4) as u16 }
+                Target { addr, frame_para: combined_frame[ci] }
             } else if let Some(&(frame, offset)) = absolutes.get(name) {
                 Target { addr: (usize::from(frame) << 4) + usize::from(offset), frame_para: frame }
             } else {
@@ -457,10 +467,11 @@ fn apply_fixup(
     };
 
     // The frame the reference is measured against. F1 = a named group,
-    // F4 = the patched location's own segment, F5 = the target's frame.
+    // F4 = the patched location's own segment (framed against its group if it
+    // has one), F5 = the target's frame.
     let frame_para = match fx.frame_method {
         1 => group_base_para(module, module_placements, combined, fx.frame_datum.unwrap_or(0)),
-        4 => (combined[place.combined].load_offset >> 4) as u16,
+        4 => combined_frame[place.combined],
         _ => target.frame_para,
     };
     let frame_base = usize::from(frame_para) << 4;

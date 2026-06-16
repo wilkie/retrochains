@@ -9,13 +9,18 @@ program compiled by BCC, link it against the **real** Borland C++ 2.0 startup
 tlink /m C0S.OBJ+MAIN.OBJ, MAIN.EXE, MAIN.MAP, CS.LIB
 ```
 
-`MAIN.C` is `int main(void){return 0;}` (`bcc -c -ms`). Linking pulls **16
-members** transitively from CS.LIB. The result: 16 segments, 140-odd publics,
-runtime relocations — all byte-exact. Gated by the integration test
-`crates/bcc-tlink/tests/capstone.rs`, which reads `C0S.OBJ`/`CS.LIB` from the
-provisioned install (`.bc2/BC2/LIB/`, reproducible via `oracle provision bcc`,
-so not tracked) and asserts the recorded SHA-256 of the linked outputs. It
-skips cleanly when the install is absent.
+Two programs are gated by `crates/bcc-tlink/tests/capstone.rs`:
+
+- `MAIN.C` — `int main(void){return 0;}` (`bcc -c -ms`). Pulls **16 members**
+  transitively from CS.LIB; 16 segments, 140-odd publics, runtime relocations.
+- `HELLO.C` — `printf("Hello, world\n")` (`bcc -c -ms -IC:\INCLUDE`). Pulls the
+  formatted-output / stdio chain and a real `_DATA` string constant — much more
+  of CS.LIB, more fixup variety.
+
+The test reads `C0S.OBJ`/`CS.LIB` from the provisioned install (`.bc2/BC2/LIB/`,
+reproducible via `oracle provision bcc`, so not tracked) and asserts the
+recorded SHA-256 of the linked `MAIN.EXE`/`MAIN.MAP`. It skips cleanly when the
+install is absent. Only the small object files are tracked (`tests/data/`).
 
 Closing this required a handful of behaviors the small standalone fixtures
 never exercised. Each is now in `omf.rs`/`link.rs`/`map.rs`.
@@ -52,12 +57,21 @@ TLINK's C0 startup carries the `DOSSEG` linker directive (a COMENT, class
   (The single-DGROUP-member standalone fixture 4261 depends on this: its
   `_DATA` paragraph-aligns because it is the first DGROUP member.)
 
-## Public framing (`.MAP`)
+## Group-relative framing (publics *and* fixups)
 
-A public defined in a grouped segment is reported relative to the **group base
-paragraph**, not its own segment's paragraph. C0's `__ATEXITTBL` lands in `_BSS`
-(paragraph `0x0CE`) but the map shows `00A6:028A` — frame `0xA6` is DGROUP's
-base, offset `0x28A` into the group.
+A reference to a segment that belongs to a group is framed against the **group
+base paragraph**, not the segment's own paragraph. This shows up in two places:
+
+- **`.MAP` publics** — C0's `__ATEXITTBL` lands in `_BSS` (paragraph `0x0CE`)
+  but the map shows `00A6:028A`: frame `0xA6` is DGROUP's base, offset `0x28A`
+  into the group.
+- **Fixups** — `printf` needs it. The `REALCVT` member has a near, seg-relative,
+  F5-framed (frame = target's frame) fixup to the external `__RealCvtVector`,
+  which lives in `_CVTSEG` (part of DGROUP). Framed against `_CVTSEG`'s own
+  paragraph the deposited offset would be `0x000C`; framed against DGROUP (the
+  correct frame) it is `0x02FC`. So the linker carries a per-combined-segment
+  *canonical frame* (group base where grouped, own paragraph otherwise) and uses
+  it for both T4/T6 target frames and F4 location frames.
 
 ## `.MAP` rendering (`map.rs`)
 

@@ -67,6 +67,19 @@ pub fn link_image(
     objects: &[(String, Vec<u8>)],
     libraries: &[(String, Vec<u8>)],
 ) -> Result<link::Image, Error> {
+    Ok(link::link(&resolved_modules(objects, libraries)?)?)
+}
+
+/// Parse the named objects and pull the library members they require, returning
+/// the modules in final link order (named objects first, then pulled members in
+/// library order). Exposed for tools that inspect the linked module set.
+///
+/// # Errors
+/// Same as [`link_objects`] (parse/library errors).
+pub fn resolved_modules(
+    objects: &[(String, Vec<u8>)],
+    libraries: &[(String, Vec<u8>)],
+) -> Result<Vec<Module>, Error> {
     let mut modules = Vec::with_capacity(objects.len());
     for (name, bytes) in objects {
         let module =
@@ -125,5 +138,5 @@ pub fn link_image(
     tail.sort_by_key(|(key, _)| *key);
     modules.extend(tail.into_iter().map(|(_, module)| module));
 
-    Ok(link::link(&modules)?)
+    Ok(modules)
 }
