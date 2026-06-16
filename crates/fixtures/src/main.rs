@@ -23,8 +23,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fixtures::{
-    Diff, FileDiffKind, Fixture, ManifestDiff, ToolPaths, capture, materialize, verify_oracle,
-    verify_ours,
+    Diff, FileDiffKind, Fixture, HarnessError, ManifestDiff, ToolPaths, capture, materialize,
+    verify_oracle, verify_ours,
 };
 
 fn main() -> ExitCode {
@@ -117,12 +117,24 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         "verify" => {
             let fixture_path = fixture_path.ok_or("missing <fixture> path")?;
             let fixture = Fixture::load(&fixture_path, &compiler)?;
-            let diff = match toolchain {
-                Toolchain::Oracle => verify_oracle(&workspace_root, &fixture)?,
+            let result = match toolchain {
+                Toolchain::Oracle => verify_oracle(&workspace_root, &fixture),
                 Toolchain::Ours => {
                     let tool_paths = ToolPaths::from_workspace_debug(&workspace_root);
-                    verify_ours(&fixture, &tool_paths)?
+                    verify_ours(&fixture, &tool_paths)
                 }
+            };
+            let diff = match result {
+                Ok(diff) => diff,
+                // Not a failure: our toolchain doesn't reimplement this tool yet.
+                Err(HarnessError::ToolNotImplemented(tool)) => {
+                    eprintln!(
+                        "[xfix] {}: skipped ({tool} not reimplemented under --toolchain ours)",
+                        fixture.name
+                    );
+                    return Ok(ExitCode::from(0));
+                }
+                Err(e) => return Err(e.into()),
             };
             print_diff(&fixture.name, &diff);
             if diff.is_empty() {
@@ -171,6 +183,10 @@ fn verify_all(
     let tool_paths = ToolPaths::from_workspace_debug(workspace_root);
     let pass = AtomicUsize::new(0);
     let fail = AtomicUsize::new(0);
+    // Fixtures whose tool our toolchain doesn't reimplement yet (e.g. the
+    // standalone-linker bucket: `tool = tlink`/`link` with no linker binary).
+    // Counted separately so they don't read as failures.
+    let skip = AtomicUsize::new(0);
     let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
     let start = std::time::Instant::now();
@@ -181,13 +197,14 @@ fn verify_all(
             let tool_paths = &tool_paths;
             let pass = &pass;
             let fail = &fail;
+            let skip = &skip;
             let failures = &failures;
             s.spawn(move || {
                 for path in chunk {
                     let result =
                         run_one(path, toolchain, workspace_root, tool_paths, compiler);
                     match result {
-                        Ok((name, diff)) => {
+                        Ok(RunOutcome::Verified(_name, diff)) => {
                             if diff.is_empty() {
                                 pass.fetch_add(1, Ordering::Relaxed);
                             } else {
@@ -195,8 +212,11 @@ fn verify_all(
                                 failures
                                     .lock()
                                     .expect("failures mutex poisoned")
-                                    .push((name, summarize_diff(&diff)));
+                                    .push((_name, summarize_diff(&diff)));
                             }
+                        }
+                        Ok(RunOutcome::Skipped(_)) => {
+                            skip.fetch_add(1, Ordering::Relaxed);
                         }
                         Err((name, e)) => {
                             fail.fetch_add(1, Ordering::Relaxed);
@@ -214,11 +234,17 @@ fn verify_all(
     let elapsed = start.elapsed();
     let pass = pass.load(Ordering::Relaxed);
     let fail = fail.load(Ordering::Relaxed);
+    let skip = skip.load(Ordering::Relaxed);
     let mut failures = failures.into_inner().expect("failures mutex poisoned");
     failures.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let skip_note = if skip > 0 {
+        format!(", {skip} skipped (tool not reimplemented)")
+    } else {
+        String::new()
+    };
     eprintln!(
-        "[xfix] verified {total} {compiler} fixtures in {:.1}s ({num_threads} threads): {pass} pass, {fail} fail",
+        "[xfix] verified {total} {compiler} fixtures in {:.1}s ({num_threads} threads): {pass} pass, {fail} fail{skip_note}",
         elapsed.as_secs_f64(),
     );
     for (name, msg) in &failures {
@@ -227,13 +253,20 @@ fn verify_all(
     if fail == 0 { Ok(ExitCode::from(0)) } else { Ok(ExitCode::from(1)) }
 }
 
+/// Result of verifying one fixture: either a diff to grade, or a skip because
+/// our toolchain doesn't reimplement the fixture's tool yet.
+enum RunOutcome {
+    Verified(String, Diff),
+    Skipped(String),
+}
+
 fn run_one(
     path: &Path,
     toolchain: Toolchain,
     workspace_root: &Path,
     tool_paths: &ToolPaths,
     compiler: &str,
-) -> Result<(String, Diff), (String, String)> {
+) -> Result<RunOutcome, (String, String)> {
     let name_fallback = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -242,12 +275,18 @@ fn run_one(
     let fixture = Fixture::load(path, compiler)
         .map_err(|e| (name_fallback.clone(), e.to_string()))?;
     let name = fixture.name.clone();
-    let diff = match toolchain {
+    let result = match toolchain {
         Toolchain::Oracle => verify_oracle(workspace_root, &fixture),
         Toolchain::Ours => verify_ours(&fixture, tool_paths),
+    };
+    match result {
+        Ok(diff) => Ok(RunOutcome::Verified(name, diff)),
+        // A fixture whose tool has no host reimplementation yet (e.g. the
+        // standalone-linker bucket under `--toolchain ours`) is skipped, not
+        // failed — its goldens are still captured/verified via the oracle.
+        Err(HarnessError::ToolNotImplemented(_)) => Ok(RunOutcome::Skipped(name)),
+        Err(e) => Err((name, e.to_string())),
     }
-    .map_err(|e| (name.clone(), e.to_string()))?;
-    Ok((name, diff))
 }
 
 /// One-line summary of a mismatch — picks the first concrete failure

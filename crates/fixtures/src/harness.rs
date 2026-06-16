@@ -87,16 +87,17 @@ pub fn verify_ours(
     let run = run_ours(fixture, tool_paths)?;
     let actual_manifest = build_manifest(fixture, &run, our_summary(fixture));
 
+    let tool = fixture.invocation.tool;
     let manifest_diffs: Vec<_> = diff_manifests(&expected_manifest, &actual_manifest)
         .into_iter()
         .filter(|d| {
             // Stream-related sha diffs and listing/link-output diffs are
-            // informational under verify_ours; everything else stays
-            // gating. ASM stays informational until our compilers learn to
-            // emit assembly listings; EXE/MAP until our linker reimplementation
-            // (bcc-tlink / msc-link) can produce a linked executable.
+            // informational under verify_ours; everything else stays gating.
+            // What's advisory depends on the fixture's tool — see
+            // `is_advisory_output` — because a linker fixture *gates* on the
+            // `.EXE` its reimplementation must produce.
             !matches!(d, ManifestDiff::StdoutSha { .. } | ManifestDiff::StderrSha { .. })
-                && !is_advisory_output_diff(d)
+                && !is_advisory_output_diff(tool, d)
         })
         .collect();
     let mut diff = Diff { manifest: manifest_diffs, ..Diff::default() };
@@ -118,7 +119,7 @@ pub fn verify_ours(
         if let Some(expected) = expected
             && let Some(file_diff) = diff_bytes(name, &expected, &output.bytes)
         {
-            if is_advisory_output_name(name) {
+            if is_advisory_output(tool, name) {
                 diff.advisory.push(file_diff);
             } else {
                 diff.files.push(file_diff);
@@ -128,21 +129,41 @@ pub fn verify_ours(
     Ok(diff)
 }
 
-/// Outputs that `verify_ours` treats as advisory (non-gating) because our
-/// reimplementation can't yet produce them: `.ASM` listings (no assembly
-/// emitter) and `.EXE`/`.MAP` (no linker — bcc-tlink/msc-link are stubs).
-/// These outputs come from the oracle's link/listing stages; the gating
-/// byte-exact contract under `--toolchain ours` is the `.OBJ`.
-fn is_advisory_output_name(name: &str) -> bool {
+/// Whether `verify_ours` treats an output as advisory (non-gating), given the
+/// fixture's primary `tool`. An output is advisory when our reimplementation of
+/// that tool doesn't (yet) produce it:
+///
+/// - `.ASM` — always advisory: no tool of ours emits assembly listings.
+/// - `.MAP` — always advisory for now: the linker map is recorded as a
+///   fingerprint reference, but byte-exact map generation is a later milestone.
+/// - `.EXE` — advisory for a *compiler* fixture (`bcc`/`cl` produce the `.OBJ`;
+///   the `.EXE` comes from the oracle's link stage we don't run). For a *linker*
+///   fixture (`tool = tlink`/`link`), the `.EXE` is the gated contract — that's
+///   exactly what the linker reimplementation must reproduce.
+///
+/// The gated byte-exact output is thus the `.OBJ` for compiler fixtures and the
+/// `.EXE` for linker fixtures.
+fn is_advisory_output(tool: ToolName, name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    upper.ends_with(".ASM") || upper.ends_with(".EXE") || upper.ends_with(".MAP")
+    if upper.ends_with(".ASM") || upper.ends_with(".MAP") {
+        return true;
+    }
+    if upper.ends_with(".EXE") {
+        return !is_linker_tool(tool);
+    }
+    false
 }
 
-fn is_advisory_output_diff(d: &ManifestDiff) -> bool {
+/// Tools whose reimplementation *is* a linker — they produce the linked image.
+fn is_linker_tool(tool: ToolName) -> bool {
+    matches!(tool, ToolName::Tlink | ToolName::Link)
+}
+
+fn is_advisory_output_diff(tool: ToolName, d: &ManifestDiff) -> bool {
     match d {
         ManifestDiff::OutputMissing { name }
         | ManifestDiff::OutputUnexpected { name }
-        | ManifestDiff::OutputMetadata { name, .. } => is_advisory_output_name(name),
+        | ManifestDiff::OutputMetadata { name, .. } => is_advisory_output(tool, name),
         _ => false,
     }
 }
@@ -275,8 +296,14 @@ impl ToolPaths {
         };
         Self {
             bcc: pick("bcc"),
-            tasm: pick("tasm"),
-            tlink: pick("tlink"),
+            // `tasm`/`tlink` are stub binaries (they just print "not yet
+            // implemented" and exit 1), not reimplementations — leave them
+            // unbound so fixtures with `tool = tasm/tlink` surface as
+            // ToolNotImplemented (→ skipped under `--toolchain ours`) rather
+            // than spuriously failing. Bind these the day a real assembler /
+            // linker lands in crates/bcc-tasm / crates/bcc-tlink.
+            tasm: None,
+            tlink: None,
             msc: pick("msc"),
         }
     }

@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fixture::{Fixture, LoadError};
-use crate::harness::{ToolPaths, verify_ours};
+use crate::harness::{HarnessError, ToolPaths, verify_ours};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Status {
@@ -163,6 +163,9 @@ fn status_for(path: &Path, compiler: &str, tool_paths: &ToolPaths) -> Status {
         Ok(fixture) => match verify_ours(&fixture, tool_paths) {
             Ok(diff) if diff.is_empty() => Status::Pass,
             Ok(_) => Status::Fail,
+            // Tool not reimplemented yet (e.g. standalone-linker fixtures) →
+            // our toolchain doesn't target it, same as a missing invocation.
+            Err(HarnessError::ToolNotImplemented(_)) => Status::NotApplicable,
             Err(_) => Status::Error,
         },
     }

@@ -1,0 +1,4 @@
+description = "Standalone TLINK: link a single hand-assembled OBJ (no C runtime) into an .EXE + .MAP. Input MINI.OBJ is TASM's output for MINI.ASM (tracked alongside as provenance). Isolates TLINK's pure MZ-image conventions (header checksum left zero, reloc-table packing, default SP/min-alloc) from any compiler-driver defaults. tool=tlink: not-applicable under --toolchain ours until crates/bcc-tlink implements linking; then it gates the .EXE."
+tool = "tlink"
+args = ["/m", "MINI.OBJ,MINI.EXE,MINI.MAP"]
+inputs = ["MINI.OBJ"]

@@ -1,0 +1,4 @@
+description = "Standalone TLINK: link two hand-assembled OBJs where MAIN.OBJ CALLs an EXTRN PROC that SUB.OBJ exports PUBLIC. Isolates TLINK's cross-module symbol resolution and near-call fixup in the pure linker (no compiler/runtime). MAIN.OBJ/SUB.OBJ are TASM's output for MAIN.ASM/SUB.ASM, tracked as provenance. tool=tlink: not-applicable under --toolchain ours until crates/bcc-tlink lands; then it gates MAIN.EXE."
+tool = "tlink"
+args = ["/m", "MAIN.OBJ+SUB.OBJ,MAIN.EXE,MAIN.MAP"]
+inputs = ["MAIN.OBJ", "SUB.OBJ"]

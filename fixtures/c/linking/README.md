@@ -41,21 +41,50 @@ on **each** TU as a bonus.
     error, so the BCC sibling captures the *compile* stage only. The divergence
     itself is the fingerprint (catalogued in `specs/linkers/DIFFERENCES.md`).
 
-## Not yet built — standalone-linker bucket
+## `standalone/` — drive the linker directly on hand-built OBJs
 
 The purest linker tests drive `TLINK`/`LINK` **directly** on hand-built object
-files (custom segment classes/orders, `.DEF` exports, overlays, library member
-selection, malformed-OBJ diagnostics) — things the compiler driver won't emit.
-That needs an input `.OBJ`, which raises one open decision before we build it:
+files — isolating the linker's own behavior (MZ-image conventions, cross-module
+symbol resolution and fixups, segment classes/orders, and later `.DEF` exports,
+overlays, library member selection, malformed-OBJ diagnostics) from any
+compiler-driver defaults. The input is an `.OBJ`, so:
 
-- **Track input `.OBJ`s** under `fixtures/c/linking/standalone/` (allowed by
-  `.gitignore`, which only prunes OBJs at the repo root + the `artifacts/`
-  cache), pairing each with the `.ASM`/`.C` + command it was built from for
-  provenance; **or**
-- **add a cross-tool chain** to the harness (assemble `.ASM`→`.OBJ` with
-  `tasm`/`masm`, then link) so the tracked input stays plain-text source.
+- `tool = "tlink"` / `tool = "link"`, `inputs = ["MOD.OBJ", …]`, and `args` is the
+  raw linker command (e.g. `["/m", "MINI.OBJ,MINI.EXE,MINI.MAP"]`).
+- The `.OBJ` is **tracked** as the fixture input. `.gitignore` only prunes OBJs
+  at the repo root and under `artifacts/`, so OBJs in the fixtures tree are
+  trackable — and a linker fixture's input OBJ is *source*, not a reproducible
+  compiler golden. Each OBJ is paired with the `.ASM` it was assembled from
+  (tracked alongside, for readability + regeneration) but the `.ASM` is **not**
+  in `inputs`, so the harness only materializes the OBJ.
 
-`run_chained` is currently one-tool-per-session, so the second option is a
-harness change. Pick one before adding `tool = "tlink"` / `tool = "link"`
-fixtures; until then they'd be **not-applicable** under `--toolchain ours`
-(no linker reimplementation to run).
+### Building one (the provenance workflow)
+
+Two oracle passes; the second overwrites the first's manifest:
+
+1. Write `MOD.ASM`. Temporarily set the invocation to assemble it
+   (`tool = "tasm"`, `args = ["MOD.ASM"]`, `inputs = ["MOD.ASM"]`; assemble
+   several at once with `asm_args` since both passes run the same tool), then
+   `xfix capture` + `xfix materialize`. Copy the resulting
+   `artifacts/.../bcc/BC2/MOD.OBJ` into the fixture as the tracked input.
+2. Rewrite the invocation to `tool = "tlink"` with the link `args` and
+   `inputs = ["MOD.OBJ", …]`, then `xfix capture`. The recorded outputs are now
+   `MOD.EXE` + `MOD.MAP`.
+
+Seeded examples:
+- `4258-tlink-minimal-exe` — one OBJ, no runtime → pins TLINK's MZ-header
+  conventions (checksum left zero, reloc packing, default SP/min-alloc).
+- `4259-tlink-extrn-public` — `MAIN.OBJ` `CALL`s an `EXTRN PROC` that `SUB.OBJ`
+  exports `PUBLIC` → pins cross-module resolution + near-call fixup.
+
+### How these gate
+
+`tlink`/`link` have no host reimplementation yet, so under `--toolchain ours`
+these fixtures are **skipped** (`HarnessError::ToolNotImplemented` → the
+`verify-all` "skipped" tally, `NotApplicable` on the dashboard), while the oracle
+still captures and verifies their goldens. The day a real linker lands in
+`crates/bcc-tlink` (bind it in `ToolPaths::from_workspace_debug`), they light up
+and **gate the `.EXE`** — `is_advisory_output` already routes `.EXE` to gating
+for linker-tool fixtures (the `.MAP` stays advisory until byte-exact map
+generation is a deliberate milestone). That flip is the start of the linker
+implementation pass.

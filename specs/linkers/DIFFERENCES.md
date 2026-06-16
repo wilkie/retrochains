@@ -114,7 +114,7 @@ tamper-resistant single discriminators.
 - Drive the **linkers directly** (`Tool::Tlink` / `Tool::Link`) on hand-built
   OBJs to isolate pure linker behavior from compiler-driver defaults. The
   `linking/multi-module` fixtures already widen the Tier-B sample via the
-  driver (multiple TUs, real `.MAP`s); standalone-linker fixtures are the next
-  bucket (see `fixtures/c/linking/README.md`).
+  driver (multiple TUs, real `.MAP`s); the `linking/standalone` bucket
+  (`tool = tlink` on hand-built OBJs, 4258–4259) isolates pure linker behavior.
 - Grade these toward DEFINITIVE/STRONG/WEAK as the sample set grows; cite the
   fixture that demonstrates each.

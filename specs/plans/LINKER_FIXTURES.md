@@ -75,12 +75,21 @@ roll-out skips them and logs the count.
    pool).~~ **Done** — 2961 BCC + 2990 MSC fixtures carry a link stage; failing
    links (unresolved externs) excluded. `.EXE`/`.MAP` are advisory under
    `--toolchain ours` (no linker reimpl yet).
-3. **In progress — dedicated `linking/` area.** `multi-module/` bucket landed
-   (4254–4257): cross-TU function/data resolution, three-module chains,
-   communal-vs-definite tentative-def divergence — each with real `.MAP`s for
-   both linkers. Both our `bcc` and `cl` gained multi-source support so these
-   gate the compiler per TU. See `fixtures/c/linking/README.md`. **Next:** the
-   standalone-linker bucket (`tool = "tlink"`/`"link"` on hand-built OBJs) —
-   blocked on the tracked-OBJ-input vs cross-tool-chain decision noted in that
-   README.
-4. Stand up the MZ reader + EXE fingerprinting against the pool.
+3. **Done — dedicated `linking/` area** (`fixtures/c/linking/`, see its README):
+   - `multi-module/` (4254–4257): cross-TU function/data resolution,
+     three-module chains, communal-vs-definite tentative-def divergence — each
+     with real `.MAP`s for both linkers. Our `bcc` and `cl` gained multi-source
+     support so these gate the compiler per TU.
+   - `standalone/` (4258–4259): `tool = "tlink"` driven directly on hand-built
+     OBJs (tracked input + `.ASM` provenance). Decision settled — **track the
+     input OBJ** (it's source, not a golden; `.gitignore` permits it in the
+     fixtures tree); no cross-tool harness change needed. Skipped under
+     `--toolchain ours` until a linker exists.
+4. **Ready — linker implementation pass.** Infra is in place: linker-tool
+   fixtures are captured + oracle-gated, skipped under ours, and `.EXE` already
+   routes to gating for `tool = tlink/link` (`is_advisory_output`). Starting the
+   pass = implement `crates/bcc-tlink` and bind it in
+   `ToolPaths::from_workspace_debug`; the `standalone/` fixtures then gate the
+   `.EXE`. Grow the bucket (segment classes, GROUP, libs, overlays, diagnostics)
+   alongside the implementation.
+5. Stand up the MZ reader + EXE fingerprinting against the pool.

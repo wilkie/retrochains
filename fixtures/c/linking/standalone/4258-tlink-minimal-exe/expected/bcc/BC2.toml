@@ -1,0 +1,24 @@
+[run]
+exit_code = 0
+stdout_sha256 = "494cef73f4efba70df7f1ee33a0abf1f1caf5c3fb1830902914401533fca3fbf"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "MINI.EXE"
+size = 518
+sha256 = "2c09441d252d6efdaf127854d6bac0d8fcb2a425b0941380c4e77d07db2cc642"
+mtime = "1991-04-23T12:00:00Z"
+
+[[outputs]]
+name = "MINI.MAP"
+size = 311
+sha256 = "e3a1fe0f9394ab909c65f72d247935d37d66df9065e5a2c3fbdecd9bc0479c90"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "tlink"
+args = [
+    "/m",
+    "MINI.OBJ,MINI.EXE,MINI.MAP",
+]
+fake_time = "1991-04-23T12:00:00Z"
