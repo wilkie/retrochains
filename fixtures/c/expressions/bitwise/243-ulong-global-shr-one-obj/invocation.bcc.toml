@@ -1,5 +1,6 @@
 description = "`unsigned long g = a >> 1;`. Probe: BCC should use `shr` instead of `sar` for the high half (logical not arithmetic shift)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

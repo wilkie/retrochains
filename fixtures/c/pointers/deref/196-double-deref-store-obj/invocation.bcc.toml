@@ -1,5 +1,6 @@
 description = "`**p = 42;` — write through double indirection. Symmetric to fixture 195's read: same `mov bx, DGROUP:_p` → `mov bx,[bx]` chain step, but the final operation is a store (`mov word ptr [bx], 42`) instead of a load."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

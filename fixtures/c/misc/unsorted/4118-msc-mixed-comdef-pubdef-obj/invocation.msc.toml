@@ -1,4 +1,5 @@
 description = "Mixed COMDEF (a) + PUBDEF (b) arrays in the same TU. Probes that EXTDEF splits around the COMDEF and that the _DATA LEDATA carries only the initialized array's bytes."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

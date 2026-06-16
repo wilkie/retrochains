@@ -1,4 +1,5 @@
 description = "if (x) ... else ... — both branches end in return. Probes whether MSC merges or duplicates the epilogue."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

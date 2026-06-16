@@ -1,5 +1,6 @@
 description = "`if (a > b)` for long globals. Verifies slice 234's 3-jump mnemonic mapping for the `>` case (jl→false, jg→true, jbe→false)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

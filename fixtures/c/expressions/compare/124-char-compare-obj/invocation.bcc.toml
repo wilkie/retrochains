@@ -1,5 +1,6 @@
 description = "char loop with c<5 condition. Same source as 054 but -c. Exercises cmp r8,imm8 + signed conditional jump on 8-bit compare."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,5 +1,6 @@
 description = "Two int locals multiplied at return. Same source as 008 but -c. Exercises single-operand IMUL (F7 /5)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

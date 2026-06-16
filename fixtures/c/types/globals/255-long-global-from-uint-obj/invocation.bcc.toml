@@ -1,5 +1,6 @@
 description = "`long g = u;` for `unsigned int u`. Probes: BCC should zero-extend (xor dx,dx) not sign-extend (cwd), since u is unsigned."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

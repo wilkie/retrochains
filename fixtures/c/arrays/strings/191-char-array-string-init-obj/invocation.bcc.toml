@@ -1,5 +1,6 @@
 description = "`char s[] = \"hi\";` — string literal initializing a char-array global. Size derived from string length + 1 (NUL terminator). Pin what BCC emits in _DATA: likely `db 'h' / db 'i' / db 0`, plus the array length 3."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

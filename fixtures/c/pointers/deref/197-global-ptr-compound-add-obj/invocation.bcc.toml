@@ -1,5 +1,6 @@
 description = "`*p += 5;` through a global pointer. Global counterpart to fixture 183 (local `*p += K`): load `p` into BX via `mov bx,word ptr DGROUP:_p`, then `add word ptr [bx],5` for the in-place read-modify-write."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

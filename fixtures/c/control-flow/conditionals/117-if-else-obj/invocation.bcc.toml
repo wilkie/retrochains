@@ -1,5 +1,6 @@
 description = "if/else with two int locals. Same source as 026 but -c. Exercises CMP, conditional jumps, and intra-_TEXT branch labels."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

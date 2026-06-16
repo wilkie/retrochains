@@ -1,5 +1,6 @@
 description = "Two int locals subtracted at return. Same source as 007 but -c. Exercises SUB AX,mem."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

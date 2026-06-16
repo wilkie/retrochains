@@ -1,4 +1,5 @@
 description = "a[1] = 7; — write a literal to a constant array index. Pairs with 4109 (read same shape) to confirm MSC uses `c7 06 addr+disp imm16` for the store side."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

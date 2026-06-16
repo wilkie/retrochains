@@ -1,5 +1,6 @@
 description = "`sizeof <expr>` without parens. Folds to a constant via parse-time type lookup. One global keeps the BSS-layout question out of scope; multi-global BSS ordering is a separate slice."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

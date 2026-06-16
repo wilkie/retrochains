@@ -1,5 +1,6 @@
 description = "Return -5. -c parallel of 036. BCC folds to mov ax,65531."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

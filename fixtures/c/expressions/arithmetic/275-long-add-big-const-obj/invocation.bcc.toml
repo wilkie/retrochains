@@ -1,5 +1,6 @@
 description = "`g = g + 1000;` long add with K too big for i8sx. Probes wider-imm encoding."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,5 +1,6 @@
 description = "`return x;` where `x` is a `long` parameter. Tests callee-side parameter access for longs: low half at [bp+4], high at [bp+6], loaded into the return registers (DX=high, AX=low). Companion to fixture 216's caller-side push."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

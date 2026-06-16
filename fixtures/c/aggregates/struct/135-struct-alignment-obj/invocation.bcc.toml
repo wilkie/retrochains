@@ -1,5 +1,6 @@
 description = "Mixed char+int struct, odd-aligned int field. -c parallel of 102. Exercises word ptr at odd bp-offset."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

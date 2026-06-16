@@ -1,4 +1,5 @@
 description = "First printf call. Probes external EXTDEF for printf, FIXUP from the call site, and how MSC pools the format string in CONST."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

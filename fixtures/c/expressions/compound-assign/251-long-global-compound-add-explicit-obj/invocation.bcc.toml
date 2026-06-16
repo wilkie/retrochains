@@ -1,5 +1,6 @@
 description = "`g += 5;` for long. Probes whether `+=` reuses the same code-gen path as `g = g + K` (slice 207). With K=5 fitting i8sx, expect the same `add/adc memory, imm8sx` pair as slice 249 (`g++`)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,4 +1,5 @@
 description = "TU-local void function with a single int parameter, called with a constant. Probes cdecl push+caller-cleanup."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

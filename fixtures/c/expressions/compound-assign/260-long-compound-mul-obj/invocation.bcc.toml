@@ -1,5 +1,6 @@
 description = "`a *= b;` for long. Probes whether `*=` uses the same N_LXMUL@ helper as `a = a * b` (slice 231)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

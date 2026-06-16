@@ -1,4 +1,5 @@
 description = "Auto-derived from 1045-char-init-from-int-implicit-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

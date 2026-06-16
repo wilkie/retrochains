@@ -1,4 +1,5 @@
 description = "return 42; — multi-bit literal to confirm both bytes of mov ax, imm16 vary correctly."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

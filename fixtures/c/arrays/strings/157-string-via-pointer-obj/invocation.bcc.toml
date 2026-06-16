@@ -1,5 +1,6 @@
 description = "char* s = literal; return s[0]. -c parallel of 088. Exercises mov si,offset DGROUP:s@ and mov al,[si]."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,5 +1,6 @@
 description = "Three globals (int uninit, int init, char init) plus main. -c. Exercises _DATA + _BSS coexistence with multi-segment PUBDEFs."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

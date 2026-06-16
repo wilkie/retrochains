@@ -1,5 +1,6 @@
 description = "K&R-style function definition: bare ident list in the parens, type declarations between `)` and `{`. C90 still accepts this form (BC2's own headers use it heavily). The codegen result should be identical to the prototype-style `int add(int x, int y)`."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

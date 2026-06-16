@@ -1,4 +1,5 @@
 tool = "bcc"
 args = ["-c", "-mt", "HELLO.C"]
+link_args = ['-LC:\LIB', '-mt', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-mt", "HELLO.C"]

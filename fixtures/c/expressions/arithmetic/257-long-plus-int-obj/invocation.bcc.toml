@@ -1,5 +1,6 @@
 description = "`g = g + i;` long + int. Probes whether BCC widens i to long then adds, or pushes through helper."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

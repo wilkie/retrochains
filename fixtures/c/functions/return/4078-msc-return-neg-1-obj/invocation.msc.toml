@@ -1,4 +1,5 @@
 description = "return -1; — confirms MSC writes signed-negative literals in their unsigned-wrapped 16-bit form (0xFFFF), matching BCC fixture 036 pattern."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

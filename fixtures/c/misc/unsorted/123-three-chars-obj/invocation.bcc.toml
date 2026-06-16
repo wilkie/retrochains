@@ -1,5 +1,6 @@
 description = "Three char locals enregistered (DL/BL/CL) with ++. Same source as 050 but -c. Exercises 8-bit reg-imm, reg-reg moves, inc r8."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

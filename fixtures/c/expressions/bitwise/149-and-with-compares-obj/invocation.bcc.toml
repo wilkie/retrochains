@@ -1,5 +1,6 @@
 description = "Short-circuit AND with compares. -c parallel of 058. Exercises cmp [bp-N],imm8 and the jge/jle-over-mov idiom."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,4 +1,5 @@
 description = "return 1; — first non-zero return literal under MSC. Smallest possible immediate change vs the empty-main baseline."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

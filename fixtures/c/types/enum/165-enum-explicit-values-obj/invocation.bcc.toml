@@ -1,5 +1,6 @@
 description = "Tagged enum with `=` initializers. Exercises three cases: explicit value (RED=5), implicit next (GREEN=6), reset to a new explicit value (BLUE=100). The `GREEN + BLUE` expression should constant-fold; BCC actually emits an `add` at runtime — capture decides which."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

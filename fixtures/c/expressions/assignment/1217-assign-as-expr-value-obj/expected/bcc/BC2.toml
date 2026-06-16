@@ -1,12 +1,18 @@
 [run]
 exit_code = 0
-stdout_sha256 = "0a2a1bd6dadd6e8234a8e45aa370f4ea0d64234d3142da73d32ad4961f195c85"
+stdout_sha256 = "82316b6259d5357fd75a2ed0809092650cc2fac17304fa7c303c2e6afb8d7953"
 stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 [[outputs]]
 name = "HELLO.ASM"
 size = 1125
 sha256 = "b47e1990372fd22f048e8e39ef74e0daf73f84ead620e033586cf821e5d61c33"
+mtime = "1991-04-23T12:00:00Z"
+
+[[outputs]]
+name = "HELLO.EXE"
+size = 3834
+sha256 = "c059eec2a03f902a5c2c8b9df1d851007c6f66cc33c054879bba358a29dcf9fe"
 mtime = "1991-04-23T12:00:00Z"
 
 [[outputs]]

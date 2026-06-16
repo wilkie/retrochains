@@ -1,4 +1,5 @@
 description = "int get(int *p){return *p;} — dereference a pointer parameter (frame-relative load + indirect word read). Different from 4111 which derefs a global ptr."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

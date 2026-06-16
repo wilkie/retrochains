@@ -1,5 +1,6 @@
 description = "Unsigned integer comparison. `unsigned a < unsigned b` should emit `jae` (jump-if-not-below) on the skip-true path instead of the signed `jge`. Same shape as the signed if-statement fixtures otherwise — just the jump-condition mnemonic differs."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

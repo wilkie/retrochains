@@ -1,4 +1,5 @@
 description = "Int function with two params returning their sum, called from main. Probes parameter access at [bp+4]/[bp+6]."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

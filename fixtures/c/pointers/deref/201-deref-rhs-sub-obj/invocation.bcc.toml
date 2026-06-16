@@ -1,5 +1,6 @@
 description = "`10 - *p` — dereference as the right operand of a non-commutative binary op. Unlike `+`, BCC can't swap operands here: it must load the left constant into AX and then `sub ax,word ptr [si]` directly against the pointed-to memory. Tests the deref-as-RHS path in resolve_operand_source for register-resident pointers."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

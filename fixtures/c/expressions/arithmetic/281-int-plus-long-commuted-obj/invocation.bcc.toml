@@ -1,5 +1,6 @@
 description = "`g = i + g;` int first, long second. Probes whether BCC swaps operands."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

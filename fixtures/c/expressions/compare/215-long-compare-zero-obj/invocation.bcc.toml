@@ -1,5 +1,6 @@
 description = "`if (g == 0)` for `long g` — equality test against zero. Tests how BCC compares a 32-bit value: probably an OR of both halves against zero, or two separate cmps with a chained branch."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,4 +1,5 @@
 description = "return a[1]; — constant index into an int array. Probes the [imm16] addressing mode MSC picks when both the array and its element index are compile-time constants."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

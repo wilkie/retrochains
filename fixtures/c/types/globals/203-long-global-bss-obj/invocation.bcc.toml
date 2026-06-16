@@ -1,5 +1,6 @@
 description = "Bare `long` global declaration with no init — reserves 4 bytes in _BSS. First slice of the `long` type arc: parser must accept the `long` keyword, AST gains `Type::Long`, codegen reserves 4 bytes (not 2)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

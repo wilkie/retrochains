@@ -1,5 +1,6 @@
 description = "Ternary where both arms are local-variable reads, not literals. Distinguishes the `mov ax,<imm>` constant-arm path (fixture 166) from the `mov ax,[bp-N]` local-load path."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

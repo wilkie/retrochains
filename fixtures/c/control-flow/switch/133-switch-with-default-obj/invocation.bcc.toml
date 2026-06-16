@@ -1,5 +1,6 @@
 description = "Switch with default. -c parallel of 075. Chained-compare with fall-through to default block."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

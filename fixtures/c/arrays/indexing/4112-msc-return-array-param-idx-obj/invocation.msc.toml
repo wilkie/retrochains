@@ -1,4 +1,5 @@
 description = "int get(int i){return a[i];} — parameter-indexed access defeats the constant-fold MSC would apply to a local. Exercises the register-based addressing MSC picks for an unknown index."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

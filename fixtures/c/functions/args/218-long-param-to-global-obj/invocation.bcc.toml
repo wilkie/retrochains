@@ -1,5 +1,6 @@
 description = "`g = x;` where `x` is a long parameter and `g` is a long global. Tests stack-to-global long copy: load both halves of `x` from [bp+4]/[bp+6], store to `_g`/`_g+2`. Companion to fixture 211's global-to-global path."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

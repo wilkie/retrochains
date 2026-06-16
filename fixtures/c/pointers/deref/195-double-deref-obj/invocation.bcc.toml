@@ -1,5 +1,6 @@
 description = "`int **p = &q;` and `**p` — double indirection. p (T**) loads via `mov bx,word ptr DGROUP:_p`; first deref yields q (T*) via `mov bx,word ptr [bx]`; second deref reads g via `mov ax,word ptr [bx]`."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

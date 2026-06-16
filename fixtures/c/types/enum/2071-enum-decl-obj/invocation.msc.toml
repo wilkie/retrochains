@@ -1,4 +1,5 @@
 description = "Auto-derived from 2071-enum-decl-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

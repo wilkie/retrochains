@@ -1,4 +1,5 @@
 description = "*q = 5; — store an int literal through a pointer global. Probes the load-pointer-then-store shape MSC picks for a write through an aliased target."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

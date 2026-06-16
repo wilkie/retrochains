@@ -1,4 +1,5 @@
 description = "char *p = \"hi\"; — global pointer initialized to a string literal address. Probes a FIXUP record inside a _DATA LEDATA (rather than _TEXT) — the placeholder gets stamped with the CONST-relative offset of the literal."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

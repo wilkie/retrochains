@@ -1,5 +1,6 @@
 description = "File-scope `static int g = 42;`. Same source layout as 129 except for the `static`. Exercises: storage-class accepted by parser, symbol omitted from PUBDEF, FIXUPP can still reach the slot via DGROUP/_DATA segment-relative (no external symbol)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

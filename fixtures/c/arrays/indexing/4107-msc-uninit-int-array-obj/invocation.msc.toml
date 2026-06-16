@@ -1,4 +1,5 @@
 description = "int a[3]; — tentative def of an int array. Probes COMDEF length encoding for sizes > 2 bytes (here 6) vs the scalar form already covered by 4105."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

@@ -1,5 +1,6 @@
 description = "_DATA layout with two initialized globals declared in NON-alphabetical source order (`z` first, then `a`). Pin whether BCC sorts _DATA alphabetically (matching _BSS, fixture 181) or keeps source order."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

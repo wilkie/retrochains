@@ -1,5 +1,6 @@
 description = "++x where x is in a register (BCC enregistered it). -c parallel of 040."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

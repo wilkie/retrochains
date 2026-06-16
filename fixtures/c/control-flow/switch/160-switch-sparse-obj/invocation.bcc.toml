@@ -1,5 +1,6 @@
 description = "4-case sparse switch (values 1/10/100/1000). -c parallel of 074. BCC uses linear-search dispatch: a 4-entry value table in _TEXT, walked via loop/inc bx with cs:[bx] loads, then a cs:[bx+8] indirect jmp to the matching label table."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

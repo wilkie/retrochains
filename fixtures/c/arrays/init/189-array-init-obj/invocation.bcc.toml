@@ -1,5 +1,6 @@
 description = "File-scope `int a[3] = {1, 2, 3};` — array global with an initializer list. Pin the _DATA byte sequence BCC produces (likely each element's bytes back-to-back, no padding for word-sized ints)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

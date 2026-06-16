@@ -1,4 +1,5 @@
 description = "return a + b; — add two globals. Probes whether MSC loads one then ads-mem on the other (`mov ax,[a]; add ax,[b]`) or routes via a temporary."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

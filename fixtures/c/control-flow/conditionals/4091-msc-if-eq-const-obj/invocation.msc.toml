@@ -1,4 +1,5 @@
 description = "if (x == 5) — probes MSC's comparison-against-const-imm form and which jump mnemonic it picks."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

@@ -1,4 +1,5 @@
 description = "Three int locals with initializers, return the last. Stresses [bp-2], [bp-4], [bp-6] layout and the per-local mov-word-ptr emit sequence."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

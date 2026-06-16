@@ -1,5 +1,6 @@
 description = "`return *p++;` — postfix increment combined with dereference. Reads `*p` (=7 here, value of `a[0]`) and as a side effect advances `p` to point at `a[1]`. In RETURN context, BCC saves the pre-update pointer in BX before incrementing the register-resident `p`, then reads via `[bx]`. (The simpler `mov ax,[si]; ...; inc si; inc si` pattern only appears in `x = *p++;` assignment contexts.)"
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,5 +1,6 @@
 description = "`g = 5;` where g is `long` — assign a small constant to a long global. BCC writes the two halves separately: `mov word ptr DGROUP:_g,5` (low) then `mov word ptr DGROUP:_g+2,0` (high)."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

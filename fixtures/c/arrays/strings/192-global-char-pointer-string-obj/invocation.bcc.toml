@@ -1,5 +1,6 @@
 description = "`char *p = \"hi\";` — char-pointer global initialized with a string literal. Pointer storage in _DATA (2 bytes), the literal lives elsewhere; BCC writes a SegRel fixup so `p` resolves to the literal's address at link time."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

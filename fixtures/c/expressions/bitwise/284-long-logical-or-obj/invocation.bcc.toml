@@ -1,5 +1,6 @@
 description = "`if (a || b)` for two longs. Probes how BCC tests longs as booleans in short-circuit context."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]

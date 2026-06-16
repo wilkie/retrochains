@@ -1,4 +1,5 @@
 description = "printf(\"...\", name) where name is a char-pointer global. Confirms the push-global path (4131) also handles 2-byte pointer values that get FIXUP'd; mixes _DATA and CONST FIXUPs in one TU."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

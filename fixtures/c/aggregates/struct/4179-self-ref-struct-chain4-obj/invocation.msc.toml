@@ -1,4 +1,5 @@
 description = "4-node self-ref struct chain"
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

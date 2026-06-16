@@ -1,4 +1,5 @@
 description = "TU-local void function with two int parameters. Probes RTL push order."
 tool = "cl"
 args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
 inputs = ["HELLO.C"]

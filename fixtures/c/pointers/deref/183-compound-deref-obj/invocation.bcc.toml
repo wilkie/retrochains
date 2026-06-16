@@ -1,5 +1,6 @@
 description = "`*p += 5` — compound assignment through a dereferenced pointer. Sibling of fixture 182's `p->x += 5`; same `add word ptr [reg],imm8` shape but the address operand has no field offset."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
+link_args = ['-LC:\LIB', '-ms', 'HELLO.C']
 inputs = ["HELLO.C"]
 asm_args = ["-S", "-ms", "HELLO.C"]
