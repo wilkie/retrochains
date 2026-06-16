@@ -174,6 +174,14 @@ pub fn link_overlay(
             image.relocations.push(((i * 8) as u16, frame));
         }
     }
+    // TLINK writes the INT 3F template into _STUB_ (its bytes in OVERLAY.LIB are
+    // zero); the manager copies it when faulting overlays in.
+    if let Some(stub) = image.map.segments.iter().find(|s| s.name == "_STUB_") {
+        if stub.start + 2 <= image.file_image.len() {
+            image.file_image[stub.start] = 0xcd;
+            image.file_image[stub.start + 1] = 0x3f;
+        }
+    }
 
     let mut exe = mz::write(&image);
     // Append the FBOV overlay area (beyond the MZ-declared image).

@@ -408,8 +408,13 @@ fn resolve_entry(
 struct Target {
     /// Absolute image address of the target (0 for a pure group selector).
     addr: usize,
-    /// Paragraph of the target's own frame (segment paragraph, or group base).
+    /// Paragraph the reference is *measured against* — the group base for a
+    /// grouped target, so near offsets stay group-relative.
     frame_para: u16,
+    /// Paragraph deposited by a segment selector — the target's own segment
+    /// paragraph (the group base only for a group target). Equal to
+    /// `frame_para` for ungrouped targets.
+    seg_para: u16,
 }
 
 /// Base paragraph of a group: the lowest load paragraph among its segments.
@@ -464,6 +469,7 @@ fn apply_fixup(
             Target {
                 addr: combined[tp.combined].load_offset + tp.base,
                 frame_para: combined_frame[tp.combined],
+                seg_para: (combined[tp.combined].load_offset >> 4) as u16,
             }
         }
         5 => {
@@ -471,7 +477,7 @@ fn apply_fixup(
                 .target_datum
                 .ok_or_else(|| LinkError::UnsupportedFixup("T5 without datum".into()))?;
             let base = group_base_para(module, module_placements, combined, idx);
-            Target { addr: usize::from(base) << 4, frame_para: base }
+            Target { addr: usize::from(base) << 4, frame_para: base, seg_para: base }
         }
         6 => {
             let idx = fx
@@ -484,9 +490,13 @@ fn apply_fixup(
             if let Some(&(ci, addr)) = symbols.get(name) {
                 // Overlaid functions: redirect the far call to the stub thunk.
                 let addr = addr + usize::from(thunks.get(name).copied().unwrap_or(0));
-                Target { addr, frame_para: combined_frame[ci] }
+                Target { addr, frame_para: combined_frame[ci], seg_para: (combined[ci].load_offset >> 4) as u16 }
             } else if let Some(&(frame, offset)) = absolutes.get(name) {
-                Target { addr: (usize::from(frame) << 4) + usize::from(offset), frame_para: frame }
+                Target {
+                    addr: (usize::from(frame) << 4) + usize::from(offset),
+                    frame_para: frame,
+                    seg_para: frame,
+                }
             } else {
                 return Err(LinkError::UnresolvedExternal(name.clone()));
             }
@@ -503,6 +513,14 @@ fn apply_fixup(
         _ => target.frame_para,
     };
     let frame_base = usize::from(frame_para) << 4;
+    // The paragraph a segment selector / far-pointer segment word deposits: the
+    // target's own segment paragraph, not the group base (they differ only for a
+    // grouped target). Near offsets still use the group-relative `frame_para`.
+    let selector_para = match fx.frame_method {
+        1 => frame_para,
+        4 => (combined[place.combined].load_offset >> 4) as u16,
+        _ => target.seg_para,
+    };
 
     let off = place.base + usize::from(fx.data_offset);
     // Relocation framing: the frame is the patched segment's load paragraph,
@@ -533,14 +551,14 @@ fn apply_fixup(
         // Segment selector — deposit the frame paragraph, relocate it.
         2 => {
             let existing = read_u16(seg, off);
-            write_u16(seg, off, existing.wrapping_add(frame_para));
+            write_u16(seg, off, existing.wrapping_add(selector_para));
             Ok(Some(((off + loc_off_base) as u16, loc_frame)))
         }
         // Far pointer — 16-bit offset (in frame) then the frame segment word.
         3 => {
             let existing_off = read_u16(seg, off);
             write_u16(seg, off, existing_off.wrapping_add((target.addr - frame_base) as u16));
-            write_u16(seg, off + 2, frame_para);
+            write_u16(seg, off + 2, selector_para);
             Ok(Some(((off + 2 + loc_off_base) as u16, loc_frame)))
         }
         other => Err(LinkError::UnsupportedFixup(format!("location type {other}"))),
