@@ -1,0 +1,24 @@
+[package]
+name = "bcc-tlib"
+description = "Reimplementation of Turbo Librarian 2.0 (TLIB.EXE), the Borland C++ 2.0 librarian"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "bcc_tlib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tlib"
+path = "src/main.rs"
+
+[dependencies]
+obj = { path = "../obj" }
+thiserror = "2"
+
+[lints]
+workspace = true

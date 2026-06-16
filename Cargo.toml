@@ -4,6 +4,7 @@ members = [
     "crates/bcc",
     "crates/msc",
     "crates/bcc-tlink",
+    "crates/bcc-tlib",
     "crates/bcc-tasm",
     "crates/obj",
     "crates/x86",

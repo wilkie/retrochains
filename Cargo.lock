@@ -70,6 +70,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bcc-tlib"
+version = "0.0.0"
+dependencies = [
+ "obj",
+ "thiserror",
+]
+
+[[package]]
 name = "bcc-tlink"
 version = "0.0.0"
 dependencies = [
