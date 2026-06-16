@@ -102,7 +102,9 @@ pub fn link_overlay(
     let name = exe_name.to_ascii_lowercase();
     let entries_end = seg_count * 8;
     let table_size = entries_end + name.len() + 1 + 7;
-    if let Some((mi, si)) = modules.iter().enumerate().find_map(|(mi, m)| {
+    // Size the LAST module's _EXEINFO_ contribution (all are originally empty),
+    // so no later empty contribution alignment-pads past the generated table.
+    if let Some((mi, si)) = modules.iter().enumerate().rev().find_map(|(mi, m)| {
         m.segdefs.iter().position(|s| s.name == "_EXEINFO_").map(|si| (mi, si))
     }) {
         let seg = &mut modules[mi].segdefs[si];
