@@ -1,0 +1,4 @@
+description = "Two modules each give a tentative definition of the same global `shared`. BCC emits each as a DEFINITE public, so linking the two TUs is a duplicate-symbol error (TLINK exits non-zero) — the opposite of MSC, which emits communal COMDEFs that MS LINK merges. This BCC fixture therefore captures the compile stage only (both OBJs gate our tentative-def emission); the link divergence is cataloged in specs/linkers/DIFFERENCES.md. Its MSC sibling (invocation.msc.toml) links cleanly."
+tool = "bcc"
+args = ["-c", "-ms", "MOD1.C", "MOD2.C"]
+inputs = ["MOD1.C", "MOD2.C"]

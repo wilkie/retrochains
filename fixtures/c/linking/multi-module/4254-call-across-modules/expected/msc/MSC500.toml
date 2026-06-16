@@ -1,0 +1,38 @@
+[run]
+exit_code = 0
+stdout_sha256 = "15050e6e57122f4a1f275d121f1182f10420e25dbe0d35c75fb8075c640dc353"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "MOD1.EXE"
+size = 2327
+sha256 = "7ee24be57551dccd9988e677a4230883d75f6304b51e51fbcca7365849f11f55"
+mtime = "1987-10-15T12:00:00Z"
+
+[[outputs]]
+name = "MOD1.MAP"
+size = 4804
+sha256 = "2cf23756d29a92e0a0f8a1e3848a683b9305359c25e68cab97caaad0809a2c0c"
+mtime = "1987-10-15T12:00:00Z"
+
+[[outputs]]
+name = "MOD1.OBJ"
+size = 271
+sha256 = "572c65063927304d14de0b4ce10012234c0dcc5694b0f3a9e82e61050fae8b56"
+mtime = "1987-10-15T12:00:00Z"
+
+[[outputs]]
+name = "MOD2.OBJ"
+size = 260
+sha256 = "a0717ccd96f6bdf0844fc01f89ce880ab8ccc812abc22df4d461952613819cea"
+mtime = "1987-10-15T12:00:00Z"
+
+[oracle]
+tool = "cl"
+args = [
+    "/c",
+    "/AS",
+    "MOD1.C",
+    "MOD2.C",
+]
+fake_time = "1987-10-15T12:00:00Z"

@@ -1,0 +1,5 @@
+description = "Two-module link: MOD1.main() calls extern helper() in MOD2. Exercises cross-TU public/extern resolution and segment combination — the smallest thing a single-TU compile+link can't reach. Primary args compile both TUs (gates our compiler on each); link_args drives BCC's TLINK to the .EXE + .MAP."
+tool = "bcc"
+args = ["-c", "-ms", "MOD1.C", "MOD2.C"]
+inputs = ["MOD1.C", "MOD2.C"]
+link_args = ['-M', '-LC:\LIB', '-ms', 'MOD1.C', 'MOD2.C']

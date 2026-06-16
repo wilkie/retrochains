@@ -1,0 +1,5 @@
+description = "Three-module link (MSC): main->b->c across MOD1/MOD2/MOD3. Exercises transitive resolution and segment combination ordering across three OBJs through MS LINK."
+tool = "cl"
+args = ["/c", "/AS", "MOD1.C", "MOD2.C", "MOD3.C"]
+inputs = ["MOD1.C", "MOD2.C", "MOD3.C"]
+link_args = ["/AS", "/Fm", "MOD1.C", "MOD2.C", "MOD3.C"]

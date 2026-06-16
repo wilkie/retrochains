@@ -1,0 +1,5 @@
+description = "Three-module link: main->b->c across MOD1/MOD2/MOD3. Exercises transitive public/extern resolution and _TEXT segment combination ordering across three OBJs (TLINK). Gates our compiler on each TU; .EXE + .MAP advisory."
+tool = "bcc"
+args = ["-c", "-ms", "MOD1.C", "MOD2.C", "MOD3.C"]
+inputs = ["MOD1.C", "MOD2.C", "MOD3.C"]
+link_args = ['-M', '-LC:\LIB', '-ms', 'MOD1.C', 'MOD2.C', 'MOD3.C']

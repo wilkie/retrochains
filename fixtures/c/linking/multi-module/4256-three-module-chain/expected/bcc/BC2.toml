@@ -1,0 +1,45 @@
+[run]
+exit_code = 0
+stdout_sha256 = "30f9d38515087407f910aaaba6288b728f4507c91664ec84cae7edb33eec771a"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "MOD1.EXE"
+size = 3850
+sha256 = "04c68e1acc6662fb4832159c2ea421a1a8e7a2d01cdc67f1233497cd3280705e"
+mtime = "1991-04-23T12:00:00Z"
+
+[[outputs]]
+name = "MOD1.MAP"
+size = 4829
+sha256 = "b0869a208f196135cafad66e246d499dd1c0222aad04123ea4631c55a8c34dbe"
+mtime = "1991-04-23T12:00:00Z"
+
+[[outputs]]
+name = "MOD1.OBJ"
+size = 233
+sha256 = "aa54e2cec811fe583afe72b59d74ddc5bd0602340e8bb38cca9055755a78f7b7"
+mtime = "1991-04-23T12:00:00Z"
+
+[[outputs]]
+name = "MOD2.OBJ"
+size = 230
+sha256 = "bcd94729c498b2c48222b53f729438b4d8f1c33d284403539b3193fdc2022828"
+mtime = "1991-04-23T12:00:00Z"
+
+[[outputs]]
+name = "MOD3.OBJ"
+size = 211
+sha256 = "a25a7453778a56952f14eee9800c15a3c57e0b932e7167dc8993f06e8e74e50d"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "bcc"
+args = [
+    "-c",
+    "-ms",
+    "MOD1.C",
+    "MOD2.C",
+    "MOD3.C",
+]
+fake_time = "1991-04-23T12:00:00Z"

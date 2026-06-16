@@ -18,7 +18,7 @@ fn main() -> ExitCode {
 }
 
 fn try_main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut source: Option<PathBuf> = None;
+    let mut sources: Vec<PathBuf> = Vec::new();
     let mut saw_c = false;
     let mut saw_as = false;
     for arg in std::env::args().skip(1) {
@@ -35,12 +35,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
             other if other.starts_with('/') || other.starts_with('-') => {
                 return Err(format!("unrecognized flag {other:?}").into());
             }
-            other => {
-                if source.is_some() {
-                    return Err("multiple source files not yet supported".into());
-                }
-                source = Some(PathBuf::from(other));
-            }
+            other => sources.push(PathBuf::from(other)),
         }
     }
     if !saw_c {
@@ -49,18 +44,25 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     if !saw_as {
         return Err("Phase 1 Slice 1 only supports small model `/AS`".into());
     }
-    let source = source.ok_or("missing source-file argument")?;
+    if sources.is_empty() {
+        return Err("missing source-file argument".into());
+    }
 
-    // CL echoes the source filename (uppercased) to stdout with CRLF
-    // before starting compilation. Match its behavior so captured
-    // stdouts compare byte-for-byte. Fixture 4075.
-    let source_basename = source
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_uppercase();
-    print!("{source_basename}\r\n");
-
-    msc::emit_dash_c(&source)?;
+    // CL compiles each source independently into its own OBJ (each is a
+    // separate translation unit). It echoes the source filename (uppercased)
+    // to stdout with CRLF before compiling it; with several sources it echoes
+    // each in turn. Match that so captured stdouts compare byte-for-byte
+    // (fixture 4075). Multi-source links via LINK, which we don't reimplement —
+    // the `linking/` fixtures gate on the per-TU OBJs and treat the .EXE/.MAP
+    // as advisory.
+    for source in &sources {
+        let source_basename = source
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        print!("{source_basename}\r\n");
+        msc::emit_dash_c(source)?;
+    }
     Ok(())
 }

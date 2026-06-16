@@ -1,0 +1,5 @@
+description = "Two modules (MSC) each give a tentative definition of `shared`; MS LINK merges the communal definitions. Gates our cl's COMDEF emission per TU; .EXE + .MAP advisory."
+tool = "cl"
+args = ["/c", "/AS", "MOD1.C", "MOD2.C"]
+inputs = ["MOD1.C", "MOD2.C"]
+link_args = ["/AS", "/Fm", "MOD1.C", "MOD2.C"]

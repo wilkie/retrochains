@@ -1,0 +1,5 @@
+description = "Two-module link (MSC): MOD1 reads/writes an extern int defined in MOD2. Exercises cross-TU data-symbol resolution and group combination through MS LINK."
+tool = "cl"
+args = ["/c", "/AS", "MOD1.C", "MOD2.C"]
+inputs = ["MOD1.C", "MOD2.C"]
+link_args = ["/AS", "/Fm", "MOD1.C", "MOD2.C"]

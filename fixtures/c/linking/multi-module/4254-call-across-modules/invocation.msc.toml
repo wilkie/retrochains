@@ -1,0 +1,5 @@
+description = "Two-module link (MSC): MOD1.main() calls extern helper() in MOD2. Exercises cross-TU public/extern resolution through MS LINK. Primary args compile both TUs (gates our cl on each); link_args drives CL+LINK to the .EXE + .MAP (/Fm)."
+tool = "cl"
+args = ["/c", "/AS", "MOD1.C", "MOD2.C"]
+inputs = ["MOD1.C", "MOD2.C"]
+link_args = ["/AS", "/Fm", "MOD1.C", "MOD2.C"]

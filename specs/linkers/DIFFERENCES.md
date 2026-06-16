@@ -54,6 +54,46 @@ true *linker* fingerprint, robust to string-stripping.
 | entry `e_ip` | `0x0000` | `0x0018` | STRONG: different startup-stub placement within `_TEXT`. |
 | file size | `0xeea` (3818) | `0x907` (2311) | WEAK on its own: TLINK's default link is larger here. |
 
+## Tier B — `.MAP` segment table & symbol policy (linker-intrinsic)
+
+The linker map (`bcc -M` / `cl /Fm`) exposes the linker's **segment ordering and
+class names** directly — a high-signal structural fingerprint independent of any
+runtime strings. From the `linking/multi-module` fixtures (4254–4257):
+
+- **Segment class vocabulary** (DEFINITIVE for the linker family — the names are
+  emitted by the compiler's segment directives but the *ordered table* is the
+  linker's):
+  - TLINK: `_TEXT/CODE`, `_FARDATA/FAR_DATA`, `_FARBSS/FAR_BSS`,
+    `_OVERLAY_/OVRINFO`, `_1STUB_/STUBSEG`, `_DATA/DATA`, `_CVTSEG`/`_SCNSEG`,
+    `_CONST/CONST`, `_INIT_/INITDATA`, `_EXIT_/EXITDATA`, `_BSS/BSS`,
+    `_STACK/STACK`. The `OVRINFO`/`STUBSEG`/`INITDATA`/`EXITDATA` classes are
+    Borland-specific.
+  - MS LINK: `_TEXT/CODE`, `C_ETEXT/ENDCODE`, `NULL/BEGDATA`, `_DATA/DATA`,
+    `CDATA/DATA`, then the `XIFB…XIFE` / `XIB…XIE` / `XPB…XPE` / `XCB…XCE`
+    initializer-table classes, `CONST`, `_BSS`, `STACK`. The `C_ETEXT`/`NULL`
+    guard segments and the `Xxx` init/term tables are Microsoft-specific.
+- **Publics table layout**: TLINK prints `Address  Publics by Name` then
+  `… Publics by Value`, segment:offset as `00A7:0000`, with `Abs` for absolute
+  symbols (`__AHINCR`, `__AHSHIFT`). MS LINK's columns and value formatting
+  differ. (Detailed column diff: TODO as the sample grows.)
+
+## Communal vs definite tentative definitions (compiler→linker behavior)
+
+A file-scope `int g;` with no initializer is a *tentative definition*. The two
+toolchains resolve a same-named tentative def in **two** TUs differently
+(fixture 4257):
+
+- **MSC/CL**: emits each as a **communal `COMDEF`**; MS LINK merges them into one
+  BSS slot → links clean (exit 0).
+- **BCC/TLINK**: emits each as a **definite public** in `_BSS`; TLINK sees a
+  **duplicate symbol** and fails the link (non-zero exit). So the BCC sibling of
+  4257 captures the *compile* stage only — the duplicate-symbol behavior is the
+  fingerprint, not a clean EXE.
+
+This is a usable discriminator: a multi-TU program with shared uninitialized
+globals links under MS LINK but not under a naive BCC `bcc *.c` — Borland code
+relies on exactly one definition (or `extern`) per global.
+
 ## Why the A/B split matters for decompilation
 
 A compiler-aware loader should check **both** tiers and report confidence
@@ -72,6 +112,9 @@ tamper-resistant single discriminators.
   already reproduce byte-exact via the provisioner — then entry-stub matching can
   reuse those known bytes directly.
 - Drive the **linkers directly** (`Tool::Tlink` / `Tool::Link`) on hand-built
-  OBJs to isolate pure linker behavior from compiler-driver defaults.
+  OBJs to isolate pure linker behavior from compiler-driver defaults. The
+  `linking/multi-module` fixtures already widen the Tier-B sample via the
+  driver (multiple TUs, real `.MAP`s); standalone-linker fixtures are the next
+  bucket (see `fixtures/c/linking/README.md`).
 - Grade these toward DEFINITIVE/STRONG/WEAK as the sample set grows; cite the
   fixture that demonstrates each.

@@ -70,7 +70,17 @@ roll-out skips them and logs the count.
 
 ## Status / order
 
-1. Land the `link_args` mechanism + validate on one fixture. ← do first
-2. Roll out across the linkable corpus; batch-capture the EXE goldens (the pool).
-3. Build the dedicated `linking/` area for linker-intrinsic cases.
+1. ~~Land the `link_args` mechanism + validate on one fixture.~~ **Done.**
+2. ~~Roll out across the linkable corpus; batch-capture the EXE goldens (the
+   pool).~~ **Done** — 2961 BCC + 2990 MSC fixtures carry a link stage; failing
+   links (unresolved externs) excluded. `.EXE`/`.MAP` are advisory under
+   `--toolchain ours` (no linker reimpl yet).
+3. **In progress — dedicated `linking/` area.** `multi-module/` bucket landed
+   (4254–4257): cross-TU function/data resolution, three-module chains,
+   communal-vs-definite tentative-def divergence — each with real `.MAP`s for
+   both linkers. Both our `bcc` and `cl` gained multi-source support so these
+   gate the compiler per TU. See `fixtures/c/linking/README.md`. **Next:** the
+   standalone-linker bucket (`tool = "tlink"`/`"link"` on hand-built OBJs) —
+   blocked on the tracked-OBJ-input vs cross-tool-chain decision noted in that
+   README.
 4. Stand up the MZ reader + EXE fingerprinting against the pool.

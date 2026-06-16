@@ -1,0 +1,5 @@
+description = "Two-module link: MOD1 reads/writes an extern int defined in MOD2. Exercises cross-TU data-symbol (extern variable) resolution and DGROUP combination across modules via BCC's TLINK. Gates our compiler on each TU; .EXE + .MAP advisory."
+tool = "bcc"
+args = ["-c", "-ms", "MOD1.C", "MOD2.C"]
+inputs = ["MOD1.C", "MOD2.C"]
+link_args = ['-M', '-LC:\LIB', '-ms', 'MOD1.C', 'MOD2.C']
