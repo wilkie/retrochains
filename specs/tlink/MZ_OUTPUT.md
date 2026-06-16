@@ -94,11 +94,18 @@ Handled so far (`link.rs::apply_fixup`), location type 1 (near 16-bit offset):
   `specs/formats/OMF.md`.)
 - **Far pointer** (location type 3), e.g. a far `CALL` to an `EXTRN FAR` (M=1,
   frame F5, target T6): the 4-byte field gets `offset = target's distance into
-  its segment` then `segment = target segment's frame paragraph` (load-relative),
-  and the segment word gets a **runtime relocation** entry. 4260's
-  `CALL FARPROC` → `9A 00 00 11 00` + reloc `(0x0003, 0x0000)`.
+  its frame` then `segment = frame paragraph` (load-relative), and the segment
+  word gets a **runtime relocation** entry. 4260's `CALL FARPROC` →
+  `9A 00 00 11 00` + reloc `(0x0003, 0x0000)`.
+- **Segment selector** (location type 2), e.g. `MOV AX, @DATA` (M=1, frame F5,
+  target T5 = GRPDEF): deposit the **frame paragraph** into the 16-bit immediate
+  and relocate it. 4261's `MOV AX, @DATA` → `B8 01 00` (DGROUP base = para 1) +
+  reloc `(0x0001, 0x0000)`.
 
-Near fixups produce **no runtime relocation** (the value is final once segments
-are placed); far pointers add one `e_crlc` entry each. Still ahead: segment
-selectors (location type 2, e.g. `MOV AX, SEG x` / `@DATA`) and far data
-pointers, then library resolution.
+All fixups share one **frame paragraph** rule, by frame method: F1 = a named
+group's base paragraph (lowest load paragraph among its segments), F4 = the
+patched location's own segment, F5 = the target's frame (a segment's paragraph,
+or a group target's base). Near fixups produce **no relocation** (value final
+once placed); segment selectors and far pointers each add one `e_crlc` entry.
+Still ahead: far *data* pointers, then library (`.LIB`) resolution and linking
+BCC-compiled OBJs (C startup + DGROUP) standalone.

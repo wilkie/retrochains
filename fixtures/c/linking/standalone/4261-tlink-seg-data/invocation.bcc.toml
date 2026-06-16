@@ -1,0 +1,4 @@
+description = "Standalone TLINK segment selector: MAIN does `MOV AX, @DATA / MOV DS, AX` — the canonical DOS DS setup. `@DATA` is an OMF location-type-2 (segment base) fixup targeting the DGROUP group (T5); TLINK deposits the group's load-relative paragraph into the immediate and emits a runtime relocation for it. Single module; pins group-base resolution and seg-base relocations. tool=tlink gates MAIN.EXE."
+tool = "tlink"
+args = ["/m", "MAIN.OBJ,MAIN.EXE,MAIN.MAP"]
+inputs = ["MAIN.OBJ"]
