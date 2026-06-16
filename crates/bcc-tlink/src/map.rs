@@ -31,8 +31,10 @@ pub fn format(image: &Image) -> Vec<u8> {
 
     // Publics by value (frame:offset).
     s.push_str("  Address         Publics by Value\r\n\r\n");
+    // Absolute equates group first (sorted by offset), then relocatable
+    // symbols by (frame, offset); ties break by definition order.
     let mut by_value: Vec<&MapPublic> = image.map.publics.iter().collect();
-    by_value.sort_by_key(|p| (p.frame, p.offset, p.name.clone()));
+    by_value.sort_by_key(|p| (!p.absolute, p.frame, p.offset, p.seq));
     for p in by_value {
         push_public(&mut s, p);
     }
@@ -46,5 +48,8 @@ pub fn format(image: &Image) -> Vec<u8> {
 }
 
 fn push_public(s: &mut String, p: &MapPublic) {
-    s.push_str(&format!(" {:04X}:{:04X}       {}\r\n", p.frame, p.offset, p.name));
+    // Absolute equates carry an `Abs` tag in the 7-column gap after the
+    // address; ordinary symbols leave it blank.
+    let gap = if p.absolute { "  Abs  " } else { "       " };
+    s.push_str(&format!(" {:04X}:{:04X}{}{}\r\n", p.frame, p.offset, gap, p.name));
 }

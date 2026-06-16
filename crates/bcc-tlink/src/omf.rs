@@ -36,9 +36,13 @@ pub struct GrpDef {
 #[derive(Debug, Clone)]
 pub struct PubDef {
     pub name: String,
-    /// 1-based SEGDEF index this symbol is measured from.
+    /// 1-based SEGDEF index this symbol is measured from. `0` marks an
+    /// absolute symbol, whose value is `absolute_frame:offset` (a constant
+    /// not tied to any combined segment).
     pub base_segment: u8,
     pub offset: u16,
+    /// Frame paragraph for an absolute (`base_segment == 0`) public.
+    pub absolute_frame: u16,
 }
 
 /// One fixup, normalized: patch `width` bits at `data_offset` within its
@@ -170,9 +174,11 @@ pub fn parse(bytes: &[u8]) -> Result<Module, ParseError> {
             obj::LEDATA_16 => {
                 last_ledata = Some(parse_ledata(&mut module, rec.payload)?);
             }
+            obj::LIDATA_16 => {
+                last_ledata = Some(parse_lidata(&mut module, rec.payload)?);
+            }
             obj::FIXUPP_16 => parse_fixupp(&mut module, rec.payload, last_ledata)?,
             obj::MODEND_16 => parse_modend(&mut module, rec.payload)?,
-            // LIDATA (repeated data) hasn't appeared in a linker input yet.
             other => return Err(unsupported(other, &rec)),
         }
     }
@@ -233,11 +239,15 @@ fn parse_pubdef(module: &mut Module, payload: &[u8]) -> Result<(), ParseError> {
     let mut p = payload;
     let _base_group = take_u8(&mut p)?;
     let base_segment = take_u8(&mut p)?;
+    // An absolute group (base group 0) with base segment 0 carries a 16-bit
+    // Base Frame before the symbol list — these are absolute equates
+    // (e.g. `__AHSHIFT`, `__AHINCR`).
+    let absolute_frame = if base_segment == 0 { take_u16(&mut p)? } else { 0 };
     while !p.is_empty() {
         let name = take_pstr(&mut p)?;
         let offset = take_u16(&mut p)?;
         let _type_idx = take_u8(&mut p)?;
-        module.pubdefs.push(PubDef { name, base_segment, offset });
+        module.pubdefs.push(PubDef { name, base_segment, offset, absolute_frame });
     }
     Ok(())
 }
@@ -268,6 +278,57 @@ fn parse_ledata(module: &mut Module, payload: &[u8]) -> Result<(u8, u16), ParseE
     seg.data[start..end].copy_from_slice(p);
     seg.has_data = true;
     Ok((seg_idx, offset))
+}
+
+/// Expand a LIDATA (iterated data) record into concrete bytes and write them
+/// into the target segment, the same way LEDATA does. The iterated-data blocks
+/// recursively encode `repeat × content`; we flatten them.
+fn parse_lidata(module: &mut Module, payload: &[u8]) -> Result<(u8, u16), ParseError> {
+    let mut p = payload;
+    let seg_idx = take_u8(&mut p)?;
+    let offset = take_u16(&mut p)?;
+    let mut expanded = Vec::new();
+    while !p.is_empty() {
+        expand_block(&mut p, &mut expanded)?;
+    }
+    let seg = module
+        .segdefs
+        .get_mut(usize::from(seg_idx))
+        .ok_or(ParseError::BadSegmentIndex(seg_idx))?;
+    let start = usize::from(offset);
+    let end = start + expanded.len();
+    if end > seg.data.len() {
+        seg.data.resize(end, 0);
+    }
+    seg.data[start..end].copy_from_slice(&expanded);
+    seg.has_data = true;
+    Ok((seg_idx, offset))
+}
+
+/// Decode one 16-bit iterated-data block, appending its expansion to `out`.
+fn expand_block(p: &mut &[u8], out: &mut Vec<u8>) -> Result<(), ParseError> {
+    let repeat = take_u16(p)?;
+    let block_count = take_u16(p)?;
+    // The content produced by one iteration.
+    let mut once = Vec::new();
+    if block_count == 0 {
+        // Leaf: a length-prefixed run of literal bytes.
+        let len = usize::from(take_u8(p)?);
+        if p.len() < len {
+            return Err(ParseError::Truncated { record: "LIDATA" });
+        }
+        let (bytes, rest) = p.split_at(len);
+        once.extend_from_slice(bytes);
+        *p = rest;
+    } else {
+        for _ in 0..block_count {
+            expand_block(p, &mut once)?;
+        }
+    }
+    for _ in 0..repeat {
+        out.extend_from_slice(&once);
+    }
+    Ok(())
 }
 
 fn parse_fixupp(

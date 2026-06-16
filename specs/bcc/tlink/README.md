@@ -14,6 +14,10 @@ Discoveries about `TLINK.EXE` go here. Suggested files:
   produces.
 - `LIBRARY_RESOLUTION.md` — how TLINK searches `.LIB` archives, what gets
   pulled in, symbol resolution order.
+- `CAPSTONE.md` — the end-to-end proof: linking a real BCC program against the
+  real `C0S.OBJ` startup + `CS.LIB` runtime, byte-exact. Collects the segment
+  ordering / alignment / framing / member-placement rules that the small
+  standalone fixtures don't reach.
 - `OVERLAYS.md` — overlay support if/when we encounter it.
 
 Always link discoveries back to the fixture that demonstrates them.

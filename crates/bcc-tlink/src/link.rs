@@ -46,12 +46,17 @@ pub struct MapSegment {
     pub class: String,
 }
 
-/// One `.MAP` public-symbol entry (`frame:offset`).
+/// One `.MAP` public-symbol entry (`frame:offset`). `name` is already
+/// upper-cased the way TLINK renders it; `absolute` marks an equate, which
+/// the listing tags with `Abs`. `seq` is the symbol's definition order, used
+/// to break `Publics by Value` ties the way TLINK does (insertion order).
 #[derive(Debug)]
 pub struct MapPublic {
     pub frame: u16,
     pub offset: u16,
     pub name: String,
+    pub absolute: bool,
+    pub seq: usize,
 }
 
 /// Everything the `.MAP` needs beyond the [`Image`]'s entry point.
@@ -147,15 +152,68 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
         placements.push(per_module);
     }
 
-    // Pass 2 — lay out combined segments into the image. Each combined
-    // segment starts on a paragraph boundary so it owns a clean frame
-    // (CS/SS/group bases are exact paragraph numbers). Within-segment
-    // alignment of contributions was already applied in pass 1.
+    // Pass 1b — reorder combined segments to group by class, classes in
+    // first-appearance order and segments within a class in first-appearance
+    // order. This reproduces TLINK's DOSSEG-directed segment ordering (the C0
+    // startup object carries the `DOSSEG` linker COMENT). Placement indices are
+    // remapped so passes 3/4 stay consistent.
+    let classes: Vec<String> = combined.iter().map(|c| c.class.clone()).collect();
+    let mut class_rank: HashMap<String, usize> = HashMap::new();
+    for class in &classes {
+        let next = class_rank.len();
+        class_rank.entry(class.clone()).or_insert(next);
+    }
+    let mut order: Vec<usize> = (0..combined.len()).collect();
+    order.sort_by_key(|&i| (class_rank[&classes[i]], i));
+    let mut remap = vec![0usize; combined.len()];
+    for (new_pos, &old) in order.iter().enumerate() {
+        remap[old] = new_pos;
+    }
+    let mut taken: Vec<Option<Combined>> = combined.into_iter().map(Some).collect();
+    let mut combined: Vec<Combined> =
+        order.iter().map(|&i| taken[i].take().expect("each index taken once")).collect();
+    for per_module in &mut placements {
+        for slot in per_module.iter_mut().flatten() {
+            slot.combined = remap[slot.combined];
+        }
+    }
+
+    // Group membership per combined segment (which group, if any, owns it) —
+    // needed both to pack grouped segments and to frame grouped publics.
+    let mut group_names: Vec<String> = Vec::new();
+    let mut group_of: Vec<Option<usize>> = vec![None; combined.len()];
+    for (m, module) in modules.iter().enumerate() {
+        for g in &module.grpdefs {
+            let gid = group_names.iter().position(|n| n == &g.name).unwrap_or_else(|| {
+                group_names.push(g.name.clone());
+                group_names.len() - 1
+            });
+            for &s in &g.segments {
+                if let Some(p) = placements[m].get(usize::from(s)).copied().flatten() {
+                    group_of[p.combined] = Some(gid);
+                }
+            }
+        }
+    }
+
+    // Pass 2 — lay out combined segments into the image. A segment that
+    // continues the same group as the one before it is packed at its own
+    // alignment (byte/word/para from the SEGDEF ACBP); every other segment —
+    // the first member of a group, or any ungrouped segment — starts a fresh
+    // paragraph so it owns a clean frame. This matches TLINK: DGROUP's interior
+    // segments pack tight, but each new frame begins on a paragraph boundary.
     let mut cursor = 0usize;
-    for c in &mut combined {
-        cursor = align_up(cursor, 16);
+    let mut prev_group: Option<usize> = None;
+    for (ci, c) in combined.iter_mut().enumerate() {
+        let to = if group_of[ci].is_some() && group_of[ci] == prev_group {
+            align_bytes(c.align)
+        } else {
+            16
+        };
+        cursor = align_up(cursor, to);
         c.load_offset = cursor;
         cursor += c.length;
+        prev_group = group_of[ci];
     }
     let mem_size = cursor;
 
@@ -163,8 +221,19 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
     // The combined segment is kept so far fixups can recover the target's
     // frame paragraph.
     let mut symbols: HashMap<String, (usize, usize)> = HashMap::new();
+    // Absolute publics (base segment 0): a fixed frame:offset, no segment.
+    let mut absolutes: HashMap<String, (u16, u16)> = HashMap::new();
+    // Definition order (first occurrence) per symbol, for by-value tie-breaking.
+    let mut seqs: HashMap<String, usize> = HashMap::new();
+    let mut seq_counter = 0usize;
     for (m, module) in modules.iter().enumerate() {
         for pubdef in &module.pubdefs {
+            seqs.entry(pubdef.name.clone()).or_insert(seq_counter);
+            seq_counter += 1;
+            if pubdef.base_segment == 0 {
+                absolutes.insert(pubdef.name.clone(), (pubdef.absolute_frame, pubdef.offset));
+                continue;
+            }
             if let Some(p) = placements[m]
                 .get(usize::from(pubdef.base_segment))
                 .copied()
@@ -184,7 +253,7 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
             let Some(place) = placements[m][seg_idx] else { continue };
             for fx in &seg.fixups {
                 if let Some(reloc) =
-                    apply_fixup(&mut combined, place, fx, &placements[m], module, &symbols)?
+                    apply_fixup(&mut combined, place, fx, &placements[m], module, &symbols, &absolutes)?
                 {
                     relocations.push(reloc);
                 }
@@ -227,12 +296,45 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
             class: c.class.clone(),
         })
         .collect();
+    // A public defined in a grouped segment (e.g. DGROUP) is reported relative
+    // to the group's base paragraph, not its own segment's paragraph. Build a
+    // per-combined-segment frame paragraph: the group base where grouped, else
+    // the segment's own load paragraph.
+    let mut combined_frame: Vec<u16> =
+        combined.iter().map(|c| (c.load_offset >> 4) as u16).collect();
+    // Per-group base paragraph: the lowest load paragraph among its segments.
+    let mut group_base: Vec<Option<u16>> = vec![None; group_names.len()];
+    for (ci, &gid) in group_of.iter().enumerate() {
+        if let Some(gid) = gid {
+            let para = (combined[ci].load_offset >> 4) as u16;
+            group_base[gid] = Some(group_base[gid].map_or(para, |b| b.min(para)));
+        }
+    }
+    for (ci, &gid) in group_of.iter().enumerate() {
+        if let Some(base) = gid.and_then(|g| group_base[g]) {
+            combined_frame[ci] = base;
+        }
+    }
+
     let mut publics: Vec<MapPublic> = symbols
         .iter()
         .map(|(name, &(ci, addr))| {
-            let frame = (combined[ci].load_offset >> 4) as u16;
-            MapPublic { frame, offset: (addr - usize::from(frame) * 16) as u16, name: name.clone() }
+            let frame = combined_frame[ci];
+            MapPublic {
+                frame,
+                offset: (addr - usize::from(frame) * 16) as u16,
+                name: name.to_uppercase(),
+                absolute: false,
+                seq: seqs.get(name).copied().unwrap_or(usize::MAX),
+            }
         })
+        .chain(absolutes.iter().map(|(name, &(frame, offset))| MapPublic {
+            frame,
+            offset,
+            name: name.to_uppercase(),
+            absolute: true,
+            seq: seqs.get(name).copied().unwrap_or(usize::MAX),
+        }))
         .collect();
     publics.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -306,6 +408,7 @@ fn apply_fixup(
     module_placements: &[Option<Placement>],
     module: &Module,
     symbols: &HashMap<String, (usize, usize)>,
+    absolutes: &HashMap<String, (u16, u16)>,
 ) -> Result<Option<(u16, u16)>, LinkError> {
     // Absolute image address of the bytes being patched.
     let patch_addr = combined[place.combined].load_offset + place.base + usize::from(fx.data_offset);
@@ -342,9 +445,13 @@ fn apply_fixup(
                 .extdefs
                 .get(usize::from(idx))
                 .ok_or(LinkError::BadFixupTarget(idx))?;
-            let (ci, addr) =
-                *symbols.get(name).ok_or_else(|| LinkError::UnresolvedExternal(name.clone()))?;
-            Target { addr, frame_para: (combined[ci].load_offset >> 4) as u16 }
+            if let Some(&(ci, addr)) = symbols.get(name) {
+                Target { addr, frame_para: (combined[ci].load_offset >> 4) as u16 }
+            } else if let Some(&(frame, offset)) = absolutes.get(name) {
+                Target { addr: (usize::from(frame) << 4) + usize::from(offset), frame_para: frame }
+            } else {
+                return Err(LinkError::UnresolvedExternal(name.clone()));
+            }
         }
         other => return Err(LinkError::UnsupportedFixup(format!("target method {other}"))),
     };

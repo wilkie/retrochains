@@ -82,8 +82,12 @@ pub fn link_image(
         members.extend(parsed.into_iter().map(Some));
     }
 
-    // Resolve externals: repeatedly pull the first library member that defines a
-    // currently-unresolved symbol, until a full pass pulls nothing.
+    // Resolve externals: repeatedly pull the first library member (in library
+    // order) that defines a currently-unresolved symbol, until a full pass
+    // pulls nothing. We record each pulled member's library index so the final
+    // placement can follow library order, not pull order.
+    let object_count = modules.len();
+    let mut pulled_keys: Vec<usize> = Vec::new();
     loop {
         let defined: HashSet<&str> = modules.iter().flat_map(defined_in).collect();
         let unresolved: HashSet<&str> = modules
@@ -95,12 +99,13 @@ pub fn link_image(
             break;
         }
         let mut pulled = false;
-        for slot in &mut members {
+        for (slot_idx, slot) in members.iter_mut().enumerate() {
             let defines_needed = slot
                 .as_ref()
                 .is_some_and(|m| defined_in(m).any(|s| unresolved.contains(s)));
             if defines_needed {
                 modules.push(slot.take().expect("slot just checked Some"));
+                pulled_keys.push(slot_idx);
                 pulled = true;
                 break;
             }
@@ -111,6 +116,14 @@ pub fn link_image(
             break;
         }
     }
+
+    // TLINK lays pulled members down in library order (ascending member index),
+    // independent of the order resolution discovered them. Reorder the pulled
+    // tail (the named objects keep their command-line order).
+    let mut tail: Vec<(usize, Module)> =
+        pulled_keys.into_iter().zip(modules.drain(object_count..)).collect();
+    tail.sort_by_key(|(key, _)| *key);
+    modules.extend(tail.into_iter().map(|(_, module)| module));
 
     Ok(link::link(&modules)?)
 }
