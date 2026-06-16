@@ -110,7 +110,11 @@ pub enum LinkError {
 /// # Errors
 /// Returns [`LinkError`] for an unresolved external, a missing entry point,
 /// or a fixup shape the linker doesn't yet handle.
-pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
+/// `thunks` maps an overlaid function's symbol name to the offset its far-call
+/// fixups must be redirected to (the resident stub's `INT 3F` thunk); empty for
+/// non-overlay links. The symbol keeps its recorded address; only the deposited
+/// far-call target is bumped.
+pub fn link(modules: &[Module], thunks: &HashMap<String, u16>) -> Result<Image, LinkError> {
     let mut combined: Vec<Combined> = Vec::new();
     let mut index: HashMap<(String, String), usize> = HashMap::new();
     // placements[m][seg_idx] = where module m's SEGDEF #seg_idx landed.
@@ -300,6 +304,7 @@ pub fn link(modules: &[Module]) -> Result<Image, LinkError> {
                     &symbols,
                     &absolutes,
                     &combined_frame,
+                    thunks,
                 )? {
                     relocations.push(reloc);
                 }
@@ -438,6 +443,7 @@ fn apply_fixup(
     symbols: &HashMap<String, (usize, usize)>,
     absolutes: &HashMap<String, (u16, u16)>,
     combined_frame: &[u16],
+    thunks: &HashMap<String, u16>,
 ) -> Result<Option<(u16, u16)>, LinkError> {
     // Absolute image address of the bytes being patched.
     let patch_addr = combined[place.combined].load_offset + place.base + usize::from(fx.data_offset);
@@ -476,6 +482,8 @@ fn apply_fixup(
                 .get(usize::from(idx))
                 .ok_or(LinkError::BadFixupTarget(idx))?;
             if let Some(&(ci, addr)) = symbols.get(name) {
+                // Overlaid functions: redirect the far call to the stub thunk.
+                let addr = addr + usize::from(thunks.get(name).copied().unwrap_or(0));
                 Target { addr, frame_para: combined_frame[ci] }
             } else if let Some(&(frame, offset)) = absolutes.get(name) {
                 Target { addr: (usize::from(frame) << 4) + usize::from(offset), frame_para: frame }

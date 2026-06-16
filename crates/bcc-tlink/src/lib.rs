@@ -137,7 +137,7 @@ pub fn link_overlay(
         }
     }
 
-    let mut image = link::link(&modules)?;
+    let mut image = link::link(&modules, &thunks)?;
 
     // Fill _EXEINFO_ with the segment table, using the final layout.
     let resident: Vec<overlay::ResidentSeg> = image
@@ -172,7 +172,7 @@ pub fn link_overlay(
     // Append the FBOV overlay area (beyond the MZ-declared image).
     let exeinfo_file_off = mz::HEADER_SIZE + exeinfo_start.unwrap_or(0);
     exe.extend_from_slice(&overlay::fbov_area(&overlays, exeinfo_file_off, seg_count));
-    let _ = &thunks; // TODO: thunk redirect
+
     Ok(exe)
 }
 
@@ -185,7 +185,7 @@ pub fn link_image(
     objects: &[(String, Vec<u8>)],
     libraries: &[(String, Vec<u8>)],
 ) -> Result<link::Image, Error> {
-    Ok(link::link(&resolved_modules(objects, libraries)?)?)
+    Ok(link::link(&resolved_modules(objects, libraries)?, &std::collections::HashMap::new())?)
 }
 
 /// Parse the named objects and pull the library members they require, returning
