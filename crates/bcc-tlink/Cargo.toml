@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 obj = { path = "../obj" }
+thiserror = "2"
 
 [lints]
 workspace = true

@@ -85,11 +85,13 @@ roll-out skips them and logs the count.
      input OBJ** (it's source, not a golden; `.gitignore` permits it in the
      fixtures tree); no cross-tool harness change needed. Skipped under
      `--toolchain ours` until a linker exists.
-4. **Ready — linker implementation pass.** Infra is in place: linker-tool
-   fixtures are captured + oracle-gated, skipped under ours, and `.EXE` already
-   routes to gating for `tool = tlink/link` (`is_advisory_output`). Starting the
-   pass = implement `crates/bcc-tlink` and bind it in
-   `ToolPaths::from_workspace_debug`; the `standalone/` fixtures then gate the
-   `.EXE`. Grow the bucket (segment classes, GROUP, libs, overlays, diagnostics)
-   alongside the implementation.
+4. **In progress — linker implementation pass.** `crates/bcc-tlink` now links
+   byte-exact: OMF parse (`omf.rs`) → segment combine / symbol resolve / fixup
+   apply (`link.rs`) → MZ write (`mz.rs`). Both seed fixtures gate green under
+   `--toolchain ours` (4258 single OBJ, 4259 two OBJs + cross-module near call).
+   Bound in `ToolPaths::from_workspace_debug`. MZ output reverse-engineered in
+   `specs/tlink/MZ_OUTPUT.md`. **Next layers:** far/segment-base fixups (runtime
+   relocations), `.MAP` generation (currently advisory), library resolution, and
+   linking BCC-compiled OBJs (C startup + DGROUP) standalone. Grow the
+   `standalone/` bucket alongside each.
 5. Stand up the MZ reader + EXE fingerprinting against the pool.

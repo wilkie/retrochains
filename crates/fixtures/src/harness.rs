@@ -296,14 +296,13 @@ impl ToolPaths {
         };
         Self {
             bcc: pick("bcc"),
-            // `tasm`/`tlink` are stub binaries (they just print "not yet
-            // implemented" and exit 1), not reimplementations — leave them
-            // unbound so fixtures with `tool = tasm/tlink` surface as
-            // ToolNotImplemented (→ skipped under `--toolchain ours`) rather
-            // than spuriously failing. Bind these the day a real assembler /
-            // linker lands in crates/bcc-tasm / crates/bcc-tlink.
+            // `tasm` is still a stub (prints "not yet implemented", exits 1) —
+            // leave it unbound so `tool = tasm` fixtures surface as
+            // ToolNotImplemented (→ skipped) rather than spuriously failing.
             tasm: None,
-            tlink: None,
+            // `tlink` is a real reimplementation now (crates/bcc-tlink): bind it
+            // so the standalone-linker fixtures gate the linked `.EXE`.
+            tlink: pick("tlink"),
             msc: pick("msc"),
         }
     }
