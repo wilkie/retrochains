@@ -128,6 +128,24 @@ pub enum Idiom {
     Shift1,
     /// `ff /r [bp±N]` — group 5 on a local (`inc/dec/push`).
     Grp5Local,
+    /// `7x rr` — a conditional jump (`jz/jnz/jl/jle/...`): an `if`/loop branch.
+    Jcc,
+    /// `4x` — `inc r16` / `dec r16`.
+    IncDecReg,
+    /// `99` — `cwd`: sign-extend ax→dx:ax (the setup for `idiv` / 32-bit).
+    Cwd,
+    /// `58+r` — `pop r16` (a register other than the specific cases above).
+    PopReg,
+    /// `8b/8a /r [si|di]` — load through a near pointer (`*p`).
+    PointerLoad,
+    /// `89/88 /r [si|di]` — store through a near pointer (`*p = …`).
+    PointerStore,
+    /// `a0 aa aa` — `mov al, [mem]`: load a `char` global.
+    LoadGlobalByte,
+    /// `a2 aa aa` — `mov [mem], al`: store a `char` global.
+    StoreGlobalByte,
+    /// `03/2b/0b/23/33/3b /r [mem]` — an ALU op against a global.
+    AluGlobal,
 }
 
 impl Idiom {
@@ -213,6 +231,15 @@ impl Idiom {
             Idiom::Grp3 => "grp3 (imul/idiv/neg/not)",
             Idiom::Shift1 => "shift/rotate by 1",
             Idiom::Grp5Local => "grp5 on local (inc/dec/push)",
+            Idiom::Jcc => "conditional jump (jcc rel8)",
+            Idiom::IncDecReg => "inc/dec reg",
+            Idiom::Cwd => "cwd (sign-extend ax→dx:ax)",
+            Idiom::PopReg => "pop reg",
+            Idiom::PointerLoad => "load via pointer (mov r16, [si/di])",
+            Idiom::PointerStore => "store via pointer (mov [si/di], r16)",
+            Idiom::LoadGlobalByte => "load global byte (mov al, [mem])",
+            Idiom::StoreGlobalByte => "store global byte (mov [mem], al)",
+            Idiom::AluGlobal => "alu reg, global",
         }
     }
 }
@@ -238,6 +265,10 @@ use Bm::{Any as A, Lit as L, Mask as M};
 const BP_DISP8: Bm = M(0xc7, 0x46);
 /// ModR/M byte selecting a register operand (mod=11), any `reg`/`rm`.
 const REG: Bm = M(0xc0, 0xc0);
+/// ModR/M byte selecting a direct `[disp16]` global (mod=00, rm=110).
+const DISP16: Bm = M(0xc7, 0x06);
+/// ModR/M byte selecting `[si]` or `[di]` (mod=00, rm=10x) — a near pointer.
+const PTR: Bm = M(0xc6, 0x04);
 
 /// The idiom catalog, ordered most-specific-first so a longer idiom wins over a
 /// prefix of it at the same offset (e.g. `MscChkstkPrologue` and
@@ -256,8 +287,9 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::MscChkstkFrameless, pat: &[L(0x33), L(0xc0), L(0xe8), A, A] },
     Def { idiom: Idiom::BccZeroAx, pat: &[L(0x33), L(0xc0)] },
     Def { idiom: Idiom::MscZeroAx, pat: &[L(0x2b), L(0xc0)] },
-    Def { idiom: Idiom::StackReserve2, pat: &[L(0x4c), L(0x4c)] },
+    Def { idiom: Idiom::StackReserve2, pat: &[L(0x4c), L(0x4c)] }, // before IncDecReg
     Def { idiom: Idiom::Cbw, pat: &[L(0x98)] },
+    Def { idiom: Idiom::Cwd, pat: &[L(0x99)] },
     Def { idiom: Idiom::FarCall, pat: &[L(0x9a), A, A, A, A] },
     // store a literal (word / byte) to a local or global.
     Def { idiom: Idiom::StoreImmLocal, pat: &[L(0xc7), L(0x46), A, A, A] },
@@ -270,9 +302,18 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::StoreLocalByte, pat: &[L(0x88), BP_DISP8, A] },
     Def { idiom: Idiom::LeaLocal, pat: &[L(0x8d), BP_DISP8, A] },
     Def { idiom: Idiom::Grp5Local, pat: &[L(0xff), BP_DISP8, A] },
-    // global loads/stores via the accumulator-direct forms.
+    // pointer load/store (mov r/r8, [si|di]); before MovReg's mod=11.
+    Def { idiom: Idiom::PointerLoad, pat: &[L(0x8b), PTR] },
+    Def { idiom: Idiom::PointerLoad, pat: &[L(0x8a), PTR] },
+    Def { idiom: Idiom::PointerStore, pat: &[L(0x89), PTR] },
+    Def { idiom: Idiom::PointerStore, pat: &[L(0x88), PTR] },
+    // global loads/stores: accumulator-direct (a0-a3) and reg via [disp16].
     Def { idiom: Idiom::LoadGlobal, pat: &[L(0xa1), A, A] },
     Def { idiom: Idiom::StoreGlobal, pat: &[L(0xa3), A, A] },
+    Def { idiom: Idiom::LoadGlobalByte, pat: &[L(0xa0), A, A] },
+    Def { idiom: Idiom::StoreGlobalByte, pat: &[L(0xa2), A, A] },
+    Def { idiom: Idiom::LoadGlobal, pat: &[L(0x8b), DISP16, A, A] },
+    Def { idiom: Idiom::StoreGlobal, pat: &[L(0x89), DISP16, A, A] },
     // reg-to-reg mov, and ALU reg,reg / reg,local (add/sub/or/and/xor/cmp).
     Def { idiom: Idiom::MovReg, pat: &[L(0x8b), REG] },
     Def { idiom: Idiom::MovReg, pat: &[L(0x89), REG] },
@@ -288,6 +329,12 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluLocal, pat: &[L(0x23), BP_DISP8, A] },
     Def { idiom: Idiom::AluLocal, pat: &[L(0x33), BP_DISP8, A] },
     Def { idiom: Idiom::AluLocal, pat: &[L(0x3b), BP_DISP8, A] },
+    Def { idiom: Idiom::AluGlobal, pat: &[L(0x03), DISP16, A, A] },
+    Def { idiom: Idiom::AluGlobal, pat: &[L(0x2b), DISP16, A, A] },
+    Def { idiom: Idiom::AluGlobal, pat: &[L(0x0b), DISP16, A, A] },
+    Def { idiom: Idiom::AluGlobal, pat: &[L(0x23), DISP16, A, A] },
+    Def { idiom: Idiom::AluGlobal, pat: &[L(0x33), DISP16, A, A] },
+    Def { idiom: Idiom::AluGlobal, pat: &[L(0x3b), DISP16, A, A] },
     // group-1 ALU with imm8 (reg or local); CdeclPopN (`83 c4`) wins first.
     Def { idiom: Idiom::CdeclPopN, pat: &[L(0x83), L(0xc4), A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), BP_DISP8, A, A] },
@@ -299,10 +346,13 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::LoadImmAx, pat: &[L(0xb8), A, A] }, // ax-specific; before LoadImmReg
     Def { idiom: Idiom::LoadImmReg, pat: &[M(0xf8, 0xb8), A, A] },
     Def { idiom: Idiom::ShortJump, pat: &[L(0xeb), A] },
+    Def { idiom: Idiom::Jcc, pat: &[M(0xf0, 0x70), A] }, // 70-7f conditional jumps
+    Def { idiom: Idiom::IncDecReg, pat: &[M(0xf0, 0x40)] }, // 40-4f; after StackReserve2
     Def { idiom: Idiom::SaveRegVar, pat: &[M(0xfe, 0x56)] }, // push si / push di
     Def { idiom: Idiom::RestoreRegVar, pat: &[M(0xfe, 0x5e)] }, // pop si / pop di
     Def { idiom: Idiom::PushAx, pat: &[L(0x50)] },
     Def { idiom: Idiom::CdeclPop1, pat: &[L(0x59)] },
+    Def { idiom: Idiom::PopReg, pat: &[M(0xf8, 0x58)] }, // 58-5f; after the specific pops
 ];
 
 fn matches_at(code: &[u8], at: usize, pat: &[Bm]) -> bool {
