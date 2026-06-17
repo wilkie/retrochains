@@ -21,7 +21,7 @@
 //! rather than present a half-recovery; the recompile-verify loop adjudicates
 //! the rest.
 
-use crate::lo_ir::{lift, BinOp, ByteReg, Cond, LoInsn, LoOp, Place, Reg, UnOp};
+use crate::lo_ir::{lift, BinOp, ByteReg, Cond, LoInsn, LoOp, Place, Promote, Reg, UnOp};
 
 /// A relational operator recovered from a `cmp` + conditional branch. The
 /// unsigned variants (from `jb`/`ja`/…) print the same C token as their signed
@@ -451,10 +451,14 @@ fn flush_call(acc: &mut Option<Expr>, out: &mut Vec<Stmt>) {
 
 /// A recognized jump-table `switch` dispatch (see [`Ctx::detect_jump_table`]).
 struct JumpTable {
-    /// Index of `mov bx,scrut` — where the dispatch begins.
+    /// Index of the scrutinee load — where the dispatch begins.
     load_idx: usize,
     /// The scrutinee's source operand.
     scrut: Place,
+    /// The scrutinee is a `char` (loaded as a byte and widened) rather than an
+    /// `int`; `unsigned` if zero-extended (`mov ah,0`) rather than `cbw`.
+    scrut_char: bool,
+    scrut_unsigned: bool,
     /// The lowest case value (`dec`→1, `sub K`→K, none→0).
     base: i32,
     /// The highest index (the `cmp bx,N` value); `N+1` table entries.
@@ -1716,6 +1720,63 @@ impl Ctx {
     /// Recognize a jump-table `switch` dispatch whose range-check branch (`ja
     /// default`) is at index `ja_idx`: `mov bx,scrut; {dec|sub bx,base}; cmp
     /// bx,N; ja default; shl bx,1; jmp cs:[bx+table]`.
+    /// Decode the index-setup feeding `cmp bx,N` at `cmp_idx`, returning
+    /// `(scrut, base, load_idx, is_char, is_unsigned)`. `load_idx` is the first
+    /// instruction of the dispatch (where straight-line folding must stop) and
+    /// `scrut` the scrutinee place. For an `int` scrutinee the 0-based table
+    /// index lives directly in `bx`; for a `char`/`unsigned char` it is loaded
+    /// as a byte into `al`, widened (`cbw` signed / `mov ah,0` unsigned),
+    /// normalized in `ax`, then copied to `bx` (`mov bx,ax`).
+    fn switch_index_setup(&self, cmp_idx: usize) -> Option<(Place, i32, usize, bool, bool)> {
+        // The normalization that rebases the scrutinee to a 0-based index:
+        // `dec` (base 1), `sub _,k` (base k), or none (base 0). For an `int` it
+        // sits on `bx`; for a `char` it sits on `ax`, before the `mov bx,ax`.
+        let (base, reg_load_idx) = match self.insns.get(cmp_idx.checked_sub(1)?)?.op {
+            LoOp::Un { dst: Place::Reg(Reg::Bx), op: UnOp::Dec, operand: Place::Reg(Reg::Bx) } => {
+                (1, cmp_idx - 2)
+            }
+            LoOp::Bin {
+                dst: Place::Reg(Reg::Bx),
+                op: BinOp::Sub,
+                lhs: Place::Reg(Reg::Bx),
+                rhs: Place::Imm(k),
+            } => (k, cmp_idx - 2),
+            LoOp::Load { dst: Place::Reg(Reg::Bx), .. } => (0, cmp_idx - 1),
+            _ => return None,
+        };
+        let LoOp::Load { dst: Place::Reg(Reg::Bx), src } = self.insns.get(reg_load_idx)?.op else {
+            return None;
+        };
+        // An `int` scrutinee: the index was loaded straight into `bx`.
+        if src != Place::Reg(Reg::Ax) {
+            return Some((src, base, reg_load_idx, false, false));
+        }
+        // A `char` scrutinee: `mov bx,ax` copied a widened byte. Walk back over
+        // the (optional) `ax` normalization, the widening, and the byte load.
+        let (base, widen_idx) = match self.insns.get(reg_load_idx.checked_sub(1)?)?.op {
+            LoOp::Un { dst: Place::Reg(Reg::Ax), op: UnOp::Dec, operand: Place::Reg(Reg::Ax) } => {
+                (1, reg_load_idx - 2)
+            }
+            LoOp::Bin {
+                dst: Place::Reg(Reg::Ax),
+                op: BinOp::Sub,
+                lhs: Place::Reg(Reg::Ax),
+                rhs: Place::Imm(k),
+            } => (k, reg_load_idx - 2),
+            _ => (0, reg_load_idx - 1),
+        };
+        let is_unsigned = match self.insns.get(widen_idx)?.op {
+            LoOp::Promote { kind: Promote::Cbw } => false,
+            LoOp::Load { dst: Place::Byte(ByteReg::Ah), src: Place::Imm(0) } => true,
+            _ => return None,
+        };
+        let load_idx = widen_idx.checked_sub(1)?;
+        let LoOp::Load { dst: Place::Byte(ByteReg::Al), src } = self.insns.get(load_idx)?.op else {
+            return None;
+        };
+        Some((src, base, load_idx, true, is_unsigned))
+    }
+
     fn detect_jump_table(&self, ja_idx: usize) -> Option<JumpTable> {
         let LoOp::Branch { cond, target: default_off } = self.insns.get(ja_idx)?.op else {
             return None;
@@ -1733,23 +1794,8 @@ impl Ctx {
         else {
             return None;
         };
-        // The normalization (`dec`/`sub bx,base`, or none) and the scrutinee load.
-        let (base, load_idx) = match self.insns.get(cmp_idx.checked_sub(1)?)?.op {
-            LoOp::Un { dst: Place::Reg(Reg::Bx), op: UnOp::Dec, operand: Place::Reg(Reg::Bx) } => {
-                (1, cmp_idx - 2)
-            }
-            LoOp::Bin {
-                dst: Place::Reg(Reg::Bx),
-                op: BinOp::Sub,
-                lhs: Place::Reg(Reg::Bx),
-                rhs: Place::Imm(k),
-            } => (k, cmp_idx - 2),
-            LoOp::Load { dst: Place::Reg(Reg::Bx), .. } => (0, cmp_idx - 1),
-            _ => return None,
-        };
-        let LoOp::Load { dst: Place::Reg(Reg::Bx), src: scrut } = self.insns.get(load_idx)?.op else {
-            return None;
-        };
+        let (scrut, base, load_idx, scrut_char, scrut_unsigned) =
+            self.switch_index_setup(cmp_idx)?;
         // `shl bx,1` scaling the index, then the indirect jump `jmp cs:[bx+disp]`.
         match self.insns.get(ja_idx + 1)?.op {
             LoOp::Bin {
@@ -1763,7 +1809,16 @@ impl Ctx {
         let LoOp::IndirectJump { disp } = self.insns.get(ja_idx + 2)?.op else {
             return None;
         };
-        Some(JumpTable { load_idx, scrut, base, n, default_off, table_disp: usize::from(disp) })
+        Some(JumpTable {
+            load_idx,
+            scrut,
+            scrut_char,
+            scrut_unsigned,
+            base,
+            n,
+            default_off,
+            table_disp: usize::from(disp),
+        })
     }
 
     /// Read a jump table's `(N+1)` word entries and turn them into `(case value,
@@ -1882,6 +1937,12 @@ impl Ctx {
                         if let Some((cases, def_idx)) = self.jump_table_cases(&jt) {
                             self.fold_linear(linear_start, jt.load_idx, &mut stmts);
                             let resume = if let Some(scrutinee) = self.operand(jt.scrut) {
+                                if jt.scrut_char {
+                                    self.mark_char(&scrutinee);
+                                }
+                                if jt.scrut_unsigned {
+                                    self.mark_unsigned(&scrutinee);
+                                }
                                 self.emit_switch(&mut stmts, scrutinee, &cases, def_idx, hi)
                             } else {
                                 self.complete = false;
@@ -2563,6 +2624,35 @@ mod tests {
             "int f(int a) { switch (a) { case 4: return 4; case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n",
         );
         assert!(!f.complete, "an out-of-order jump table leaves the function incomplete");
+    }
+
+    #[test]
+    fn a_char_jump_table_recovers_and_types_the_scrutinee_char() {
+        // A `char` scrutinee is loaded as a byte and sign-extended (`mov al,[c];
+        // cbw; dec ax; mov bx,ax`) before the dispatch. The recovered switch
+        // must declare the parameter `char` so the byte-load prologue regenerates.
+        let f = recover_c(
+            "int f(char c) { switch (c) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; } return 0; }\n",
+        );
+        assert!(f.complete, "a char jump-table switch is recovered");
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _) if arms.len() == 4)),
+            "recovers a 4-arm switch",
+        );
+        assert!(f.char_vars.contains(&Var::Param(4)), "the scrutinee param is typed `char`");
+        assert!(!f.unsigned_vars.contains(&Var::Param(4)), "a `cbw` scrutinee is signed");
+    }
+
+    #[test]
+    fn an_unsigned_char_jump_table_types_the_scrutinee_unsigned() {
+        // An `unsigned char` scrutinee zero-extends (`mov ah,0`) instead of `cbw`,
+        // so it is recovered as both `char` and `unsigned`.
+        let f = recover_c(
+            "int f(unsigned char c) { switch (c) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; } return 0; }\n",
+        );
+        assert!(f.complete, "an unsigned-char jump-table switch is recovered");
+        assert!(f.char_vars.contains(&Var::Param(4)), "the scrutinee param is `char`");
+        assert!(f.unsigned_vars.contains(&Var::Param(4)), "the `mov ah,0` widen marks it unsigned");
     }
 
     #[test]

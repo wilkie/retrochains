@@ -241,7 +241,15 @@ out non-monotonically and declines (sound, not mis-shaped). A sparse switch
 there; a `default:` block recovers as the post-switch code when it
 returns, and as a real `default` arm (the third `Stmt::Switch` field) when it
 ends in `break` — the no-match block then jumps to a *further* continuation, so
-the cases break there too, not to the no-match target.
+the cases break there too, not to the no-match target. A **`char`/`unsigned
+char` scrutinee** dispatches the same way but loads and widens the index first:
+`mov al,[c]; {cbw | mov ah,0}; {dec|sub ax,base}; mov bx,ax; cmp bx,N; …` — the
+byte is loaded into `al`, widened (`cbw` ⇒ signed, `mov ah,0` ⇒ `unsigned`),
+normalized in `ax`, then copied to `bx`. The recovered switch marks the
+scrutinee `char` (and `unsigned` for the zero-extend) so the regenerated prologue
+re-emits the byte load and the same widen, recompiling byte-exact. (A `long`
+scrutinee uses a runtime search loop, not a table, so it's out of scope and
+declines.)
 
 **Early returns / multi-exit are recovered.** Every `return <expr>` is `mov
 ax,val; jmp epilogue` — a jump to the shared epilogue (which begins at the
