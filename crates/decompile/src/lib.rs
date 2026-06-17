@@ -16,7 +16,9 @@ pub mod hi_ir;
 pub mod lo_ir;
 pub mod verify;
 
-pub use emit::{decompile, to_c};
+pub use emit::{decompile, to_c, to_c_with_form, AccessForm};
 pub use hi_ir::{recover, Function, Var};
 pub use lo_ir::{lift, LoInsn, LoOp};
-pub use verify::{recompile_text, verify, CompileOpts, Diff, HarnessError, Outcome};
+pub use verify::{
+    recompile_text, render_idiomatic, verify, CompileOpts, Diff, HarnessError, Outcome,
+};

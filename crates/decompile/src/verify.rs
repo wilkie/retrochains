@@ -189,6 +189,40 @@ pub fn verify(
     Ok(compare(recovered, target.to_vec()))
 }
 
+/// Decompile `code` to the most *idiomatic* C that still recompiles to it
+/// byte-for-byte — the "automated second pass" over the form-neutral recovery.
+///
+/// The recovery ([`recover`](crate::hi_ir::recover)) is form-neutral; this
+/// renders it under each [`AccessForm`] in preference order (subscript first,
+/// then pointer arithmetic) and returns the first whose bytes match `code`. The
+/// recompile is the *oracle*: a form that doesn't reproduce the bytes — or that
+/// the compiler can't even build (a hard gap may surface as a panic, which is
+/// caught and treated as "rejected") — is skipped. So `p[K]` is chosen where the
+/// compiler supports it and `*(p+K)` is the automatic fallback, with no
+/// correctness risk either way.
+///
+/// Returns `None` if the function isn't fully recovered, or (unexpectedly) if no
+/// form reproduces the bytes.
+#[must_use]
+pub fn render_idiomatic(code: &[u8], opts: &CompileOpts) -> Option<String> {
+    let func = crate::hi_ir::recover(code);
+    for form in [crate::AccessForm::Subscript, crate::AccessForm::PointerArith] {
+        let Some(candidate) = crate::to_c_with_form(&func, form) else {
+            return None; // incomplete — no form will render it
+        };
+        // The compiler is the oracle. Tolerate a build that panics on an
+        // unsupported shape (a known `bcc` gap): a crash is just a rejection.
+        let matched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            matches!(verify(&candidate, opts, code), Ok(Outcome::Match))
+        }))
+        .unwrap_or(false);
+        if matched {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Diff two `_TEXT` byte runs. Pure, so it's testable without compiling.
 fn compare(recovered: Vec<u8>, target: Vec<u8>) -> Outcome {
     if recovered == target {
@@ -215,6 +249,39 @@ mod tests {
         // compare() is the diff core; equal runs are a Match regardless of how
         // they were produced.
         assert_eq!(compare(vec![1, 2, 3], vec![1, 2, 3]), Outcome::Match);
+    }
+
+    /// The presentation seam: `render_idiomatic` re-renders the form-neutral
+    /// recovery under each access form and returns the first that still
+    /// recompiles byte-exact. With the compiler as the oracle, an offset deref
+    /// comes back as the idiomatic subscript `p[K]` (vs the `*(p+K)` default),
+    /// and every rendering is verified — so the output is always faithful.
+    #[test]
+    fn render_idiomatic_prefers_the_subscript_form() {
+        let opts = CompileOpts { no_reg_vars: true, ..CompileOpts::default() };
+        for (src, want) in [
+            ("int f(int *p) { return p[2]; }\n", "p1[2]"),
+            ("void f(int *p) { p[2] = 5; }\n", "p1[2] = 5"),
+            ("void f(int *p, int v) { p[2] = v; }\n", "p1[2] = p2"),
+        ] {
+            let code = recompile_text(src, &opts).expect("the sample compiles");
+            let c = render_idiomatic(&code, &opts).expect("recovered");
+            assert!(c.contains(want), "expected {want:?} in idiomatic form:\n{c}");
+            assert!(
+                verify(&c, &opts, &code).expect("compiles").is_match(),
+                "the idiomatic form must still recompile byte-exact:\n{c}",
+            );
+        }
+    }
+
+    #[test]
+    fn render_idiomatic_leaves_a_plain_deref_alone() {
+        // `*p` (no offset) has no subscript spelling worth choosing — it stays
+        // `*p` under either form.
+        let opts = CompileOpts { no_reg_vars: true, ..CompileOpts::default() };
+        let code = recompile_text("int f(int *p) { return *p; }\n", &opts).unwrap();
+        let c = render_idiomatic(&code, &opts).unwrap();
+        assert!(c.contains("*p1") && !c.contains('['), "plain deref stays *p:\n{c}");
     }
 
     #[test]

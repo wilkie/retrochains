@@ -12,7 +12,24 @@
 use std::fmt::Write as _;
 
 use crate::hi_ir::{recover, Expr, Function, LValue, RelOp, Stmt, Type, Var};
-use crate::lo_ir::Reg;
+use crate::lo_ir::{BinOp, Reg};
+
+/// How an offset pointer access — a `Deref` of `base + k` — is *spelled*. Both
+/// forms are semantically identical and (where the compiler supports them)
+/// recompile to the same bytes, so the choice is pure presentation, not
+/// correctness. The recovery stays form-neutral (it produces `Deref(base + k)`);
+/// this picks the surface syntax, and the recompile verifier is the gate on the
+/// choice ([`crate::render_idiomatic`]). The seam a second pass — or a human, or
+/// a UI toggle — would use to retune the output.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AccessForm {
+    /// `base[k]` — array/pointer subscript. The idiomatic first choice.
+    Subscript,
+    /// `*(base + k)` — explicit pointer arithmetic. The widest-coverage form
+    /// (our `bcc` compiles some accesses only in this shape), and the safe
+    /// default.
+    PointerArith,
+}
 
 /// The name binding for a function's variables. Lookups are by identity (stack
 /// slot, parameter, or register), so emitted references stay consistent.
@@ -33,6 +50,8 @@ struct Names {
     /// The number of file-scope globals to declare — likewise sized by the
     /// highest global offset used, so each access lands at the right offset.
     global_count: usize,
+    /// How offset pointer accesses are spelled (subscript vs pointer arithmetic).
+    form: AccessForm,
 }
 
 /// `<type> <name>` for a variable — `int *p` (pointer), `unsigned long l`,
@@ -146,6 +165,7 @@ impl Names {
             unsigneds: unsigned_vars.to_vec(),
             signature: sig_parts.join(", "),
             global_count,
+            form: AccessForm::PointerArith,
         }
     }
 
@@ -191,9 +211,19 @@ pub fn decompile(code: &[u8]) -> Option<String> {
 }
 
 /// Render a recovered function as C, or `None` if it isn't
-/// [`complete`](Function::complete).
+/// [`complete`](Function::complete). Uses the safe default form
+/// ([`AccessForm::PointerArith`]); [`to_c_with_form`] selects another.
 #[must_use]
 pub fn to_c(f: &Function) -> Option<String> {
+    to_c_with_form(f, AccessForm::PointerArith)
+}
+
+/// Render a recovered function as C with a chosen access [`form`](AccessForm),
+/// or `None` if it isn't [`complete`](Function::complete). Both forms recompile
+/// identically where the compiler supports them, so this is presentation only —
+/// the verifier gates the choice.
+#[must_use]
+pub fn to_c_with_form(f: &Function, form: AccessForm) -> Option<String> {
     if !f.complete {
         return None;
     }
@@ -204,7 +234,7 @@ pub fn to_c(f: &Function) -> Option<String> {
         Type::Long => "long",
         Type::Void => "void",
     };
-    let names = Names::build(
+    let mut names = Names::build(
         &f.vars,
         &f.char_vars,
         &f.ptr_vars,
@@ -212,6 +242,7 @@ pub fn to_c(f: &Function) -> Option<String> {
         &f.long_vars,
         &f.unsigned_vars,
     );
+    names.form = form;
 
     let mut s = String::new();
     // The callee of every recovered call is an opaque external (its identity
@@ -343,8 +374,23 @@ fn assign_inline(stmt: &Stmt, names: &Names) -> String {
 fn lvalue_str(lv: &LValue, names: &Names) -> String {
     match lv {
         LValue::Var(v) => names.of(*v).to_string(),
-        LValue::Deref(e) => format!("*{}", expr_str(e, names)),
+        LValue::Deref(e) => deref_str(e, names),
     }
+}
+
+/// Spell a dereference of `inner`. A plain `*p` always renders `*p`, but an
+/// *offset* deref `*(base + k)` can be spelled as a subscript `base[k]` — the
+/// two are equivalent and recompile to the same bytes where the compiler
+/// supports both, so the [`Names::form`] policy chooses. This is the single seam
+/// where the surface form of an indexed access is decided.
+fn deref_str(inner: &Expr, names: &Names) -> String {
+    if names.form == AccessForm::Subscript
+        && let Expr::Binary(BinOp::Add, base, idx) = inner
+        && let Expr::Const(k) = **idx
+    {
+        return format!("{}[{}]", expr_str(base, names), k);
+    }
+    format!("*{}", expr_str(inner, names))
 }
 
 fn expr_str(e: &Expr, names: &Names) -> String {
@@ -360,7 +406,7 @@ fn expr_str(e: &Expr, names: &Names) -> String {
             format!("({} {} {})", expr_str(l, names), relop_token(*op), expr_str(r, names))
         }
         Expr::Not(e) => format!("!{}", expr_str(e, names)),
-        Expr::Deref(e) => format!("*{}", expr_str(e, names)),
+        Expr::Deref(e) => deref_str(e, names),
         Expr::AddrOf(v) => format!("&{}", names.of(*v)),
         Expr::Call(args) => {
             let list = args.iter().map(|a| expr_str(a, names)).collect::<Vec<_>>().join(", ");

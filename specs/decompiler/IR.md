@@ -51,6 +51,21 @@ Keeping them separate means the error-prone analysis (Lo→Hi) is isolated from 
 table-driven part (idioms→Lo), and each is testable on its own against the
 corpus.
 
+**The emit step is a *seam*, not a fixed mapping.** One byte sequence can spell
+out as several equivalent source forms — `*(p+K)`, `p[K]`, and (with recovered
+type/provenance) `s->field` or `arr[i]` are all the *same* operation, and where
+the compiler supports them they recompile to identical bytes. So the Hi-IR stays
+**form-neutral** (an offset deref is `Deref(base + k)`), and a rendering
+*policy* — `AccessForm` — chooses the surface syntax. The recompile check is the
+**oracle on the choice**: `render_idiomatic` re-renders the recovery under each
+form in preference order (subscript first, then pointer arithmetic) and returns
+the first whose bytes still match, so `p[K]` is chosen where the compiler builds
+it and `*(p+K)` is the automatic, zero-risk fallback. This is the hook a second
+pass, a human, or a UI toggle uses to retune the output without ever risking
+faithfulness — every rendering is verified before it's offered. (Today the only
+policy axis is subscript-vs-arithmetic; struct-field and array forms join it as
+type/provenance recovery grows, the same way.)
+
 ## 3. The value and storage model
 
 BCC's non-optimizing codegen makes the machine state legible. The IR models:
