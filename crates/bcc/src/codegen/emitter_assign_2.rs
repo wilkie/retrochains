@@ -22,6 +22,20 @@ impl<'a> super::FunctionEmitter<'a> {
         // and is handled in the update-expression path.) Fixture 4282.
         if let ExprKind::Update { target, op, position: UpdatePosition::Pre } = &ptr.kind {
             self.emit_update_in_place(target, *op, UpdatePosition::Pre);
+            // A `char` pointee bounces the deref through BX after the update
+            // (`mov bx,si; mov al,[bx]; cbw`) — a BCC quirk; an `int` derefs the
+            // pointer register directly. Fixtures 4282 (int), 4284 (char).
+            let pointee = self.locals.type_of(target).pointee().cloned();
+            if let Some(pointee) = pointee
+                && pointee.is_char_like()
+                && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+            {
+                let reg_name = reg.name();
+                let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                self.emit_widen_al(&pointee);
+                return;
+            }
             let updated = Expr { kind: ExprKind::Ident(target.clone()), span: ptr.span };
             self.emit_deref_to_ax(&updated);
             return;

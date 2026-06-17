@@ -994,6 +994,20 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             // Both lower to `mov bx, [p]; mov al, [bx+disp]; cbw`,
             // with disp 0 for the bare deref and K for the
             // constant-offset form (fixtures 4111, 4127).
+            // `*++p` for char* locals: advance the pointer in place, then load it
+            // into BX and byte-deref + widen. Fixture 4284.
+            if let Expr::PreMutateLocal { local_idx, step } = ptr.as_ref() {
+                let disp = locals.disp(*local_idx);
+                emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+                out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[bp-p]
+                out.extend_from_slice(&[0x8A, 0x07]); // mov al,[bx]
+                if locals.local_pointee_unsigned(*local_idx) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah
+                } else {
+                    out.push(0x98); // cbw
+                }
+                return;
+            }
             // `*p++` for char* locals: load old ptr into BX, advance, byte-deref.
             if let Expr::PostMutateLocal { local_idx, step } = ptr.as_ref() {
                 let disp = locals.disp(*local_idx);
