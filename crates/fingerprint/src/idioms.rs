@@ -383,8 +383,16 @@ const IDIOMS: &[Def] = &[
     // `mov r,[bx+disp8]` — pointer deref at a constant offset (mod=01, rm=bx).
     Def { idiom: Idiom::PointerLoadDisp8, pat: &[L(0x8b), M(0xc7, 0x47), A] },
     Def { idiom: Idiom::PointerLoadDisp8, pat: &[L(0x8a), M(0xc7, 0x47), A] },
+    // `mov r,[si+disp8]` / `mov r,[di+disp8]` — the reg-var pointer form (rm=si
+    // 0x44, di 0x45; not bp 0x46, which is a local). The decode maps rm→Si/Di.
+    Def { idiom: Idiom::PointerLoadDisp8, pat: &[L(0x8b), M(0xc7, 0x44), A] },
+    Def { idiom: Idiom::PointerLoadDisp8, pat: &[L(0x8b), M(0xc7, 0x45), A] },
+    Def { idiom: Idiom::PointerLoadDisp8, pat: &[L(0x8a), M(0xc7, 0x44), A] },
+    Def { idiom: Idiom::PointerLoadDisp8, pat: &[L(0x8a), M(0xc7, 0x45), A] },
     // `mov [bx+disp8],r16` / `mov [bx+disp8],imm16` — store at a constant offset.
     Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x47), A] },
+    Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x44), A] },
+    Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x45), A] },
     Def { idiom: Idiom::StoreImmDispDeref, pat: &[L(0xc7), M(0xc7, 0x47), A, A, A] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x89), M(0xc7, 0x07)] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x88), M(0xc7, 0x07)] },

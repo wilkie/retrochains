@@ -1254,6 +1254,19 @@ mod tests {
     }
 
     #[test]
+    fn register_variable_pointer_offset_deref_roundtrips() {
+        // A field at a non-zero offset (`p->y` = `mov ax,[si+2]`) — the reg-var
+        // analog of `[bx+disp]`. Recovers as `*(p + K)` / `p[K]` (struct fields
+        // aren't reconstructed; the byte-identical pointer form round-trips). Int
+        // read/write at offsets 2 and 4, and a char field read.
+        assert_roundtrips("struct S { int x; int y; }; int f(struct S *p){ return p->y; }\n");
+        assert_roundtrips("struct S { int x; int y; }; void f(struct S *p, int v){ p->y = v; }\n");
+        assert_roundtrips("struct S { int a; int b; int c; }; int f(struct S *p){ return p->c; }\n");
+        assert_roundtrips("int f(int *p){ return p[1]; }\n");
+        assert_roundtrips("struct S { char a; char b; }; int f(struct S *p){ return p->b; }\n");
+    }
+
+    #[test]
     fn ternary_expressions_roundtrip() {
         // `cond ? t : f` is a diamond whose both arms leave a value in `ax` and
         // converge; recovered as `Expr::Ternary` and seeded into the consumer

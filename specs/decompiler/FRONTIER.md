@@ -20,14 +20,19 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | long-store | rev-long-add | regvar-ptr | meaning |
-|-------------|--------:|---|-----------:|-------------:|-----------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 2013 (48.7%) | 2016 (48.8%) | **2074 (50.2%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1838 | 1830 | 1746 (42.3%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 254 | 254 | 273 (6.6%) | recovered C recompiles to *different* bytes |
+| bucket      | initial | … | rev-long-add | regvar-ptr | regvar-ptr+K | meaning |
+|-------------|--------:|---|-------------:|-----------:|-------------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 2016 (48.8%) | 2074 (50.2%) | **2086 (50.5%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1830 | 1746 | 1722 (41.7%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 254 | 273 | 281 (6.8%) | recovered C recompiles to *different* bytes |
 | cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 | … | 19 | 19 | 26 | recover/verify crashed |
+| PANIC       |    27 | … | 19 | 26 | 30 | recover/verify crashed |
+
+(The reg-var pointer work — offset 0 then offset-K — added +70 match across two
+commits and crossed 50%. The mismatch/panic creep is adjacent gaps it unblocked:
+`&global`, char/int pointer arithmetic (our `bcc` panics on some), string-via-ptr
+— all production-gated by `render_idiomatic`.)
 
 (The reg-var-pointer step crossed 50%: +58 match. The +19 mismatch / +7 panic
 are adjacent gaps it unblocked — `&global` mis-recovered as `0`, char-pointer
@@ -183,10 +188,14 @@ clears most of them.
     BCC keeps a pointer in a reg var (si/di), so `*p` is `mov ax,[si]`, not the
     `mov bx,p; mov ax,[bx]` stack form. Added reg-var deref load/store, int and
     char width. This was the gate on `p->x` (offset-0 struct field = `*p`), and
-    unblocked reg-var pointers broadly. **Next struct step:** the offset-K reg-var
-    deref (`mov ax,[si+K]`) — needs a `mov r,[si/di+disp]` idiom — recovers
-    `p->y` / `*(p+K)`; that's the real struct-field-at-offset signal.
-13. **Adjacent pointer gaps** the reg-var work surfaced: `&global` (recovered as
+    unblocked reg-var pointers broadly.
+13. ~~**Offset-K reg-var deref**~~ — **DONE** (MATCH 50.2% → 50.5%). Added
+    `mov r,[si/di+disp]` idiom patterns (rm=si `0x44` / di `0x45`, not bp `0x46`;
+    `deref_base` already maps them) and the `DerefDisp(si/di)` load/store fold
+    arms, int and char. `p->y` / `p[K]` / `*(p+K)` via reg-var pointers recover —
+    as the byte-identical pointer form (struct fields still aren't *named*, but
+    the offset is captured and round-trips).
+14. **Adjacent pointer gaps** the reg-var work surfaced: `&global` (recovered as
     `0`), char/int pointer arithmetic (`p++`, `p += 1`, `*p++`) — our `bcc` even
     panics on some — string-via-pointer, bitfield-via-ptr.
 14. **Long ⨯ aggregate** (≈150 incompletes), **panic → sound-incomplete**,

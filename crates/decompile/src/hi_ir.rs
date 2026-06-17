@@ -1218,6 +1218,32 @@ impl Ctx {
                     }
                 }
 
+                // `mov ax, [si+disp]` / `mov ax, [di+disp]` — deref a reg-var
+                // `int *` at a constant offset: `*(p + K)`, K = disp/2 (an int
+                // field at byte offset `disp`, e.g. `p->y`). Odd `disp` isn't a
+                // clean `int` index — bail.
+                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::DerefDisp(r, disp) }
+                    if is_reg_var(r) && disp % 2 == 0 =>
+                {
+                    flush_call(&mut acc, out);
+                    let v = Var::Reg(r);
+                    self.note(v);
+                    self.note_ptr(v);
+                    acc = Some(Self::deref_at(Expr::Var(v), disp / 2));
+                }
+
+                // `mov al, [si+disp]` — deref a reg-var `char *` at a constant
+                // offset (`char` stride 1).
+                LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::DerefDisp(r, disp) }
+                    if is_reg_var(r) =>
+                {
+                    flush_call(&mut acc, out);
+                    let v = Var::Reg(r);
+                    self.note(v);
+                    self.note_char_ptr(v);
+                    acc = Some(Self::deref_at(Expr::Var(v), disp));
+                }
+
                 // `mov bx, …` loads a pointer for a following `[bx]` dereference.
                 LoOp::Load { dst: Place::Reg(Reg::Bx), src } => {
                     flush_call(&mut acc, out);
@@ -1879,6 +1905,36 @@ impl Ctx {
                             out.push(Stmt::Assign(place, e));
                         }
                         _ => self.complete = false,
+                    }
+                }
+
+                // `mov [si+disp],ax` / `mov [si+disp],imm` — store through a reg-var
+                // `int *` at a constant offset (`*(p + K) = v`, K = disp/2 — an int
+                // field write `p->y = v`).
+                LoOp::Store { dst: Place::DerefDisp(r, disp), src }
+                    if is_reg_var(r) && disp % 2 == 0 =>
+                {
+                    let value = match src {
+                        Place::Reg(Reg::Ax) => acc.take(),
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
+                    };
+                    match value {
+                        Some(e) => {
+                            let v = Var::Reg(r);
+                            self.note(v);
+                            self.note_ptr(v);
+                            let place =
+                                LValue::Deref(Box::new(Self::offset_ptr(Expr::Var(v), disp / 2)));
+                            out.push(Stmt::Assign(place, e));
+                        }
+                        None => self.complete = false,
                     }
                 }
 
