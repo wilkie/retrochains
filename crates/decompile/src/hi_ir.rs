@@ -704,6 +704,20 @@ impl Ctx {
         }
     }
 
+    /// Is register `r` dereferenced anywhere in the function (`[r]` / `[r+disp]`,
+    /// load or store)? A reg var that is means it holds a pointer — so an
+    /// immediate loaded into it is `&global`, not a literal.
+    fn reg_is_dereferenced(&self, r: Reg) -> bool {
+        self.insns.iter().any(|n| {
+            let place = match &n.op {
+                LoOp::Load { src, .. } => Some(src),
+                LoOp::Store { dst, .. } => Some(dst),
+                _ => None,
+            };
+            matches!(place, Some(Place::Deref(d) | Place::DerefDisp(d, _)) if *d == r)
+        })
+    }
+
     /// Is `place` a word-accessed slot/global — an `int` (or wider), so a byte
     /// load of it is reading the low byte of an `int`, not a `char`?
     fn is_word_place(&self, place: Place) -> bool {
@@ -1471,6 +1485,18 @@ impl Ctx {
                 LoOp::Load { dst: Place::Reg(r), src } if is_reg_var(r) => {
                     let val = match src {
                         Place::Reg(Reg::Ax) => acc.take(), // consumes the accumulator
+                        // A pointer reg var (it's dereferenced) loaded with an
+                        // immediate is `&global` — the global at that data-segment
+                        // offset — not a literal. (A null pointer is `xor`, a
+                        // distinct op.) The address forces a fixup'd 3-byte `mov`.
+                        Place::Imm(v)
+                            if v >= 0 && v % 2 == 0 && self.reg_is_dereferenced(r) =>
+                        {
+                            flush_call(&mut acc, out);
+                            let g = Var::Global(u16::try_from(v).unwrap_or(0));
+                            self.note(g);
+                            Some(Expr::AddrOf(g))
+                        }
                         Place::Imm(v) => {
                             flush_call(&mut acc, out);
                             Some(Expr::Const(v))

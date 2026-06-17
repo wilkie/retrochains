@@ -20,14 +20,17 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | rev-long-add | regvar-ptr | regvar-ptr+K | meaning |
-|-------------|--------:|---|-------------:|-----------:|-------------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 2016 (48.8%) | 2074 (50.2%) | **2086 (50.5%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1830 | 1746 | 1722 (41.7%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 254 | 273 | 281 (6.8%) | recovered C recompiles to *different* bytes |
+| bucket      | initial | … | regvar-ptr | regvar-ptr+K | addr-of-global | meaning |
+|-------------|--------:|---|-----------:|-------------:|---------------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 2074 (50.2%) | 2086 (50.5%) | **2103 (50.9%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1746 | 1722 | 1722 (41.7%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 273 | 281 | 264 (6.4%) | recovered C recompiles to *different* bytes |
 | cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 | … | 19 | 26 | 30 | recover/verify crashed |
+| PANIC       |    27 | … | 26 | 30 | 30 | recover/verify crashed |
+
+(`&global` was a clean conversion: +17 match **and −17 mismatch**, zero new —
+every `&g`-recovered-as-`0` mismatch fixed.)
 
 (The reg-var pointer work — offset 0 then offset-K — added +70 match across two
 commits and crossed 50%. The mismatch/panic creep is adjacent gaps it unblocked:
@@ -195,8 +198,13 @@ clears most of them.
     arms, int and char. `p->y` / `p[K]` / `*(p+K)` via reg-var pointers recover —
     as the byte-identical pointer form (struct fields still aren't *named*, but
     the offset is captured and round-trips).
-14. **Adjacent pointer gaps** the reg-var work surfaced: `&global` (recovered as
-    `0`), char/int pointer arithmetic (`p++`, `p += 1`, `*p++`) — our `bcc` even
-    panics on some — string-via-pointer, bitfield-via-ptr.
+14. ~~**`&global`**~~ — **DONE** (MATCH 50.5% → 50.9%, MISMATCH 281 → 264, −17,
+    zero new). A pointer reg var (it's dereferenced) loaded with an immediate is
+    `&global` at that data-segment offset, not a literal — `mov si,<offset>` is a
+    fixup'd 3-byte load distinct from `xor` (null). `reg_is_dereferenced(r)` gates
+    it; recovered as `Expr::AddrOf(Var::Global(off))`. *Open tail:* `&global` in a
+    `return`/argument position (not an assignment), and odd-offset (char) globals.
+15. **Pointer arithmetic** (`p++`, `p += 1`, `*p++`) — char and int; our `bcc`
+    panics on some recovered forms. String-via-pointer, bitfield-via-ptr.
 14. **Long ⨯ aggregate** (≈150 incompletes), **panic → sound-incomplete**,
     **shared globals**, bitfields, broad struct/array.

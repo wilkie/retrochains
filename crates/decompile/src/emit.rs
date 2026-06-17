@@ -1254,6 +1254,26 @@ mod tests {
     }
 
     #[test]
+    fn address_of_global_recovers() {
+        // `&g` is `mov si,<offset>` (a relocated immediate) — byte-identical to a
+        // literal, but the address forces a fixup'd 3-byte `mov` (a literal 0
+        // would be `xor`). A pointer reg var (it's dereferenced) loaded with an
+        // immediate is recovered as `&global` at that data-segment offset.
+        assert_roundtrips("int g; int main(void){ int *p = &g; return *p; }\n");
+        assert_roundtrips("int a; int b; int main(void){ int *p = &b; return *p; }\n");
+        assert_roundtrips("int g; int main(void){ int *p; p = &g; return p[0]; }\n");
+        // The recovered RHS is an address-of, not a constant.
+        let f = crate::hi_ir::recover(
+            &recompile_text("int g; int main(void){ int *p = &g; return *p; }\n", &CompileOpts::default())
+                .unwrap(),
+        );
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Assign(_, Expr::AddrOf(Var::Global(_))))),
+            "the pointer is assigned &global, not a literal",
+        );
+    }
+
+    #[test]
     fn register_variable_pointer_offset_deref_roundtrips() {
         // A field at a non-zero offset (`p->y` = `mov ax,[si+2]`) — the reg-var
         // analog of `[bx+disp]`. Recovers as `*(p + K)` / `p[K]` (struct fields
