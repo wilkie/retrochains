@@ -12,11 +12,21 @@ authors.workspace = true
 name = "decompile"
 path = "src/lib.rs"
 
+[features]
+# The bundled `bcc` recompiler backend (default). Disable for a compiler-free
+# decompiler core — verification is then injected via `verify_with` /
+# `render_idiomatic_with`, so a wasm "universal decompiler" module links no
+# compiler (the host supplies whichever compiler module `classify` points at).
+default = ["bcc"]
+bcc = ["dep:bcc"]
+
 [dependencies]
-# The recompile-verify harness (§8 of specs/decompiler/IR.md) compiles candidate
-# C with the byte-exact compiler and diffs its `_TEXT` against the target.
-bcc = { path = "../bcc" }
-# `code_of_obj` pulls the first CODE-class segment back out of the OBJ bytes.
+# The default recompile-verify backend (§8 of specs/decompiler/IR.md): compiles
+# candidate C with the byte-exact compiler and diffs its `_TEXT`. Optional so the
+# core can build without any compiler (see the `bcc` feature).
+bcc = { path = "../bcc", optional = true }
+# `code_of_obj` pulls the first CODE-class segment back out of the OBJ bytes;
+# `recognize` drives the lift — needed in every build.
 fingerprint = { path = "../fingerprint" }
 thiserror = "2"
 

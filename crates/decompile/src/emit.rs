@@ -741,7 +741,7 @@ fn relop_token(op: RelOp) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bcc"))]
 mod tests {
     use super::*;
     use crate::recompile_text;

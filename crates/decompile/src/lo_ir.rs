@@ -631,7 +631,7 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bcc"))]
 mod tests {
     use super::*;
     use crate::verify::{recompile_text, CompileOpts};

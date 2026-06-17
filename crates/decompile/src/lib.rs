@@ -20,5 +20,9 @@ pub use emit::{decompile, decompile_program, to_c, to_c_with_form, AccessForm};
 pub use hi_ir::{recover, recover_program, ArrayElem, ArraySpec, Function, Var};
 pub use lo_ir::{lift, LoInsn, LoOp};
 pub use verify::{
-    recompile_text, render_idiomatic, verify, CompileOpts, Diff, HarnessError, Outcome,
+    render_idiomatic_with, verify_with, CompileOpts, Diff, HarnessError, MemoryModel, Outcome,
 };
+// The bundled `bcc` recompiler backend — the default. A compiler-free build
+// (`--no-default-features`) drops it and uses the injected `*_with` forms.
+#[cfg(feature = "bcc")]
+pub use verify::{recompile_text, render_idiomatic, verify};

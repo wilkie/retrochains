@@ -124,7 +124,7 @@ fn opts_of(toml: &Path) -> Option<CompileOpts> {
         return None;
     }
     Some(CompileOpts {
-        model: parsed.memory_model,
+        model: parsed.memory_model.into(),
         merge_strings: parsed.merge_strings,
         unsigned_chars: parsed.unsigned_chars,
         optimize: parsed.optimize,

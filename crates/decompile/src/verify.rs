@@ -20,9 +20,20 @@
 //! so it can be exercised directly on hand-written C long before the lift exists
 //! (see the tests below, which round-trip C through it).
 
-use std::time::SystemTime;
-
-use bcc::{build_obj, MemoryModel};
+/// Memory model for the recompile — mirrors BCC's `-m*` knobs. **Owned by this
+/// crate** (not re-exported from `bcc`) so the decompiler's option type carries
+/// no compiler dependency: a recompiler backend maps it to its own model type
+/// (see the `bcc` feature's `From<MemoryModel> for bcc::MemoryModel`). This is
+/// what lets the decompiler core link *no* compiler — verification is injected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryModel {
+    Tiny,
+    Small,
+    Compact,
+    Medium,
+    Large,
+    Huge,
+}
 
 /// How to compile the candidate C — mirrors the knobs [`bcc::build_obj`] takes.
 ///
@@ -146,19 +157,110 @@ impl Diff {
     }
 }
 
-/// Compile candidate C and return its `_TEXT` (first CODE-class segment) bytes.
+// ── Injected-backend core (links no compiler) ──────────────────────────────
+//
+// `verify_with`/`render_idiomatic_with` take the recompiler as a parameter — a
+// `Fn(&str, &CompileOpts) -> Result<Vec<u8>, HarnessError>` that turns candidate
+// C into the comparable `_TEXT` bytes. Inject the byte-exact compiler for the
+// toolchain that produced the target. The decompiler core itself depends on no
+// compiler; the bundled `bcc` backend below is one (default) implementation, and
+// a multi-compiler host supplies whichever backend `classify` points at.
+
+/// Verify a candidate reproduces `target` `_TEXT`, recompiling via `recompile`.
 ///
-/// This is the harness's left half — useful on its own when you want the bytes
-/// rather than a verdict (e.g. to feed the recognizer).
+/// # Errors
+/// Propagates [`HarnessError::Compile`] from the backend if the candidate C
+/// doesn't compile — distinct from a byte [`Outcome::Mismatch`].
+pub fn verify_with(
+    candidate_c: &str,
+    opts: &CompileOpts,
+    target: &[u8],
+    recompile: impl Fn(&str, &CompileOpts) -> Result<Vec<u8>, HarnessError>,
+) -> Result<Outcome, HarnessError> {
+    let recovered = recompile(candidate_c, opts)?;
+    Ok(compare(recovered, target.to_vec()))
+}
+
+/// Render the recovery as the most *idiomatic* C that still recompiles to `code`
+/// byte-for-byte, recompiling via `recompile` (see [`verify_with`]).
+///
+/// The recovery is form-neutral; this tries each [`AccessForm`] in preference
+/// order (subscript, then pointer arithmetic) and returns the first whose bytes
+/// match. The recompile is the *oracle*: a form that doesn't reproduce the bytes
+/// — or that the backend can't even build (a hard gap may surface as a panic,
+/// caught and treated as "rejected") — is skipped.
+///
+/// Returns `None` if the function isn't fully recovered, or if no form matches.
+#[must_use]
+pub fn render_idiomatic_with(
+    code: &[u8],
+    opts: &CompileOpts,
+    recompile: impl Fn(&str, &CompileOpts) -> Result<Vec<u8>, HarnessError>,
+) -> Option<String> {
+    let func = crate::hi_ir::recover(code);
+    for form in [crate::AccessForm::Subscript, crate::AccessForm::PointerArith] {
+        let Some(candidate) = crate::to_c_with_form(&func, form) else {
+            return None; // incomplete — no form will render it
+        };
+        // The backend is the oracle. Tolerate a build that panics on an
+        // unsupported shape (a known compiler gap): a crash is just a rejection.
+        let matched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            matches!(verify_with(&candidate, opts, code, &recompile), Ok(Outcome::Match))
+        }))
+        .unwrap_or(false);
+        if matched {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+// ── Bundled `bcc` backend (default feature) ────────────────────────────────
+//
+// The default recompiler: our byte-exact BCC. Behind the `bcc` feature so a
+// compiler-free build (the universal-decompiler wasm module) can drop it and use
+// `verify_with`/`render_idiomatic_with` with an injected backend instead.
+
+#[cfg(feature = "bcc")]
+impl From<MemoryModel> for bcc::MemoryModel {
+    fn from(m: MemoryModel) -> Self {
+        match m {
+            MemoryModel::Tiny => bcc::MemoryModel::Tiny,
+            MemoryModel::Small => bcc::MemoryModel::Small,
+            MemoryModel::Compact => bcc::MemoryModel::Compact,
+            MemoryModel::Medium => bcc::MemoryModel::Medium,
+            MemoryModel::Large => bcc::MemoryModel::Large,
+            MemoryModel::Huge => bcc::MemoryModel::Huge,
+        }
+    }
+}
+
+#[cfg(feature = "bcc")]
+impl From<bcc::MemoryModel> for MemoryModel {
+    fn from(m: bcc::MemoryModel) -> Self {
+        match m {
+            bcc::MemoryModel::Tiny => MemoryModel::Tiny,
+            bcc::MemoryModel::Small => MemoryModel::Small,
+            bcc::MemoryModel::Compact => MemoryModel::Compact,
+            bcc::MemoryModel::Medium => MemoryModel::Medium,
+            bcc::MemoryModel::Large => MemoryModel::Large,
+            bcc::MemoryModel::Huge => MemoryModel::Huge,
+        }
+    }
+}
+
+/// Compile candidate C with the bundled [`bcc`] and return its `_TEXT` (first
+/// CODE-class segment) bytes — the default recompiler backend.
 ///
 /// # Errors
 /// [`HarnessError::Compile`] if the candidate fails to lex, parse, or assemble.
+#[cfg(feature = "bcc")]
 pub fn recompile_text(candidate_c: &str, opts: &CompileOpts) -> Result<Vec<u8>, HarnessError> {
-    let obj = build_obj(
+    let obj = bcc::build_obj(
         candidate_c,
         "a.c",
-        SystemTime::UNIX_EPOCH,
-        opts.model,
+        std::time::SystemTime::UNIX_EPOCH,
+        opts.model.into(),
         opts.merge_strings,
         &opts.defines,
         opts.unsigned_chars,
@@ -171,56 +273,26 @@ pub fn recompile_text(candidate_c: &str, opts: &CompileOpts) -> Result<Vec<u8>, 
     Ok(fingerprint::idioms::code_of_obj(&obj))
 }
 
-/// Verify a candidate C string reproduces `target` `_TEXT` bytes.
-///
-/// The engine for the spec's correctness contract: returns [`Outcome::Match`] on
-/// a byte-exact reproduction, or [`Outcome::Mismatch`] with the first diverging
-/// offset (the repair signal) otherwise.
+/// Verify a candidate reproduces `target` `_TEXT`, recompiling with the bundled
+/// [`bcc`] backend — [`verify_with`] wired to [`recompile_text`].
 ///
 /// # Errors
-/// [`HarnessError::Compile`] if the candidate C doesn't compile — a different
-/// failure from a byte mismatch (see [`HarnessError`]).
+/// [`HarnessError::Compile`] if the candidate C doesn't compile.
+#[cfg(feature = "bcc")]
 pub fn verify(
     candidate_c: &str,
     opts: &CompileOpts,
     target: &[u8],
 ) -> Result<Outcome, HarnessError> {
-    let recovered = recompile_text(candidate_c, opts)?;
-    Ok(compare(recovered, target.to_vec()))
+    verify_with(candidate_c, opts, target, recompile_text)
 }
 
-/// Decompile `code` to the most *idiomatic* C that still recompiles to it
-/// byte-for-byte — the "automated second pass" over the form-neutral recovery.
-///
-/// The recovery ([`recover`](crate::hi_ir::recover)) is form-neutral; this
-/// renders it under each [`AccessForm`] in preference order (subscript first,
-/// then pointer arithmetic) and returns the first whose bytes match `code`. The
-/// recompile is the *oracle*: a form that doesn't reproduce the bytes — or that
-/// the compiler can't even build (a hard gap may surface as a panic, which is
-/// caught and treated as "rejected") — is skipped. So `p[K]` is chosen where the
-/// compiler supports it and `*(p+K)` is the automatic fallback, with no
-/// correctness risk either way.
-///
-/// Returns `None` if the function isn't fully recovered, or (unexpectedly) if no
-/// form reproduces the bytes.
+/// Render the most idiomatic byte-exact C, recompiling with the bundled [`bcc`]
+/// backend — [`render_idiomatic_with`] wired to [`recompile_text`].
+#[cfg(feature = "bcc")]
 #[must_use]
 pub fn render_idiomatic(code: &[u8], opts: &CompileOpts) -> Option<String> {
-    let func = crate::hi_ir::recover(code);
-    for form in [crate::AccessForm::Subscript, crate::AccessForm::PointerArith] {
-        let Some(candidate) = crate::to_c_with_form(&func, form) else {
-            return None; // incomplete — no form will render it
-        };
-        // The compiler is the oracle. Tolerate a build that panics on an
-        // unsupported shape (a known `bcc` gap): a crash is just a rejection.
-        let matched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            matches!(verify(&candidate, opts, code), Ok(Outcome::Match))
-        }))
-        .unwrap_or(false);
-        if matched {
-            return Some(candidate);
-        }
-    }
-    None
+    render_idiomatic_with(code, opts, recompile_text)
 }
 
 /// Diff two `_TEXT` byte runs. Pure, so it's testable without compiling.
@@ -236,7 +308,7 @@ fn compare(recovered: Vec<u8>, target: Vec<u8>) -> Outcome {
     Outcome::Mismatch(Diff { recovered, target, first_diff })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bcc"))]
 mod tests {
     use super::*;
 
