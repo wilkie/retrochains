@@ -119,6 +119,16 @@ the lift degrades gracefully, the function is still structured around what we *d
 recognize, and the recompile check simply fails on functions still containing
 `Asm` (a precise "not yet decompilable" signal rather than a wrong answer).
 
+This lift is built:
+[`crates/decompile/src/lo_ir.rs`](../../crates/decompile/src/lo_ir.rs).
+`lift(code)` runs `fingerprint::recognize`, decodes each idiom's masked-out
+operands (displacements, immediates, register fields) into the micro-ops above,
+and coalesces unrecognized runs into a single `Asm`. Every `LoInsn` carries the
+byte `Span` it lifted from — the provenance §8 maps mismatches back through.
+Operand decode is the only real work, and it's mechanical: the idiom *is* the
+instruction shape, so reading e.g. a `[bp±disp]` displacement is a fixed byte
+offset, not analysis.
+
 ## 5. Hi-IR: expressions and structured statements
 
 Close to a C AST, plus provenance (§8):

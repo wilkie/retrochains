@@ -11,6 +11,8 @@
 //! lift can be developed against a concrete pass/fail (and a localizable diff)
 //! before any of Lo-IR or Hi-IR exists.
 
+pub mod lo_ir;
 pub mod verify;
 
+pub use lo_ir::{lift, LoInsn, LoOp};
 pub use verify::{recompile_text, verify, CompileOpts, Diff, HarnessError, Outcome};
