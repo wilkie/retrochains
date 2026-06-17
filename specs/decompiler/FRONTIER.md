@@ -20,18 +20,20 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | char-compound | narrowing-cast | unary-ops | meaning |
-|-------------|--------:|---|--------------:|---------------:|----------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 1846 (44.7%) | 1862 (45.1%) | **1908 (46.2%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1920 | 1920 | 1871 (45.3%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 331 | 323 | 326 (7.9%) | recovered C recompiles to *different* bytes |
+| bucket      | initial | … | narrowing-cast | unary-ops | ternary | meaning |
+|-------------|--------:|---|---------------:|----------:|--------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 1862 (45.1%) | 1908 (46.2%) | **2001 (48.4%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1920 | 1871 | 1844 (44.6%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 323 | 326 | 260 (6.3%) | recovered C recompiles to *different* bytes |
 | cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 | … | 26 | 19 | 19 | recover/verify crashed |
+| PANIC       |    27 | … | 19 | 19 | 19 | recover/verify crashed |
 
-(The +3 mismatch at the unary step is ternary/abs-adjacent: folding `-x`
-unblocks `a > 0 ? a : -a`, whose ternary control flow isn't structured yet —
-`render_idiomatic` gates these on verify, so production still declines them.)
+(The ternary step is the biggest yet: +93 match **and −66 mismatch** — most of
+those mismatches were ternaries (and the unary-step's abs cases) being
+mis-structured as broken empty `if`s; recovering the conditional expression
+fixes both. Only 2 new mismatches, ternary edge cases with side-effects/pointer
+results, production-gated.)
 
 (Intermediate columns multi-fn/in-place/var-shift elided; see git history. The
 narrowing-cast step is a triple win: +16 match, −8 mismatch, **−7 panic** — the
@@ -148,9 +150,11 @@ clears most of them.
    by lookahead (the fold's skip-count consumes the `sbb`/`inc` tail). The +3
    mismatch is ternary/abs-adjacent (`a>0 ? a : -a`), now the most visible
    *incomplete* near this work.
-8. **Ternary / `? :` recovery** — `a>0 ? a : -a` mis-structures as an empty `if`;
-   the compare-branch-merge-into-`ax` shape isn't recognized. Newly surfaced by
-   the unary work.
+8. ~~**Ternary / `? :` recovery**~~ — **DONE** (MATCH 46.2% → 48.4%, +93;
+   MISMATCH 326 → 260, −66). The diamond whose both arms reduce to a value folds
+   to `Expr::Ternary`, seeded into the consumer via `pending_acc`. This also
+   reclaimed the unary-step's abs mismatches.
 9. **`int→long`/`char*char→int` widening** (the imul-spill with `cbw` operands),
    **panic → sound-incomplete** (19), **shared globals across functions**,
-   bitfields, arrays/struct/pointer-deref.
+   bitfields, arrays/struct/pointer-deref. Ternaries with a side-effecting arm
+   (`a ? b++ : c`) or a pointer result are the small remaining tail here.

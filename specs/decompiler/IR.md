@@ -176,7 +176,14 @@ Two recoveries produce it:
   `if`/`while`/`for`. BCC's loop shape is stereotyped (see the for-loop notes:
   the test sits *between* the step and the body, with a jump-back folded into the
   initial `if`'s else), so pattern-matching the templates is more reliable than
-  generic interval analysis — and, again, the recompile check adjudicates.
+  generic interval analysis — and, again, the recompile check adjudicates. A
+  **ternary** `cond ? t : f` is the same diamond as an `if`/`else`, but both arms
+  reduce to a single accumulator *value* with no statements (`<t→ax>; jmp end;
+  else: <f→ax>`); detected before the `if` is built, it folds to an
+  `Expr::Ternary` whose merged value is *seeded* into the following straight-line
+  run (a `pending_acc` the next fold picks up), so the consumer — a `return`, a
+  store — sees it. This is the one place an expression spans a branch, so it must
+  be recognized at the structurer, not the linear fold.
 
 **`Compound` vs `Assign` — an in-place distinction that is not cosmetic.** BCC
 codes `x op= y` differently from `x = x op y`: a register variable, global, or

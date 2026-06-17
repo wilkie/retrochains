@@ -462,6 +462,11 @@ fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_has_external_call(a, callees) || expr_has_external_call(b, callees)
         }
+        Expr::Ternary(a, b, c) => {
+            expr_has_external_call(a, callees)
+                || expr_has_external_call(b, callees)
+                || expr_has_external_call(c, callees)
+        }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_external_call(a, callees),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
@@ -494,6 +499,7 @@ fn expr_has_call(e: &Expr) -> bool {
     match e {
         Expr::Call(..) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
+        Expr::Ternary(a, b, c) => expr_has_call(a) || expr_has_call(b) || expr_has_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
@@ -675,6 +681,12 @@ fn expr_str(e: &Expr, names: &Names) -> String {
             };
             format!("{sym}{}", expr_str(e, names))
         }
+        Expr::Ternary(c, t, f) => format!(
+            "({} ? {} : {})",
+            expr_str(c, names),
+            expr_str(t, names),
+            expr_str(f, names)
+        ),
     }
 }
 
@@ -1187,6 +1199,18 @@ mod tests {
         assert_roundtrips(
             "int f(int n){ int s; int i; s=0; for(i=0;i<n;i++){ s+=i; } return s; }\n",
         );
+    }
+
+    #[test]
+    fn ternary_expressions_roundtrip() {
+        // `cond ? t : f` is a diamond whose both arms leave a value in `ax` and
+        // converge; recovered as `Expr::Ternary` and seeded into the consumer
+        // (a `return`/store). Abs (`a>0 ? a : -a`), a plain select, a stored
+        // result, and a truthiness condition.
+        assert_roundtrips("int f(int a){ return a > 0 ? a : -a; }\n");
+        assert_roundtrips("int f(int a, int b, int c){ return a ? b : c; }\n");
+        assert_roundtrips("int f(int a){ int r; r = a > 5 ? 1 : 2; return r; }\n");
+        assert_roundtrips_stack("int f(int a, int b){ return a < b ? a : b; }\n");
     }
 
     #[test]

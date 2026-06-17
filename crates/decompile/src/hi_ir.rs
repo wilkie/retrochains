@@ -127,6 +127,10 @@ pub enum Expr {
     Cast(Type, Box<Expr>),
     /// `-e` / `~e` — a prefix unary op (`neg`/`not`). Logical `!` is [`Not`].
     Unary(UnaryOp, Box<Expr>),
+    /// `c ? t : f` — a conditional expression. Recovered from the diamond
+    /// `test; jcc else; <t→ax>; jmp end; else: <f→ax>; end:` where both arms
+    /// reduce to a single accumulator value (no statements).
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 /// Does an expression contain a (side-effecting) call anywhere?
@@ -134,6 +138,7 @@ fn contains_call(e: &Expr) -> bool {
     match e {
         Expr::Call(..) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
+        Expr::Ternary(a, b, c) => contains_call(a) || contains_call(b) || contains_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => contains_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
@@ -235,6 +240,9 @@ fn expr_mentions(expr: &Expr, var: Var) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_mentions(a, var) || expr_mentions(b, var)
         }
+        Expr::Ternary(a, b, c) => {
+            expr_mentions(a, var) || expr_mentions(b, var) || expr_mentions(c, var)
+        }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_mentions(a, var),
         Expr::Call(_, args) => args.iter().any(|a| expr_mentions(a, var)),
         Expr::Const(_) | Expr::LongConst(_) => false,
@@ -302,6 +310,11 @@ fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             walk_vars_expr(a, f);
             walk_vars_expr(b, f);
+        }
+        Expr::Ternary(cond, then_v, else_v) => {
+            walk_vars_expr(cond, f);
+            walk_vars_expr(then_v, f);
+            walk_vars_expr(else_v, f);
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => walk_vars_expr(a, f),
         Expr::Call(_, args) => args.iter_mut().for_each(|a| walk_vars_expr(a, f)),
@@ -667,6 +680,9 @@ struct Ctx {
     returns_value: bool,
     returns_long: bool,
     returns_char: bool,
+    /// A value to seed the *next* straight-line fold with — the merged result of
+    /// a ternary diamond, which the following code (a `return`/store) consumes.
+    pending_acc: Option<Expr>,
 }
 
 impl Ctx {
@@ -788,6 +804,12 @@ impl Ctx {
             Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
                 self.mark_unsigned(a);
                 self.mark_unsigned(b);
+            }
+            // The value branches carry the result's signedness; the condition
+            // is a separate boolean.
+            Expr::Ternary(_, b, c) => {
+                self.mark_unsigned(b);
+                self.mark_unsigned(c);
             }
             Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => self.mark_unsigned(a),
             Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..) => {}
@@ -926,7 +948,8 @@ impl Ctx {
     /// `*p` set up just before a `cmp` that reads `ax`) — `None` if nothing live.
     #[allow(clippy::too_many_lines)] // a flat per-op match reads better unsplit
     fn fold_linear(&mut self, lo: usize, hi: usize, out: &mut Vec<Stmt>) -> Option<Expr> {
-        let mut acc: Option<Expr> = None;
+        // Seed with a ternary result left pending by the structurer, if any.
+        let mut acc: Option<Expr> = self.pending_acc.take();
         // The pointer value loaded into `bx` (for a `mov bx,p; mov ax,[bx]`
         // dereference).
         let mut bx: Option<Expr> = None;
@@ -1948,6 +1971,32 @@ impl Ctx {
         self.idx_of(e)
     }
 
+    /// A ternary `cond ? then : else`: the then-block `[then_lo, tb-1)` (its
+    /// trailing jmp to the merge is at `tb-1`) and the else-block `[tb, e_idx)`
+    /// each fold to a single accumulator value with **no emitted statements** —
+    /// a pure value. Returns the `Expr::Ternary`, or `None` when either arm
+    /// carries a statement (a real `if`/`else`) or doesn't leave a value.
+    fn detect_ternary(
+        &mut self,
+        then_lo: usize,
+        tb: usize,
+        e_idx: usize,
+        cond: &Expr,
+    ) -> Option<Expr> {
+        let then_hi = tb.checked_sub(1)?;
+        let mut buf = Vec::new();
+        let then_val = self.fold_linear(then_lo, then_hi, &mut buf)?;
+        if !buf.is_empty() {
+            return None;
+        }
+        let mut buf2 = Vec::new();
+        let else_val = self.fold_linear(tb, e_idx, &mut buf2)?;
+        if !buf2.is_empty() {
+            return None;
+        }
+        Some(Expr::Ternary(Box::new(cond.clone()), Box::new(then_val), Box::new(else_val)))
+    }
+
     /// Recognize a `switch` compare-chain starting at the `cmp` index
     /// `first_cmp`: consecutive `cmp ax,Ki; je Ti` pairs ending in an
     /// unconditional `jmp` to the no-match target. Returns the `(value, body
@@ -2324,9 +2373,22 @@ impl Ctx {
                         continue;
                     };
                     let cond = self.condition(cmp_idx, i, true, cond_acc.as_ref());
+                    let e_idx_opt = self.else_end(tb, target);
+                    // A ternary `cond ? t : f` — an if/else whose both arms reduce
+                    // to a single accumulator value (no statements), converging at
+                    // the merge. The merged value is seeded for the consumer that
+                    // follows (a `return`/store).
+                    if let Some(e_idx) = e_idx_opt
+                        && let Some(tern) = self.detect_ternary(i + 1, tb, e_idx, &cond)
+                    {
+                        self.pending_acc = Some(tern);
+                        i = e_idx;
+                        linear_start = e_idx;
+                        continue;
+                    }
                     // `if/else` when the then-block ends in a jump past the
                     // else-block; otherwise a plain `if`.
-                    let resume = if let Some(e_idx) = self.else_end(tb, target) {
+                    let resume = if let Some(e_idx) = e_idx_opt {
                         let then = self.structure(i + 1, tb - 1);
                         let otherwise = self.structure(tb, e_idx);
                         stmts.push(Stmt::If(cond, then, otherwise));
@@ -2499,6 +2561,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         returns_value: false,
         returns_long: false,
         returns_char: false,
+        pending_acc: None,
     };
     // Structure up to the last `ret` — a jump-table `switch` appends its offset
     // table after the epilogue, and that data isn't code.
