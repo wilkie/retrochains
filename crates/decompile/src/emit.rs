@@ -11,7 +11,9 @@
 
 use std::fmt::Write as _;
 
-use crate::hi_ir::{recover, ArraySpec, Expr, Function, LValue, RelOp, Stmt, Type, Var};
+use crate::hi_ir::{
+    recover_program, ArraySpec, Expr, Function, LValue, RelOp, Stmt, Type, Var,
+};
 use crate::lo_ir::{BinOp, Reg};
 
 /// How an offset pointer access — a `Deref` of `base + k` — is *spelled*. Both
@@ -61,6 +63,10 @@ struct Names {
     global_count: usize,
     /// How offset pointer accesses are spelled (subscript vs pointer arithmetic).
     form: AccessForm,
+    /// Local callees by `_TEXT` start offset → name. A recovered call whose
+    /// target is in here names that function; one that isn't is an external
+    /// (`g0`). Empty for single-function emit, so every call is external there.
+    callees: Vec<(usize, String)>,
 }
 
 /// `<type> <name>` for a variable — `int *p` (pointer), `unsigned long l`,
@@ -177,7 +183,17 @@ impl Names {
             global_count,
             arrays: arrays.to_vec(),
             form: AccessForm::Subscript,
+            callees: Vec::new(),
         }
+    }
+
+    /// The name a call to `target` resolves to: a local function if `target`
+    /// names one, else the opaque external `g0`.
+    fn callee(&self, target: usize) -> &str {
+        self.callees
+            .iter()
+            .find(|(off, _)| *off == target)
+            .map_or("g0", |(_, name)| name.as_str())
     }
 
     /// The 1-based array number and element index a stack slot maps to, if it
@@ -256,12 +272,94 @@ impl Names {
     }
 }
 
-/// Decompile `_TEXT` bytes to C, or `None` if the function isn't fully
-/// recovered yet (it still holds ops the lift/fold can't model). A `Some` result
-/// is the candidate to hand to [`crate::verify`].
+/// Decompile `_TEXT` bytes to C, or `None` if it isn't fully recovered yet (some
+/// op the lift/fold can't model, or a program shape not yet supported). A `Some`
+/// result is the candidate to hand to [`crate::verify`].
+///
+/// Handles a multi-function segment: each function is recovered independently and
+/// a local `call` between them names its callee (see [`decompile_program`]). A
+/// lone function takes the single-function path unchanged.
 #[must_use]
 pub fn decompile(code: &[u8]) -> Option<String> {
-    to_c(&recover(code))
+    let funcs = recover_program(code);
+    match funcs.as_slice() {
+        [] => None,
+        [one] => to_c(one),
+        many => emit_program(many),
+    }
+}
+
+/// Decompile a `_TEXT` segment as a multi-function program (always the program
+/// path, even for one function — names it `f0`). Exposed for callers that want
+/// the program framing explicitly; [`decompile`] picks it automatically.
+#[must_use]
+pub fn decompile_program(code: &[u8]) -> Option<String> {
+    emit_program(&recover_program(code))
+}
+
+/// Emit a recovered multi-function program. Functions are named `f0, f1, …` in
+/// `_TEXT` (definition) order — the order BCC lays them out, so reproducing it
+/// reproduces each intra-module call's forward/backward resolution. A local call
+/// resolves to its callee's name; an external stays `g0`.
+///
+/// Declines (returns `None`) when any function is incomplete, or when the program
+/// touches file-scope globals (their shared data-segment layout across functions
+/// isn't modelled yet) — both sound, not mis-shaped.
+fn emit_program(funcs: &[Function]) -> Option<String> {
+    if funcs.is_empty() || funcs.iter().any(|f| !f.complete) {
+        return None;
+    }
+    // Globals are file-scope and shared across functions; per-function emission
+    // can't yet reconcile one data-segment layout. Decline if any are used.
+    if funcs.iter().any(|f| f.vars.iter().any(|v| matches!(v, Var::Global(_)))) {
+        return None;
+    }
+    let callees: Vec<(usize, String)> =
+        funcs.iter().enumerate().map(|(i, f)| (f.start, format!("f{i}"))).collect();
+
+    let mut s = String::new();
+    // One K&R prototype covers every external callee (a local call resolves to a
+    // name and needs none). Emit it only if some call is actually external.
+    if funcs.iter().any(|f| body_has_external_call(&f.body, &callees)) {
+        s.push_str("extern int g0();\n");
+    }
+    for (i, f) in funcs.iter().enumerate() {
+        emit_function(f, &format!("f{i}"), &callees, AccessForm::Subscript, &mut s)?;
+    }
+    Some(s)
+}
+
+/// Emit one function of a program into `out` under `name`, resolving local calls
+/// via `callees`. Returns `None` if the function isn't complete.
+fn emit_function(
+    f: &Function,
+    name: &str,
+    callees: &[(usize, String)],
+    form: AccessForm,
+    out: &mut String,
+) -> Option<()> {
+    if !f.complete {
+        return None;
+    }
+    let ret = type_str(f.ret);
+    let mut names = Names::build(
+        &f.vars,
+        &f.char_vars,
+        &f.ptr_vars,
+        &f.char_ptr_vars,
+        &f.long_vars,
+        &f.unsigned_vars,
+        &f.arrays,
+    );
+    names.form = form;
+    names.callees = callees.to_vec();
+    let _ = writeln!(out, "{ret} {name}({}) {{", names.signature());
+    for decl in names.local_decls() {
+        let _ = writeln!(out, "  {decl};");
+    }
+    emit_block(&f.body, 1, true, &names, out);
+    out.push_str("}\n");
+    Some(())
 }
 
 /// Render a recovered function as C, or `None` if it isn't
@@ -283,12 +381,7 @@ pub fn to_c_with_form(f: &Function, form: AccessForm) -> Option<String> {
         return None;
     }
 
-    let ret = match f.ret {
-        Type::Int => "int",
-        Type::Char => "char",
-        Type::Long => "long",
-        Type::Void => "void",
-    };
+    let ret = type_str(f.ret);
     let mut names = Names::build(
         &f.vars,
         &f.char_vars,
@@ -320,6 +413,58 @@ pub fn to_c_with_form(f: &Function, form: AccessForm) -> Option<String> {
     Some(s)
 }
 
+/// The C keyword for a return/declaration type.
+fn type_str(ty: Type) -> &'static str {
+    match ty {
+        Type::Int => "int",
+        Type::Char => "char",
+        Type::Long => "long",
+        Type::Void => "void",
+    }
+}
+
+/// Does the body hold a call to an *external* (not one of `callees`)? Such a call
+/// emits `g0`, so the program needs the K&R extern prototype.
+fn body_has_external_call(stmts: &[Stmt], callees: &[(usize, String)]) -> bool {
+    let ext = |e: &Expr| expr_has_external_call(e, callees);
+    stmts.iter().any(|s| match s {
+        Stmt::Assign(_, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => ext(e),
+        Stmt::Return(None) | Stmt::Break => false,
+        Stmt::If(c, t, e) => ext(c) || has_ext(t, callees) || has_ext(e, callees),
+        Stmt::While(c, b) | Stmt::Do(c, b) => ext(c) || has_ext(b, callees),
+        Stmt::For(init, c, step, b) => {
+            has_ext(std::slice::from_ref(init), callees)
+                || ext(c)
+                || has_ext(std::slice::from_ref(step), callees)
+                || has_ext(b, callees)
+        }
+        Stmt::Switch(scrut, arms, def) => {
+            ext(scrut)
+                || arms.iter().any(|(_, b)| has_ext(b, callees))
+                || has_ext(def, callees)
+        }
+    })
+}
+
+/// Alias kept short for the recursive calls above.
+fn has_ext(stmts: &[Stmt], callees: &[(usize, String)]) -> bool {
+    body_has_external_call(stmts, callees)
+}
+
+fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
+    match e {
+        Expr::Call(target, args) => {
+            !callees.iter().any(|(off, _)| off == target)
+                || args.iter().any(|a| expr_has_external_call(a, callees))
+        }
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            expr_has_external_call(a, callees) || expr_has_external_call(b, callees)
+        }
+        Expr::Not(a) | Expr::Deref(a) => expr_has_external_call(a, callees),
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
+    }
+}
+
 /// Does the recovered body contain a call anywhere (so it needs the extern)?
 fn body_has_call(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match s {
@@ -343,7 +488,7 @@ fn body_has_call(stmts: &[Stmt]) -> bool {
 
 fn expr_has_call(e: &Expr) -> bool {
     match e {
-        Expr::Call(_) => true,
+        Expr::Call(..) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
         Expr::Not(a) | Expr::Deref(a) => expr_has_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
@@ -498,9 +643,9 @@ fn expr_str(e: &Expr, names: &Names) -> String {
         Expr::Not(e) => format!("!{}", expr_str(e, names)),
         Expr::Deref(e) => deref_str(e, names),
         Expr::AddrOf(v) => format!("&{}", names.of(*v)),
-        Expr::Call(args) => {
+        Expr::Call(target, args) => {
             let list = args.iter().map(|a| expr_str(a, names)).collect::<Vec<_>>().join(", ");
-            format!("g0({list})")
+            format!("{}({list})", names.callee(*target))
         }
     }
 }
@@ -969,6 +1114,39 @@ mod tests {
         assert_roundtrips("extern int g(); int f(int a) { return g(a); }\n");
         assert_roundtrips("extern int g(); int f() { return g(3, 4); }\n");
         assert_roundtrips("extern void g(); void f() { g(3); g(4); }\n");
+    }
+
+    #[test]
+    fn multi_function_programs_roundtrip() {
+        // Two functions share one `_TEXT`. A local call (`main` → `f`) is a near
+        // call with a real displacement, so it must resolve to the local callee's
+        // name — recovered as `f0`/`f1` in definition order, `f1` calling `f0`.
+        assert_roundtrips("int f(int x) { return x; }\nint main(void) { return f(7); }\n");
+        assert_roundtrips("int f(int a, int b) { return a + b; }\nint main(void){ return f(3, 5); }\n");
+        // Two independent functions, no calls between them.
+        assert_roundtrips("int f(void) { return 1; }\nint g(void) { return 2; }\n");
+        // A chain of three: f2 calls f1 calls f0.
+        assert_roundtrips(
+            "int a(int x){ return x; }\nint b(int x){ return a(x); }\nint main(void){ return b(9); }\n",
+        );
+        // A mix: the callee is local, but it also calls an undefined external
+        // (`g0` stays an extern; the local call still resolves).
+        assert_roundtrips(
+            "extern int g0();\nint f(void){ return g0(); }\nint main(void){ return f(); }\n",
+        );
+    }
+
+    #[test]
+    fn a_program_touching_a_global_declines() {
+        // File-scope globals are shared across functions; their one data-segment
+        // layout isn't reconciled across per-function recovery yet, so a
+        // multi-function program that reads a global declines (sound, not wrong).
+        let code = recompile_text(
+            "int g; int f(void){ return g; }\nint main(void){ return f(); }\n",
+            &CompileOpts::default(),
+        )
+        .unwrap();
+        assert!(decompile(&code).is_none(), "globals across functions aren't modelled yet");
     }
 
     #[test]

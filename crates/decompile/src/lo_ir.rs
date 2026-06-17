@@ -184,9 +184,14 @@ pub enum LoOp {
     Lea { dst: Place, src: Place },
     /// Push a cdecl argument (§7).
     Arg { src: Place },
-    /// A `call`. `far` distinguishes `9a` from `e8`. The callee identity comes
-    /// from relocations, not the encoded displacement, so it isn't resolved here.
-    Call { far: bool },
+    /// A `call`. `far` distinguishes `9a` from `e8`. For a near call the encoded
+    /// rel16 resolves to an in-`_TEXT` byte offset (`target`): a call to a local
+    /// function lands on its prologue, so the program recovery can name the
+    /// callee. A call to an external symbol has a `0000` placeholder displacement
+    /// (patched by a fixup), so `target` points just past the call — matching no
+    /// function start, which is exactly how an external is told apart. A far call
+    /// is cross-segment; `target` is `usize::MAX` (never a local).
+    Call { far: bool, target: usize },
     /// cdecl argument cleanup (`pop cx` = 2 bytes, or `add sp,N`).
     Cleanup { bytes: u16 },
     /// A conditional branch to an in-slice byte offset.
@@ -568,8 +573,12 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         }
 
         // ---- calls and cdecl argument handling -----------------------------
-        Idiom::NearCall => vec![LoOp::Call { far: false }],
-        Idiom::FarCall => vec![LoOp::Call { far: true }],
+        Idiom::NearCall => {
+            let rel = u16_at(bytes, 1).cast_signed();
+            let target = (off + bytes.len()).wrapping_add_signed(isize::from(rel));
+            vec![LoOp::Call { far: false, target }]
+        }
+        Idiom::FarCall => vec![LoOp::Call { far: true, target: usize::MAX }],
         Idiom::PushAx => vec![LoOp::Arg { src: R(Reg::Ax) }],
         Idiom::CdeclPop1 => vec![LoOp::Cleanup { bytes: 2 }],
         Idiom::CdeclPopN => vec![LoOp::Cleanup { bytes: u16::from(bytes[2]) }],

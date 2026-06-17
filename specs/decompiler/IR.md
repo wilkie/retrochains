@@ -546,6 +546,27 @@ accumulator" from "the trailing value was a discarded call". A return *inside* a
 branch (a multi-exit shape) isn't structured yet, so it's detected (an exit jump
 in a sub-block with no `Ret`) and marked incomplete rather than mis-recovered.
 
+**Multi-function programs.** A `_TEXT` segment usually holds several functions
+laid out one after another (a helper, then `main`, …). `recover_program` splits
+it on the prologue: a function starts at an `Enter` that *opens* a new function
+— the first one, and any that follows the previous function's `ret` (so the
+`dec sp; dec sp` 2-byte-local reservation, which also lifts to `Enter`, isn't
+mistaken for a boundary). Each window is recovered independently, with absolute
+offsets preserved (the lift keeps byte offsets, so internal branches and embedded
+jump tables still resolve against the full segment). Functions emit as `f0, f1, …`
+in `_TEXT` (definition) order — the order BCC lays them out, so reproducing it
+reproduces each intra-module call's forward/backward resolution.
+
+This is where the callee's identity stops being irrelevant: a `call` to a
+*local* function is **not** a `e8 00 00` placeholder — BCC resolves the
+displacement at compile time, so the near call carries a real rel16 to the
+callee's prologue. The lift computes that target (`Call { target }`), and program
+emit names it (`f1` calling `f0`) instead of an opaque extern — only an
+*external* call (target matching no function start: the `0000` placeholder points
+just past itself) stays `g0`. A lone function takes the single-function path
+unchanged. Programs that touch file-scope globals decline for now (one shared
+data-segment layout across functions isn't reconciled yet) — sound, not wrong.
+
 ## 8. Provenance and the verify/repair loop
 
 Every Lo-IR and Hi-IR node carries the **byte range it lifted from**. This is what

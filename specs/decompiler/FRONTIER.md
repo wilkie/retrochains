@@ -18,56 +18,41 @@ the same opts. Each fixture lands in one bucket. The companion
 `--example probe -- <fixture-dir>` dumps the source, recovered C, and verdict
 for a single fixture.
 
-## Baseline (2026-06, 4131 considered, 70 skipped)
+## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | count | share | meaning |
-|-------------|------:|------:|---------|
-| **MATCH**   |  1433 | 34.7% | round-trips byte-exact |
-| incomplete  |  2111 | 51.1% | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 | 13.4% | recovered C recompiles to *different* bytes |
-| cerr        |     2 |  0.0% | recovered C didn't compile |
-| notext      |     5 |  0.1% | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 |  0.7% | recover/verify crashed |
+| bucket      | initial | after multi-fn | meaning |
+|-------------|--------:|---------------:|---------|
+| **MATCH**   |  1433 (34.7%) | **1580 (38.2%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | 2129 (51.5%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | 389 (9.4%) | recovered C recompiles to *different* bytes |
+| cerr        |     2 |   2 | recovered C didn't compile |
+| notext      |     5 |   5 | no `_TEXT` (all-data fixture; nothing to recover) |
+| PANIC       |    27 |  27 | recover/verify crashed |
 
 (70 skipped = link invocations or unparseable args — no single-function
 `_TEXT` target.)
 
-So single-function recovery already round-trips **a third of the corpus**.
+## Lever #1 — multi-function `_TEXT` — **DONE**
 
-## The #1 lever: multi-function `_TEXT`
+The decompiler used to treat the entire `_TEXT` segment as **one function**, so
+the ~877 fixtures (~21%) that define a helper plus a `main` ran the first
+function's body straight into the second → MISMATCH. `recover_program` now
+splits the segment on the prologue (an `Enter` that follows a `ret`, so the
+`dec sp; dec sp` 2-byte-local idiom isn't a false boundary), recovers each window
+independently with absolute offsets preserved, and resolves a *local* near call
+to its callee's name (`f1` calling `f0`) — only true externals stay `g0`. See
+§7 of [IR.md](IR.md).
 
-The decompiler treats the entire `_TEXT` segment as **one function**. But ~877
-fixtures (~21%) define more than one function — almost always a helper plus a
-`main` that calls it. On those, `recover` runs the first function's body
-straight into the second:
+Result: MATCH 1433 → **1580** (+147), MISMATCH 553 → 389 (−164); the
+`functions/{calls,args}` mismatch cluster dropped 138 → 43. The 17 that went to
+incomplete rather than match are programs touching globals (declined for now) or
+with one sub-function still incomplete.
 
-```
-int f(int x) { return x; }
-int main(void) { return f(7); }
-```
-recovers as
-```
-int f(int p1) {
-  return p1;
-  return g0(7);   // ← main's body, mashed into f
-}
-```
-→ MISMATCH (20 recovered vs 25 target bytes).
-
-This single gap is the **dominant MISMATCH cause**: 187 of the 553 mismatches
-are in `functions/{calls,args,return,recursion}` alone, and many more across
-`control-flow`/`expressions` are multi-function files that happen to exercise
-those idioms. It also accounts for a slice of the incomplete bucket (any
-multi-function file whose *combined* body holds an op the fold can't model).
-
-**What it needs:** split `_TEXT` into per-function ranges (each `enter…ret`
-spans a function; the publics/segment offsets name them), recover each
-independently, emit them together, and resolve a recovered call's target offset
-to the recovered callee's name (instead of the opaque `extern int g0()`). The
-verify then gates the *whole* multi-function C against the *whole* `_TEXT`.
-
-This is the highest-leverage item: it converts mismatch→match for the function
-clusters and unblocks honest call-target naming.
+The remaining `functions/*` mismatches are a *different* gap — in-place
+parameter mutation (`++c` / `x++` on a param recovers as a copy into a fresh
+local, `char v1; v1 = p1; v1 = v1 + 1` — an extra slot and store). That's
+lever #2 territory (the generalized binary-op / in-place-modify fold), not
+multi-function.
 
 ## The incomplete bucket — ranked feature gaps (sound declines)
 
@@ -108,9 +93,12 @@ clears most of them.
 
 ## Recommended order
 
-1. **Multi-function `_TEXT` splitting** — biggest single jump in MATCH%, and a
-   prerequisite for honest call recovery.
-2. **Generalized binary-op fold** — probe compound-assign/bitwise/arithmetic for
-   the shared root; one fold likely clears hundreds of incompletes.
+1. ~~**Multi-function `_TEXT` splitting**~~ — **DONE** (MATCH 34.7% → 38.2%).
+2. **Generalized binary-op / in-place-modify fold** — probe compound-assign,
+   bitwise, arithmetic, and inc-dec for the shared root (a param/local mutated in
+   place reads as a copy-into-fresh-local today). One fold likely clears hundreds
+   of incompletes *and* the remaining `functions/*` mismatches.
 3. **Panic → sound-incomplete hardening** — 27 crashes downgraded to declines.
-4. Then re-sweep and re-rank; arrays/struct/pointer-deref are the next tier.
+4. **Shared globals across functions** — lift the multi-function global decline
+   (one data-segment layout reconciled across the program).
+5. Then re-sweep and re-rank; arrays/struct/pointer-deref are the next tier.

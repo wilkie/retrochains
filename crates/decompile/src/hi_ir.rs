@@ -103,17 +103,19 @@ pub enum Expr {
     Deref(Box<Expr>),
     /// `&v` — the address of a variable (`lea ax,[bp+disp]`).
     AddrOf(Var),
-    /// A call with its argument list (source order). The callee is an opaque
-    /// external: a `call` is a placeholder `e8 00 00` patched by a relocation,
-    /// so the target's identity isn't in `_TEXT` and any declared extern
-    /// reproduces the bytes — only the argument count/types matter.
-    Call(Vec<Expr>),
+    /// A call with its callee's `_TEXT` byte offset and argument list (source
+    /// order). The offset is the near-call target: in a multi-function program it
+    /// names a *local* callee (the call lands on its prologue); an external
+    /// callee is a placeholder `e8 00 00` whose target matches no function start,
+    /// so it stays an opaque extern (any declared extern reproduces those bytes —
+    /// only the argument count/types matter).
+    Call(usize, Vec<Expr>),
 }
 
 /// Does an expression contain a (side-effecting) call anywhere?
 fn contains_call(e: &Expr) -> bool {
     match e {
-        Expr::Call(_) => true,
+        Expr::Call(..) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
         Expr::Not(a) | Expr::Deref(a) => contains_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
@@ -210,7 +212,7 @@ fn expr_mentions(expr: &Expr, var: Var) -> bool {
             expr_mentions(a, var) || expr_mentions(b, var)
         }
         Expr::Not(a) | Expr::Deref(a) => expr_mentions(a, var),
-        Expr::Call(args) => args.iter().any(|a| expr_mentions(a, var)),
+        Expr::Call(_, args) => args.iter().any(|a| expr_mentions(a, var)),
         Expr::Const(_) | Expr::LongConst(_) => false,
     }
 }
@@ -315,6 +317,10 @@ pub struct Function {
     /// `false` if any op couldn't be modelled — the function is only partially
     /// recovered and must not be presented as done.
     pub complete: bool,
+    /// The function's start offset in `_TEXT` (its prologue / `Enter`). In a
+    /// multi-function program this is the offset a local `call` targets, so it
+    /// names the callee; for a lone function it's just the segment start.
+    pub start: usize,
 }
 
 /// A local array reconstructed from the stack frame. Element 0 sits at `base`
@@ -590,7 +596,7 @@ impl Ctx {
                 self.mark_unsigned(b);
             }
             Expr::Not(a) | Expr::Deref(a) => self.mark_unsigned(a),
-            Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(_) => {}
+            Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..) => {}
         }
     }
 
@@ -810,10 +816,10 @@ impl Ctx {
                 // A call consumes the pending arguments (cdecl pushes them
                 // right-to-left, so reverse to source order) and leaves its
                 // result in the accumulator.
-                LoOp::Call { .. } => {
+                LoOp::Call { target, .. } => {
                     let mut args = std::mem::take(&mut pending_args);
                     args.reverse();
-                    acc = Some(Expr::Call(args));
+                    acc = Some(Expr::Call(target, args));
                 }
 
                 // `mov dx, ax` — save the accumulator (a binary op's right
@@ -2034,10 +2040,63 @@ impl Ctx {
 }
 
 /// Recover a function body from `_TEXT` bytes: lift to Lo-IR, then structure and
-/// fold it into statements.
+/// fold it into statements. Treats the whole `_TEXT` as one function — see
+/// [`recover_program`] for a multi-function segment.
 #[must_use]
 pub fn recover(code: &[u8]) -> Function {
     let insns: Vec<LoInsn> = lift(code);
+    recover_window(&insns, code, 0, insns.len())
+}
+
+/// Recover every function in a `_TEXT` segment. BCC lays functions out one after
+/// another, each beginning with a prologue (`Enter`); a near `call` to a local
+/// function lands on that prologue. So the function boundaries are the `Enter`
+/// positions, and each window is recovered independently with absolute offsets
+/// preserved (the lift keeps byte offsets, so branch/call targets and embedded
+/// jump tables still resolve against the full segment).
+///
+/// A lone function (or a segment with no recognizable prologue) yields a
+/// one-element vector equal to [`recover`].
+#[must_use]
+pub fn recover_program(code: &[u8]) -> Vec<Function> {
+    let insns: Vec<LoInsn> = lift(code);
+    // A function starts at a prologue `Enter`, but not *every* `Enter` is one:
+    // BCC reserves a 2-byte local with `dec sp; dec sp`, which also lifts to an
+    // `Enter` (frame 2) mid-prologue. The real boundary is an `Enter` that opens
+    // a fresh function — the first one, and any that follows the previous
+    // function's `ret`. So only count an `Enter` once a `Ret` has been seen since
+    // the last accepted start.
+    let mut starts = Vec::new();
+    let mut seen_ret = true; // the first prologue qualifies
+    for (i, n) in insns.iter().enumerate() {
+        match n.op {
+            LoOp::Enter { .. } if seen_ret => {
+                starts.push(i);
+                seen_ret = false;
+            }
+            LoOp::Ret { .. } => seen_ret = true,
+            _ => {}
+        }
+    }
+    if starts.len() <= 1 {
+        return vec![recover_window(&insns, code, 0, insns.len())];
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(k, &lo)| {
+            let hi = starts.get(k + 1).copied().unwrap_or(insns.len());
+            recover_window(&insns, code, lo, hi)
+        })
+        .collect()
+}
+
+/// Recover the single function occupying instruction window `[lo, hi)` of `all`.
+/// `code` is the *full* segment (not the window's slice) so embedded jump tables
+/// — addressed by absolute offset — still read correctly.
+fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function {
+    let insns: Vec<LoInsn> = all[lo..hi].to_vec();
+    let start = insns.first().map_or(0, |i| i.span.start);
     // Pre-scan for `long` locals: a slot read back as a `dx:ax` pair
     // (`mov dx,[lo+2]; mov ax,[lo]`). This lets the store side fold a `long`
     // constant store pair without mistaking two adjacent `int` stores for one.
@@ -2119,6 +2178,7 @@ pub fn recover(code: &[u8]) -> Function {
         arrays,
         body,
         complete,
+        start,
     }
 }
 
@@ -2460,7 +2520,7 @@ mod tests {
         let f = recover_c("extern int g(); int f(int a) { return g(a); }\n");
         assert!(f.complete, "a call with a parameter argument is recovered");
         assert!(f.vars.contains(&Var::Param(4)), "the parameter is [bp+4]");
-        let Some(Stmt::Return(Some(Expr::Call(args)))) = f.body.last() else {
+        let Some(Stmt::Return(Some(Expr::Call(_, args)))) = f.body.last() else {
             panic!("expected `return g(a)`");
         };
         assert_eq!(args.len(), 1, "one argument");
@@ -2474,7 +2534,7 @@ mod tests {
         let f = recover_c("extern void g(); void f() { g(3); g(4); }\n");
         assert!(f.complete);
         assert!(
-            matches!(f.body.first(), Some(Stmt::ExprStmt(Expr::Call(_)))),
+            matches!(f.body.first(), Some(Stmt::ExprStmt(Expr::Call(..)))),
             "the discarded first call is an expression statement",
         );
     }
