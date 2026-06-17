@@ -332,6 +332,18 @@ impl Ctx {
         self.insns.iter().position(|i| i.span.start == off)
     }
 
+    /// Is `off` the start of the function epilogue? A jump there is a `return`,
+    /// not an `if/else` skip or a loop edge — every `return <expr>` is
+    /// `mov ax,val; jmp epilogue`. The epilogue begins with the register-variable
+    /// restores (`pop si`/`di`), if any, then `Leave`/`Ret`; those ops appear
+    /// nowhere else, so any is a valid epilogue target.
+    fn is_epilogue(&self, off: usize) -> bool {
+        self.insns.iter().any(|i| {
+            i.span.start == off
+                && matches!(i.op, LoOp::Leave | LoOp::Ret { .. } | LoOp::RestoreReg { .. })
+        })
+    }
+
     /// A source operand as an [`Expr`], or `None` if outside this increment (a
     /// param, global, scratch register, pointer, …).
     fn operand(&mut self, place: Place) -> Option<Expr> {
@@ -358,12 +370,11 @@ impl Ctx {
         let mut acc: Option<Expr> = None;
         // Arguments pushed for the call currently being assembled (push order).
         let mut pending_args: Vec<Expr> = Vec::new();
-        // BCC emits its redundant exit jump (`eb 00`) for an explicit `return`
-        // but not when a void function falls off the end — so a `Jump` before
-        // the epilogue distinguishes "return the accumulator" from "the trailing
-        // value is a discarded call".
-        let mut saw_exit_jump = false;
-        let mut emitted_ret = false;
+        // Each `return <expr>` is `mov ax,val; jmp epilogue`, so a jump to the
+        // epilogue flushes the accumulator as a `Return`. Tracks whether the run
+        // already returned that way, so the physical `Ret` it lands on isn't
+        // double-counted (and a void fall-off — no such jump — returns nothing).
+        let mut returned = false;
         for i in lo..hi {
             match self.insns[i].op.clone() {
                 // Frame setup/teardown carry no value, and `cbw` is the implicit
@@ -376,7 +387,18 @@ impl Ctx {
                 | LoOp::Cleanup { .. }
                 | LoOp::Promote { kind: crate::lo_ir::Promote::Cbw } => {}
 
-                LoOp::Jump { .. } => saw_exit_jump = true,
+                // A jump to the epilogue is a `return <accumulator>`.
+                LoOp::Jump { target } if self.is_epilogue(target) => {
+                    let v = acc.take();
+                    if v.is_some() {
+                        self.returns_value = true;
+                    }
+                    out.push(Stmt::Return(v));
+                    returned = true;
+                }
+                // Any other jump in a straight-line run is unexpected (loop edges
+                // and `if/else` skips are consumed by the structurer) — it falls
+                // to the catch-all below and marks the function incomplete.
 
                 // `push ax` — the accumulator is the argument; `push [bp+d]` or a
                 // register push supplies a variable directly.
@@ -402,20 +424,14 @@ impl Ctx {
                 }
 
                 LoOp::Ret { .. } => {
-                    emitted_ret = true;
-                    if saw_exit_jump {
-                        // An explicit `return <expr>` — the accumulator is the value.
-                        let v = acc.take();
-                        if v.is_some() {
-                            self.returns_value = true;
-                        }
-                        out.push(Stmt::Return(v));
-                    } else {
-                        // Fell off the end — any call in the accumulator was a
-                        // discarded statement, and there's no return value.
+                    if !returned {
+                        // Fell off the end (a void function) — any call left in
+                        // the accumulator was a discarded statement, no value.
                         flush_call(&mut acc, out);
                         out.push(Stmt::Return(None));
                     }
+                    // Otherwise the `return`s were emitted at the jumps to the
+                    // epilogue; the physical `ret` they land on adds nothing.
                 }
 
                 // `mov ax, …` starts a fresh accumulator value, discarding any
@@ -580,12 +596,6 @@ impl Ctx {
         if !pending_args.is_empty() {
             self.complete = false; // args pushed with no call to consume them
         }
-        // A jump to the epilogue with no `return` in this run is an early return
-        // inside a branch/loop — a multi-exit shape this increment doesn't
-        // structure. Bail rather than silently drop the returned value.
-        if saw_exit_jump && !emitted_ret {
-            self.complete = false;
-        }
     }
 
     /// Recover the condition of an `if`/`while` from the test at `cmp_idx` and
@@ -628,10 +638,15 @@ impl Ctx {
         };
         if let Some(place) = or_test {
             let Some(e) = self.operand(place) else { return bad(self) };
+            // `or r,r` sets the flags from `r`, so the branch tests `r <rel> 0`.
+            // Equality renders as the bare/negated variable (so it recompiles to
+            // `or`, not `cmp`); the signed relations render as `r <rel> 0`.
             return match rel {
-                RelOp::Ne => e,                       // if (x)
-                RelOp::Eq => Expr::Not(Box::new(e)),  // if (!x)
-                _ => bad(self),
+                RelOp::Ne => e,                                                       // if (x)
+                RelOp::Eq => Expr::Not(Box::new(e)),                                  // if (!x)
+                RelOp::Lt | RelOp::Le | RelOp::Gt | RelOp::Ge => {
+                    Expr::Rel(rel, Box::new(e), Box::new(Expr::Const(0)))             // if (x <rel> 0)
+                }
             };
         }
 
@@ -676,7 +691,9 @@ impl Ctx {
         let LoOp::Jump { target: e } = self.insns[tb - 1].op else {
             return None;
         };
-        if e <= then_target {
+        // A jump to the epilogue ends the then-block with a `return`, not a skip
+        // over an else-block — that's a plain `if` whose body returns early.
+        if e <= then_target || self.is_epilogue(e) {
             return None;
         }
         self.idx_of(e)
@@ -1024,10 +1041,17 @@ mod tests {
     }
 
     #[test]
-    fn an_early_return_marks_the_function_incomplete() {
-        // `if (a > 0) { return a; }` is a multi-exit shape this increment doesn't
-        // structure — it must bail rather than silently drop the early return.
-        let f = recover_c("int f(int a) { if (a > 0) { return a; } return 0; }\n");
-        assert!(!f.complete, "an early return inside a branch leaves the function incomplete");
+    fn early_return_inside_a_branch_recovers() {
+        // `if (a > 0) { return a; } return 0;` — each `return` is `mov ax,val;
+        // jmp epilogue`, so the then-block's jump-to-epilogue is a return (not an
+        // if/else skip), recovered as a plain `if` whose body returns early.
+        let f = recover_stack("int f(int a) { if (a > 0) { return a; } return 0; }\n");
+        assert!(f.complete, "an early return inside a branch is recovered");
+        let Some(Stmt::If(_, then, els)) = f.body.iter().find(|s| matches!(s, Stmt::If(..))) else {
+            panic!("expected an if");
+        };
+        assert!(els.is_empty(), "the early return is a plain if, not an if/else");
+        assert!(matches!(then.last(), Some(Stmt::Return(Some(_)))), "then-block returns");
+        assert!(matches!(f.body.last(), Some(Stmt::Return(Some(Expr::Const(0))))), "trailing return 0");
     }
 }

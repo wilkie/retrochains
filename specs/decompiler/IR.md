@@ -182,6 +182,19 @@ step stays a `while` (an empty-body `for` lowers differently — the recompile
 check catches that, so the pass requires a real body). For and the equivalent
 while lower identically, so this is a faithful re-rendering the oracle confirms.
 
+**Early returns / multi-exit are recovered.** Every `return <expr>` is `mov
+ax,val; jmp epilogue` — a jump to the shared epilogue (which begins at the
+register-variable restores, if any, then `Leave`/`Ret`). So the fold treats a
+jump-to-epilogue as a `Return` of the accumulator, and the structurer no longer
+mistakes a then-block's return-jump for an `if/else` skip (a skip targets a
+*continuation*, a return targets the *epilogue*). `if (a>0) { return a; } return
+0;`, sequential guards, an `if/else` where both arms return, and a `return`
+inside a loop all recover. (The earlier "bail on an exit jump with no `ret` in
+the run" guard is gone — that *was* the early return.) A side effect: the `or
+r,r` register-variable test combines with a *signed* `Jcc`, not just `jz`/`jnz`,
+so it recovers the full `r <rel> 0` family (`if (a>0)` → `or si,si; jle`), with
+equality still rendered as the bare/negated variable so it recompiles to `or`.
+
 **Register variables are recovered** (§3): a `Var` is either a stack slot or a
 `si`/`di` register variable, and the reg-var data-flow forms lift uniformly —
 `mov ax,si` / `mov si,ax` route the accumulator through the variable, `mov

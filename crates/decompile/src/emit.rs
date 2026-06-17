@@ -394,6 +394,20 @@ mod tests {
     }
 
     #[test]
+    fn early_returns_roundtrip() {
+        // Multi-exit functions: each `return <expr>` is `mov ax,val; jmp
+        // epilogue`. An early return inside an if, sequential guards, an
+        // if/else where both arms return, and a return inside a loop.
+        assert_roundtrips("int f(int a) { if (a > 0) { return a; } return 0; }\n");
+        assert_roundtrips("int f(int a) { if (a == 0) { return 1; } return a; }\n");
+        assert_roundtrips("int f(int a) { if (a > 0) { return 1; } else { return 2; } }\n");
+        assert_roundtrips("int f(int a) { if (a < 0) { return 0; } if (a > 9) { return 9; } return a; }\n");
+        assert_roundtrips(
+            "int f(int a) { int i; for (i = 0; i < 10; i = i + 1) { if (i == a) { return i; } } return 0; }\n",
+        );
+    }
+
+    #[test]
     fn for_loops_roundtrip() {
         // `for` recovers as `for` and recompiles byte-exact, including a
         // parameter or global as the loop bound (a two-memory-operand compare).
