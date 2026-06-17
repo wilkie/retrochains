@@ -153,7 +153,7 @@ offset, not analysis.
 Close to a C AST, plus provenance (§8):
 
 ```
-Stmt   = Assign(LValue, Expr) | Call(target, [Expr], result?)
+Stmt   = Assign(LValue, Expr) | Compound(LValue, op, Expr) | Call(target, [Expr], result?)
        | If(Expr, [Stmt], [Stmt]) | While(Expr, [Stmt]) | For(…) | Do(…)
        | Return(Expr?) | Break | Continue | Switch(Expr, cases)
 Expr   = Const | Var | Global | Param | Binary(op, Expr, Expr) | Unary(op, Expr)
@@ -175,6 +175,21 @@ Two recoveries produce it:
   the test sits *between* the step and the body, with a jump-back folded into the
   initial `if`'s else), so pattern-matching the templates is more reliable than
   generic interval analysis — and, again, the recompile check adjudicates.
+
+**`Compound` vs `Assign` — an in-place distinction that is not cosmetic.** BCC
+codes `x op= y` differently from `x = x op y`: a register variable, global, or
+memory operand that is *also* the destination is updated in a single instruction
+(`inc si`, `add si,5`, `inc word [g]`, `di += si`), whereas the general
+assignment routes through the accumulator (`mov ax,si; inc ax; mov si,ax`). The
+two recompile to different bytes, so they must recover to different source. The
+fold emits `Stmt::Compound(lv, op, rhs)` for the single-instruction in-place form
+(`Un{inc/dec}` on a variable, or `Bin{dst==lhs, +−&|^}`) and keeps the
+load-op-store sequence as a plain `Assign`. Emission spells `Compound` as
+`lv++`/`lv--` for a ±1 step (BCC codes `x += 1` and `x++` identically — both
+`inc`) and `lv op= rhs` otherwise; the `for`-loop step accepts either form. The
+`ff 06/0e disp16` global inc/dec is its own recognizer idiom (`Grp5Global`).
+Still load-op-store (so still a plain `Assign`): `char` in-place (`++c` computes
+in `al`), which keeps the byte form.
 
 Both are built (`hi_ir.rs`). The structurer recurses over the Lo-IR by index,
 matching BCC's stereotyped shapes directly: a **forward** `cmp` + conditional

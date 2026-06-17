@@ -519,6 +519,12 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
                 _ => vec![LoOp::Arg { src: local }], // 6 = push
             }
         }
+        // `ff 06/0e disp16` — `inc`/`dec word [global]`.
+        Idiom::Grp5Global => {
+            let g = Global(u16_at(bytes, 2));
+            let op = if (modrm(1) >> 3) & 7 == 1 { UnOp::Dec } else { UnOp::Inc };
+            vec![LoOp::Un { dst: g, op, operand: g }]
+        }
 
         // ---- promotions ----------------------------------------------------
         Idiom::Cbw => vec![LoOp::Promote { kind: Promote::Cbw }],

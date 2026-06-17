@@ -180,6 +180,13 @@ fn is_byte_reg_var(r: ByteReg) -> bool {
 pub enum Stmt {
     /// `lvalue = expr;`
     Assign(LValue, Expr),
+    /// `lvalue op= expr;` — an *in-place* modification (`x += 5`, `g++`). BCC
+    /// codes this distinctly from `lvalue = lvalue op expr`: a register variable
+    /// or memory operand is updated in a single instruction (`add si,5`,
+    /// `inc word [g]`), not via a load-op-store through the accumulator. The two
+    /// recompile to different bytes, so the in-place byte form recovers here and
+    /// the load-op-store form stays an [`Assign`](Stmt::Assign).
+    Compound(LValue, BinOp, Expr),
     /// `return expr;` (or `return;` when the accumulator holds no value).
     Return(Option<Expr>),
     /// `expr;` — an expression evaluated for its side effect (a discarded call).
@@ -245,14 +252,14 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
         // The init is the preceding statement assigning the loop variable; the
         // step is the body's final statement assigning the same variable, which
         // must appear in the condition.
-        let init_var = match out.last() {
-            Some(Stmt::Assign(LValue::Var(v), _)) => Some(*v),
+        // The step may be a plain assignment (`i = i + 1`, stack local) or an
+        // in-place compound (`i++`, register variable) — both name the loop var.
+        let assigned_var = |s: Option<&Stmt>| match s {
+            Some(Stmt::Assign(LValue::Var(v), _) | Stmt::Compound(LValue::Var(v), _, _)) => Some(*v),
             _ => None,
         };
-        let step_var = match body.last() {
-            Some(Stmt::Assign(LValue::Var(v), _)) => Some(*v),
-            _ => None,
-        };
+        let init_var = assigned_var(out.last());
+        let step_var = assigned_var(body.last());
         // Require a real body beyond the step: a loop whose body is *only* the
         // step (`while (c < 9) { c = c + 1; }`) stays a `while` — an empty-body
         // `for` lowers differently, so converting it wouldn't round-trip.
@@ -654,6 +661,13 @@ impl Ctx {
             Place::Byte(r) if is_byte_reg_var(r) => Some(Var::ByteReg(r)),
             _ => None,
         }
+    }
+
+    /// Is `op` expressible as a C compound-assignment (`+= -= &= |= ^=`)? These
+    /// are the in-place ALU ops; `Cmp`/`Test` set flags and shifts use a
+    /// different operand encoding, so they're excluded.
+    fn is_compound_op(op: BinOp) -> bool {
+        matches!(op, BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Or | BinOp::Xor)
     }
 
     /// `ptr + k` (a pointer advanced by a constant *element* index), or just
@@ -1288,17 +1302,39 @@ impl Ctx {
                     }
                 }
 
-                // `inc`/`dec si` — `x = x ± 1` directly on a register variable.
-                LoOp::Un { dst: Place::Reg(r), op, operand: Place::Reg(o) }
-                    if is_reg_var(r) && o == r && matches!(op, UnOp::Inc | UnOp::Dec) =>
+                // In-place `inc`/`dec` on a word variable — `inc si` (register
+                // variable), `inc word [g]` (global), `inc word [bp-4]` (local).
+                // A single-instruction `++`/`--`, distinct from the load-op-store
+                // `x = x ± 1` (which routes through the accumulator above). The
+                // `char` byte form is handled just above; the accumulator `inc
+                // ax`/`inc al` extends the expression and is handled earlier.
+                LoOp::Un { dst, op, operand }
+                    if dst == operand
+                        && matches!(op, UnOp::Inc | UnOp::Dec)
+                        && !matches!(dst, Place::Byte(_))
+                        && Self::var_of(dst).is_some() =>
                 {
                     let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
-                    match self.dest(Place::Reg(r)) {
-                        Some(lv) => out.push(Stmt::Assign(
-                            lv,
-                            Expr::Binary(step, Box::new(Expr::Var(Var::Reg(r))), Box::new(Expr::Const(1))),
-                        )),
+                    match self.dest(dst) {
+                        Some(lv) => out.push(Stmt::Compound(lv, step, Expr::Const(1))),
                         None => self.complete = false,
+                    }
+                }
+
+                // In-place compound modification — `op X, Y` where the
+                // destination is also the left operand and a word variable
+                // (`add si,5`, `add di,si`, `add [g],3`, `sub [bp-4],2`,
+                // `and si,7`). BCC codes this in one instruction, distinct from the
+                // load-op-store `X = X op Y`, so it recovers as `X op= Y`.
+                LoOp::Bin { dst, op, lhs, rhs }
+                    if dst == lhs
+                        && Self::is_compound_op(op)
+                        && !matches!(dst, Place::Byte(_))
+                        && Self::var_of(dst).is_some() =>
+                {
+                    match (self.dest(dst), self.operand(rhs)) {
+                        (Some(lv), Some(e)) => out.push(Stmt::Compound(lv, op, e)),
+                        _ => self.complete = false,
                     }
                 }
 

@@ -428,7 +428,9 @@ fn type_str(ty: Type) -> &'static str {
 fn body_has_external_call(stmts: &[Stmt], callees: &[(usize, String)]) -> bool {
     let ext = |e: &Expr| expr_has_external_call(e, callees);
     stmts.iter().any(|s| match s {
-        Stmt::Assign(_, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => ext(e),
+        Stmt::Assign(_, e) | Stmt::Compound(_, _, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => {
+            ext(e)
+        }
         Stmt::Return(None) | Stmt::Break => false,
         Stmt::If(c, t, e) => ext(c) || has_ext(t, callees) || has_ext(e, callees),
         Stmt::While(c, b) | Stmt::Do(c, b) => ext(c) || has_ext(b, callees),
@@ -468,7 +470,9 @@ fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
 /// Does the recovered body contain a call anywhere (so it needs the extern)?
 fn body_has_call(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match s {
-        Stmt::Assign(_, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => expr_has_call(e),
+        Stmt::Assign(_, e) | Stmt::Compound(_, _, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => {
+            expr_has_call(e)
+        }
         Stmt::Return(None) | Stmt::Break => false,
         Stmt::If(c, t, e) => expr_has_call(c) || body_has_call(t) || body_has_call(e),
         Stmt::While(c, b) | Stmt::Do(c, b) => expr_has_call(c) || body_has_call(b),
@@ -519,6 +523,9 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
     match stmt {
         Stmt::Assign(lv, e) => {
             let _ = writeln!(out, "{} = {};", lvalue_str(lv, names), expr_str(e, names));
+        }
+        Stmt::Compound(lv, op, e) => {
+            let _ = writeln!(out, "{};", compound_str(lv, *op, e, names));
         }
         Stmt::Return(None) => out.push_str("return;\n"),
         Stmt::Return(Some(e)) => {
@@ -591,6 +598,7 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
 fn assign_inline(stmt: &Stmt, names: &Names) -> String {
     match stmt {
         Stmt::Assign(lv, e) => format!("{} = {}", lvalue_str(lv, names), expr_str(e, names)),
+        Stmt::Compound(lv, op, e) => compound_str(lv, *op, e, names),
         _ => String::new(),
     }
 }
@@ -600,6 +608,18 @@ fn lvalue_str(lv: &LValue, names: &Names) -> String {
         LValue::Var(v) => names.var_str(*v),
         LValue::Deref(e) => deref_str(e, names),
     }
+}
+
+/// Spell an in-place compound modification. A `±1` step renders as `++`/`--`
+/// (BCC codes `x += 1` and `x++` identically — both `inc`); any other step is
+/// `lv op= rhs`.
+fn compound_str(lv: &LValue, op: BinOp, rhs: &Expr, names: &Names) -> String {
+    let target = lvalue_str(lv, names);
+    if matches!(op, BinOp::Add | BinOp::Sub) && matches!(rhs, Expr::Const(1)) {
+        let pp = if op == BinOp::Add { "++" } else { "--" };
+        return format!("{target}{pp}");
+    }
+    format!("{target} {}= {}", binop_token(op), expr_str(rhs, names))
 }
 
 /// Spell a dereference of `inner`. A plain `*p` always renders `*p`, but an
@@ -1133,6 +1153,25 @@ mod tests {
         // (`g0` stays an extern; the local call still resolves).
         assert_roundtrips(
             "extern int g0();\nint f(void){ return g0(); }\nint main(void){ return f(); }\n",
+        );
+    }
+
+    #[test]
+    fn in_place_compound_modifications_roundtrip() {
+        // A register variable / global / loop variable updated in place codes as
+        // a single instruction (`inc si`, `add si,5`, `inc word [g]`), distinct
+        // from the load-op-store `x = x op y` — so it recovers as `x op= y` / `++`.
+        assert_roundtrips("int f(int x){ x++; return x; }\n");
+        assert_roundtrips("int f(int x){ --x; return x; }\n");
+        assert_roundtrips("int f(int x){ x += 5; return x; }\n");
+        assert_roundtrips("int f(int x){ x -= 3; return x; }\n");
+        // Globals: in-place `inc word [g]` and `add word [g],imm`.
+        assert_roundtrips("int g; void f(){ g++; }\n");
+        assert_roundtrips("int g; void f(){ g += 3; }\n");
+        // A register-variable `for` loop, whose step `i++` and body `s += i` are
+        // both in-place compounds (the load-op-store form would be longer).
+        assert_roundtrips(
+            "int f(int n){ int s; int i; s=0; for(i=0;i<n;i++){ s+=i; } return s; }\n",
         );
     }
 

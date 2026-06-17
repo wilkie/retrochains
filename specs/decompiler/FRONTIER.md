@@ -20,14 +20,14 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | after multi-fn | meaning |
-|-------------|--------:|---------------:|---------|
-| **MATCH**   |  1433 (34.7%) | **1580 (38.2%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | 2129 (51.5%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | 389 (9.4%) | recovered C recompiles to *different* bytes |
-| cerr        |     2 |   2 | recovered C didn't compile |
-| notext      |     5 |   5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 |  27 | recover/verify crashed |
+| bucket      | initial | after multi-fn | after in-place | meaning |
+|-------------|--------:|---------------:|---------------:|---------|
+| **MATCH**   |  1433 (34.7%) | 1580 (38.2%) | **1761 (42.6%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | 2129 (51.5%) | 2000 (48.4%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | 389 (9.4%) | 336 (8.1%) | recovered C recompiles to *different* bytes |
+| cerr        |     2 |   2 |  2 | recovered C didn't compile |
+| notext      |     5 |   5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
+| PANIC       |    27 |  27 | 27 | recover/verify crashed |
 
 (70 skipped = link invocations or unparseable args — no single-function
 `_TEXT` target.)
@@ -94,10 +94,14 @@ clears most of them.
 ## Recommended order
 
 1. ~~**Multi-function `_TEXT` splitting**~~ — **DONE** (MATCH 34.7% → 38.2%).
-2. **Generalized binary-op / in-place-modify fold** — probe compound-assign,
-   bitwise, arithmetic, and inc-dec for the shared root (a param/local mutated in
-   place reads as a copy-into-fresh-local today). One fold likely clears hundreds
-   of incompletes *and* the remaining `functions/*` mismatches.
+2. ~~**In-place compound modification**~~ — **DONE** (MATCH 38.2% → 42.6%). A
+   register variable / global / loop variable updated in place (`inc si`,
+   `add si,5`, `inc word [g]`, `di += si`) codes as one instruction, distinct
+   from the load-op-store `x = x op y`. Recovered as `Stmt::Compound` (`x op= y`
+   / `++` / `--`); added the `ff 06/0e` global inc/dec idiom (`Grp5Global`); the
+   `for`-loop step/init detection and emit now accept compounds. *Still open in
+   this cluster:* `char` in-place (`++c` is load-op-store on a byte reg var —
+   subtler), stack-local non-reg-var compounds, and shift compounds (`<<=`).
 3. **Panic → sound-incomplete hardening** — 27 crashes downgraded to declines.
 4. **Shared globals across functions** — lift the multi-function global decline
    (one data-segment layout reconciled across the program).

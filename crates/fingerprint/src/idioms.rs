@@ -134,6 +134,8 @@ pub enum Idiom {
     Shift1,
     /// `ff /r [bp±N]` — group 5 on a local (`inc/dec/push`).
     Grp5Local,
+    /// `ff /r [disp16]` — group 5 on a global (`inc/dec word [mem]`).
+    Grp5Global,
     /// `7x rr` — a conditional jump (`jz/jnz/jl/jle/...`): an `if`/loop branch.
     Jcc,
     /// `4x` — `inc r16` / `dec r16`.
@@ -276,6 +278,7 @@ impl Idiom {
             Idiom::Grp3 => "grp3 (imul/idiv/neg/not)",
             Idiom::Shift1 => "shift/rotate by 1",
             Idiom::Grp5Local => "grp5 on local (inc/dec/push)",
+            Idiom::Grp5Global => "grp5 on global (inc/dec word [mem])",
             Idiom::Jcc => "conditional jump (jcc rel8)",
             Idiom::IncDecReg => "inc/dec reg",
             Idiom::Cwd => "cwd (sign-extend ax→dx:ax)",
@@ -362,6 +365,9 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::StoreLocalByte, pat: &[L(0x88), BP_DISP8, A] },
     Def { idiom: Idiom::LeaLocal, pat: &[L(0x8d), BP_DISP8, A] },
     Def { idiom: Idiom::Grp5Local, pat: &[L(0xff), BP_DISP8, A] },
+    // `ff 06 disp16` (inc) / `ff 0e disp16` (dec) — group 5 on a global. The
+    // modrm is mod=00 rm=110 with reg ∈ {000 inc, 001 dec}, i.e. byte {06, 0e}.
+    Def { idiom: Idiom::Grp5Global, pat: &[L(0xff), M(0xf7, 0x06), A, A] },
     // pointer load/store (mov r/r8, [si|di]); before MovReg's mod=11.
     Def { idiom: Idiom::PointerLoad, pat: &[L(0x8b), PTR] },
     Def { idiom: Idiom::PointerLoad, pat: &[L(0x8a), PTR] },
