@@ -1001,12 +1001,16 @@ impl<'a> super::FunctionEmitter<'a> {
             // accumulated field offsets become a single ModR/M
             // displacement off the pointer register. Fixture 3693
             // (`o->i.x = v` for `struct Outer { struct Inner i; }`).
-            let LocalLocation::Reg(reg) = self.locals.location_of(&ptr_name) else {
-                panic!(
-                    "stack-resident pointer in `p->i.x = …` not yet supported (no fixture)"
-                );
+            // A stack-resident struct pointer is loaded into bx first, then the
+            // accumulated field offset is a displacement off it. Fixture 4280
+            // (`o->i.x = v` with `o` on the stack).
+            let r = match self.locals.location_of(&ptr_name) {
+                LocalLocation::Reg(reg) => reg.name(),
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    "bx"
+                }
             };
-            let r = reg.name();
             let addr = if total_off == 0 {
                 format!("[{r}]")
             } else {
@@ -1445,15 +1449,20 @@ impl<'a> super::FunctionEmitter<'a> {
                     bp_addr(off)
                 }
                 crate::ast::MemberKind::Arrow => {
-                    let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
-                        panic!(
-                            "stack-resident pointer in `p->x <op>= …` not yet supported (no fixture)"
-                        );
+                    // A stack-resident struct pointer is loaded into bx first;
+                    // the field compound then reads/writes `[bx+field_off]`.
+                    // Fixture 4281 (`p->x += v` with `p` on the stack).
+                    let r = match self.locals.location_of(name) {
+                        LocalLocation::Reg(reg) => reg.name(),
+                        LocalLocation::Stack(off) => {
+                            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                            "bx"
+                        }
                     };
                     if field_off == 0 {
-                        format!("[{}]", reg.name())
+                        format!("[{r}]")
                     } else {
-                        format!("[{}+{field_off}]", reg.name())
+                        format!("[{r}+{field_off}]")
                     }
                 }
             };

@@ -4384,6 +4384,33 @@ pub(crate) fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, siz
         }
         return;
     }
+    // Self-compound with a *variable* RHS (`p->f op= v`): load p into BX,
+    // evaluate the RHS into AX, then the memory-direct `<op> [bx+off], ax`. (The
+    // constant case is the in-place arm above.) Fixture 4281 (`p->b += v`).
+    if size == 2
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left.as_ref(),
+            Expr::DerefParamField { ptr_param: lp, byte_off: lo, .. } if *lp == ptr_param && *lo == byte_off)
+        && right.fold(locals.inits).is_none()
+    {
+        out.extend_from_slice(&[0x8B, 0x5E, p_disp as u8]); // mov bx,[bp+p]
+        emit_expr_to_ax(right, locals, out, fixups); // eval v → ax
+        let opcode: u8 = match op {
+            BinOp::Add => 0x01,
+            BinOp::Sub => 0x29,
+            BinOp::BitAnd => 0x21,
+            BinOp::BitOr => 0x09,
+            BinOp::BitXor => 0x31,
+            _ => unreachable!(),
+        };
+        if byte_off == 0 {
+            out.extend_from_slice(&[opcode, 0x07]); // <op> [bx], ax
+        } else {
+            out.extend_from_slice(&[opcode, 0x47, byte_off as u8]); // <op> [bx+off], ax
+        }
+        return;
+    }
     // `p->f = q->g` (store through one struct pointer from a field deref of
     // ANOTHER): keep p in BX (reusing a live BX from a preceding `t = p->f`),
     // read the source via SI, then store. `mov bx,[p]; mov si,[q];
