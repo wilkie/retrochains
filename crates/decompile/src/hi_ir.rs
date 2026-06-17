@@ -388,6 +388,13 @@ impl Ctx {
         }
     }
 
+    /// Mark the variables directly compared at byte width as `char`.
+    fn mark_char(&mut self, expr: &Expr) {
+        if let Expr::Var(v) = expr {
+            self.note_char(*v);
+        }
+    }
+
     /// A byte-width source operand: note the variable as `char` and return it.
     fn char_operand(&mut self, place: Place) -> Option<Expr> {
         let var = Self::var_of(place)?;
@@ -643,6 +650,15 @@ impl Ctx {
                     acc = self.char_operand(src);
                     if acc.is_none() {
                         self.complete = false;
+                    }
+                }
+
+                // `mov ah, 0` — zero-extend `al`→`ax`: the `char` in the
+                // accumulator is `unsigned` (a signed `char` would use `cbw`).
+                // A no-op for the value.
+                LoOp::Load { dst: Place::Byte(ByteReg::Ah), src: Place::Imm(0) } => {
+                    if let Some(e) = acc.clone() {
+                        self.mark_unsigned(&e);
                     }
                 }
 
@@ -940,9 +956,27 @@ impl Ctx {
             };
         }
 
-        // Otherwise an explicit comparison. An operand may be the accumulator
-        // (`cmp ax,n` comparing two memory operands, or `cmp ax,5` on a computed
-        // value like `*p`), resolved to the value the run left in the accumulator.
+        // A byte-width comparison (`cmp byte ptr [c],5`) marks its operands
+        // `char` — without this a `char` only ever compared would declare as
+        // `int` and re-emit a word `cmp`.
+        if let LoOp::CmpByte { lhs, rhs } = self.insns[cmp_idx].op.clone() {
+            return match (self.cmp_operand(lhs, acc), self.cmp_operand(rhs, acc)) {
+                (Some(l), Some(r)) => {
+                    self.mark_char(&l);
+                    self.mark_char(&r);
+                    if rel.is_unsigned() {
+                        self.mark_unsigned(&l);
+                        self.mark_unsigned(&r);
+                    }
+                    Expr::Rel(rel, Box::new(l), Box::new(r))
+                }
+                _ => bad(self),
+            };
+        }
+
+        // Otherwise an explicit (word) comparison. An operand may be the
+        // accumulator (`cmp ax,n` comparing two memory operands, or `cmp ax,5` on
+        // a computed value like `*p`), resolved to the value the run left in `ax`.
         let LoOp::Bin { dst: Place::Flags, op: BinOp::Cmp, lhs, rhs } = self.insns[cmp_idx].op.clone()
         else {
             return bad(self);
@@ -1402,11 +1436,21 @@ mod tests {
     }
 
     #[test]
-    fn an_unsigned_char_marks_the_function_incomplete() {
-        // `unsigned char` zero-extends with `mov ah,0` (not `cbw`), which isn't
-        // modelled yet — so the function isn't recovered.
-        let f = recover_c("int f(unsigned char c) { return c; }\n");
-        assert!(!f.complete, "an unsigned char (zero-extend) leaves the function incomplete");
+    fn unsigned_char_recovers() {
+        // `unsigned char` zero-extends with `mov ah,0` (not `cbw`) — the char is
+        // marked both `char` and `unsigned`.
+        let f = recover_stack("int f(unsigned char c) { return c; }\n");
+        assert!(f.complete, "an unsigned char is recovered");
+        assert!(f.char_vars.contains(&Var::Param(4)), "byte access → char");
+        assert!(f.unsigned_vars.contains(&Var::Param(4)), "mov ah,0 zero-extend → unsigned");
+    }
+
+    #[test]
+    fn long_arithmetic_marks_the_function_incomplete() {
+        // `a + b` for longs is add/adc (low/high), and the `adc` idiom isn't
+        // recognized yet — so the function isn't recovered.
+        let f = recover_c("long f(long a, long b) { return a + b; }\n");
+        assert!(!f.complete, "long arithmetic leaves the function incomplete");
     }
 
     #[test]

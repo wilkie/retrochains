@@ -470,6 +470,11 @@ mod tests {
         assert_roundtrips_stack("int f(unsigned a) { if (a < 5) { return 1; } return 0; }\n");
         assert_roundtrips_stack("int f(unsigned a, unsigned b) { if (a < b) { return 1; } return 0; }\n");
         assert_roundtrips_stack("unsigned f(unsigned a) { return a >> 2; }\n");
+        // unsigned char zero-extends with `mov ah,0`; a char only ever compared
+        // (a byte `cmp`) is recovered as `char`, signed or unsigned.
+        assert_roundtrips_stack("int f(unsigned char c) { return c; }\n");
+        assert_roundtrips_stack("int f(unsigned char c) { if (c > 5) { return 1; } return 0; }\n");
+        assert_roundtrips_stack("int f(char c) { if (c > 5) { return 1; } return 0; }\n");
         assert_roundtrips_stack(
             "int f(unsigned n) { unsigned i; int s; s = 0; for (i = 0; i < n; i = i + 1) { s = s + 1; } return s; }\n",
         );
@@ -615,10 +620,10 @@ mod tests {
 
     #[test]
     fn incomplete_function_emits_nothing() {
-        // An `unsigned char` zero-extend (`mov ah,0`) isn't modelled yet — the
-        // recovery declines rather than emit a wrong body.
+        // Long arithmetic (add/adc) isn't modelled yet — the recovery declines
+        // rather than emit a wrong body.
         let opts = CompileOpts::default();
-        let code = recompile_text("int f(unsigned char c) { return c; }\n", &opts).expect("compiles");
+        let code = recompile_text("long f(long a, long b) { return a + b; }\n", &opts).expect("compiles");
         assert!(decompile(&code).is_none(), "an incomplete recovery emits no C");
     }
 }

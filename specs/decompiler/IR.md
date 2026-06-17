@@ -273,8 +273,12 @@ Recovery is driven by the idioms, not guessed:
   `sar`); the unsigned relations print the same C token, the declared type drives
   the re-emission. BCC unrolls a constant shift into shift-by-1s, so the fold
   collapses `(x >> a) >> b` back to `x >> (a+b)` — re-emitting nested shifts would
-  make the intermediate signed (an outer `sar`). `unsigned char` (zero-extend
-  `mov ah,0` not `cbw`) is still incomplete.)*
+  make the intermediate signed (an outer `sar`). `unsigned char` is built: the
+  zero-extend `mov ah,0` (vs `cbw`) marks the accumulator's `char` `unsigned`. A
+  byte comparison (`cmp byte ptr [c],5`) lifts to a distinct `CmpByte` op that
+  marks its operands `char` — without it a `char` *only* ever compared (a char
+  parameter, say) would declare as `int` and re-emit a word `cmp`; this fixed a
+  latent mismatch for signed `char` comparisons too.)*
 - **Pointers** — `Lea` of a slot, or `PointerLoad`/`PointerStore` through
   `[si]/[di]`, ⇒ a pointer; near vs far from the relocation form. *(Built for
   near `int *` reads: `*p` is `mov bx,p; mov ax,[bx]`, so a `bx` tracker holds

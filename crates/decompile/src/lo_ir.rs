@@ -169,6 +169,10 @@ pub enum LoOp {
     StoreImmByte { dst: Place, imm: i32 },
     /// `dst ← lhs op rhs`. For `Cmp`/`Test`, `dst` is [`Place::Flags`].
     Bin { dst: Place, op: BinOp, lhs: Place, rhs: Place },
+    /// `cmp` at **byte** width (`cmp byte ptr [x], imm` / `cmp dl, …`) — a
+    /// separate op because the byte width marks the operands `char`, which a
+    /// word `cmp` doesn't.
+    CmpByte { lhs: Place, rhs: Place },
     /// `dst ← op operand` (`inc`/`dec`/`neg`/`not`).
     Un { dst: Place, op: UnOp, operand: Place },
     /// A width promotion (`cbw`/`cwd`).
@@ -396,8 +400,11 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
                 0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed())),
                 _ => (Byte(byte_rm_of(1)), i32::from(bytes[2].cast_signed())),
             };
-            let dst = if op == BinOp::Cmp { Place::Flags } else { lhs };
-            vec![LoOp::Bin { dst, op, lhs, rhs: Imm(imm) }]
+            if op == BinOp::Cmp {
+                vec![LoOp::CmpByte { lhs, rhs: Imm(imm) }]
+            } else {
+                vec![LoOp::Bin { dst: lhs, op, lhs, rhs: Imm(imm) }]
+            }
         }
         Idiom::LoadImmByteReg => {
             vec![LoOp::Load { dst: Byte(ByteReg::from3(bytes[0])), src: Imm(i32::from(bytes[1])) }]
@@ -409,8 +416,12 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         Idiom::MovByteReg => vec![LoOp::Load { dst: Byte(byte_rm_of(1)), src: Byte(byte_reg_of(1)) }],
         Idiom::AluByteReg => {
             let op = byte_alu_op(bytes[0]);
-            let dst = if op == BinOp::Cmp { Place::Flags } else { Byte(byte_reg_of(1)) };
-            vec![LoOp::Bin { dst, op, lhs: Byte(byte_reg_of(1)), rhs: Byte(byte_rm_of(1)) }]
+            if op == BinOp::Cmp {
+                vec![LoOp::CmpByte { lhs: Byte(byte_reg_of(1)), rhs: Byte(byte_rm_of(1)) }]
+            } else {
+                let dst = Byte(byte_reg_of(1));
+                vec![LoOp::Bin { dst, op, lhs: Byte(byte_reg_of(1)), rhs: Byte(byte_rm_of(1)) }]
+            }
         }
         Idiom::IncDecByteReg => {
             let reg = Byte(byte_rm_of(1));
