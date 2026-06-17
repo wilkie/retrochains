@@ -609,6 +609,19 @@ fn assign_inline(stmt: &Stmt, names: &Names) -> String {
     }
 }
 
+/// `&v` — the address of a variable. A reconstructed array slot needs its array
+/// name: `&a[0]` is just `a` (the array decays to a pointer), and `&a[k]` keeps
+/// the element address; everything else is `&name`. (Rendering a bare slot name
+/// would print a non-existent scalar, since the slot is declared as the array.)
+fn addr_of_str(v: Var, names: &Names) -> String {
+    if let Var::Slot(off) = v
+        && let Some((n, k)) = names.array_index(off)
+    {
+        return if k == 0 { format!("a{n}") } else { format!("&a{n}[{k}]") };
+    }
+    format!("&{}", names.of(v))
+}
+
 fn lvalue_str(lv: &LValue, names: &Names) -> String {
     match lv {
         LValue::Var(v) => names.var_str(*v),
@@ -668,7 +681,7 @@ fn expr_str(e: &Expr, names: &Names) -> String {
         }
         Expr::Not(e) => format!("!{}", expr_str(e, names)),
         Expr::Deref(e) => deref_str(e, names),
-        Expr::AddrOf(v) => format!("&{}", names.of(*v)),
+        Expr::AddrOf(v) => addr_of_str(*v, names),
         Expr::Call(target, args) => {
             let list = args.iter().map(|a| expr_str(a, names)).collect::<Vec<_>>().join(", ");
             format!("{}({list})", names.callee(*target))
@@ -1237,6 +1250,16 @@ mod tests {
         assert_roundtrips_stack("long f(long a){ long r; r = a + 1; return r; }\n");
         // The dx-high return form still works.
         assert_roundtrips_stack("long f(long a, long b){ return a + b; }\n");
+    }
+
+    #[test]
+    fn array_decay_to_pointer_recovers_the_array_name() {
+        // `p = arr` (array decays to a pointer) is `lea ax,[arr]; mov si,ax`. The
+        // `&` of the array's base slot must render as the array name `a1` (which
+        // decays), not a stray scalar — emitting `&v?` made invalid C that
+        // crashed our `bcc`. With `p++` and `*p` it round-trips end to end.
+        assert_roundtrips("int f(){ char s[3]; char *p; s[0]=97; p=s; p++; return *p; }\n");
+        assert_roundtrips("int f(){ int a[4]; int *p; a[0]=1; p=a; return *p; }\n");
     }
 
     #[test]
