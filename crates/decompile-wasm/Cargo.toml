@@ -1,0 +1,27 @@
+[package]
+name = "decompile-wasm"
+description = "WASM bindings for the compiler-free decompiler + fingerprint analyzer, driving the @retrochains/decompile TypeScript package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "decompile_wasm"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+# Wasm-only glue (`#![cfg(target_arch = "wasm32")]`): target-gated deps, so the
+# host build is an empty lib. `decompile` is taken WITHOUT default features, so it
+# links NO compiler (verification is injected — see decompile's `verify_with`).
+# This is what keeps the module ~50 KB gzipped instead of bundling a compiler.
+# Build with `scripts/build-wasm.sh decompile-wasm decompile decompile_wasm`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+decompile = { path = "../decompile", default-features = false }
+fingerprint = { path = "../fingerprint" }
+wasm-bindgen = "=0.2.100"
+
+[lints]
+workspace = true

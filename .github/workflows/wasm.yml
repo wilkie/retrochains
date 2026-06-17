@@ -1,22 +1,22 @@
 name: wasm
 
-# Builds the @retrochains/bcc WASM module, enforces the size budget, and runs the
-# Node smoke test that drives bcc/tasm/tlink/tlib end-to-end. This is the wasm
-# analog of the byte-exact discipline: a size *ceiling* (scripts/check-wasm-size.sh)
-# plus a functional check that the module actually compiles/assembles/archives.
+# Builds the @retrochains WASM modules (bcc toolchain, msc compiler, compiler-free
+# decompiler + fingerprint), enforces per-module size budgets, and runs the Node
+# smoke tests that drive each end-to-end. The wasm analog of the byte-exact
+# discipline: a size *ceiling* (scripts/check-wasm-size.sh) plus a functional check.
 
 on:
   push:
     paths:
       - "crates/**"
-      - "packages/bcc/**"
+      - "packages/**"
       - "scripts/build-wasm.sh"
       - "scripts/check-wasm-size.sh"
       - ".github/workflows/wasm.yml"
   pull_request:
     paths:
       - "crates/**"
-      - "packages/bcc/**"
+      - "packages/**"
       - "scripts/build-wasm.sh"
       - "scripts/check-wasm-size.sh"
       - ".github/workflows/wasm.yml"
@@ -34,8 +34,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # wasm-bindgen-cli must match the wasm-bindgen crate version (the pin in
-      # crates/bcc-wasm/Cargo.toml). binstall fetches a prebuilt binary fast.
+      # wasm-bindgen-cli must match the wasm-bindgen crate version (the pin in the
+      # *-wasm crates). binstall fetches a prebuilt binary fast.
       - name: Install wasm-bindgen-cli (version-matched)
         run: |
           WB_VER="$(sed -n 's/^wasm-bindgen = "=\(.*\)"/\1/p' crates/bcc-wasm/Cargo.toml)"
@@ -50,15 +50,23 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Build WASM module
-        run: bash scripts/build-wasm.sh
+      - name: Install pnpm
+        run: npm install -g pnpm@10
 
-      - name: Enforce size budget
-        run: bash scripts/check-wasm-size.sh
-
-      - name: Build TypeScript + smoke test
-        working-directory: packages/bcc
+      - name: Build WASM modules
         run: |
-          npm ci || npm install
-          npm run build:ts
-          npm test
+          bash scripts/build-wasm.sh bcc-wasm bcc bcc_wasm
+          bash scripts/build-wasm.sh msc-wasm msc msc_wasm
+          bash scripts/build-wasm.sh decompile-wasm decompile decompile_wasm
+
+      - name: Enforce size budgets
+        run: |
+          bash scripts/check-wasm-size.sh bcc bcc_wasm
+          bash scripts/check-wasm-size.sh msc msc_wasm
+          bash scripts/check-wasm-size.sh decompile decompile_wasm
+
+      - name: Build TypeScript + smoke tests
+        run: |
+          pnpm install
+          pnpm -r run build:ts
+          pnpm -r run test

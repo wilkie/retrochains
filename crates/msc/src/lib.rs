@@ -47,6 +47,20 @@ pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> 
     Ok(std::path::PathBuf::from(out_name))
 }
 
+/// Compile C source straight to an OMF object file (`cl /c`), without touching
+/// the filesystem — parse then [`build_obj`]. `source_filename` is the name
+/// recorded in the object (e.g. `HELLO.C`). This is the pure entry point the
+/// WASM bindings and any in-memory caller use; [`emit_dash_c`] is the file-based
+/// CLI wrapper around it.
+///
+/// # Errors
+/// Returns [`EmitError::Unsupported`] for a source shape the compiler doesn't
+/// model yet.
+pub fn compile(source: &str, source_filename: &str) -> Result<Vec<u8>, EmitError> {
+    let unit = parse_unit(source)?;
+    Ok(build_obj(source_filename, &unit))
+}
+
 /// A translation unit: file-scope globals + function definitions
 /// plus a shared pool of interned string literals.
 #[derive(Debug, Clone)]

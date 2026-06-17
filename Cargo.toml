@@ -9,6 +9,8 @@ members = [
     "crates/obj",
     "crates/x86",
     "crates/bcc-wasm",
+    "crates/msc-wasm",
+    "crates/decompile-wasm",
     "crates/oracle",
     "crates/fixtures",
     "crates/fingerprint",

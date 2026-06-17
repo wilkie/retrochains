@@ -1,0 +1,25 @@
+[package]
+name = "msc-wasm"
+description = "WASM bindings for the MSC compiler, driving the @retrochains/msc TypeScript package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "msc_wasm"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+# Wasm-only glue (`#![cfg(target_arch = "wasm32")]`): every dependency is
+# target-gated, so the host build compiles this to an empty lib. Build the real
+# module with `scripts/build-wasm.sh msc-wasm msc msc_wasm`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+msc = { path = "../msc" }
+# Keep in lockstep with the other *-wasm crates and the wasm-bindgen-cli.
+wasm-bindgen = "=0.2.100"
+
+[lints]
+workspace = true

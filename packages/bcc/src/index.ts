@@ -7,13 +7,7 @@
 import init, * as wasm from "../wasm/bcc_wasm.js";
 
 /** BCC memory model (`-mt/-ms/-mc/-mm/-ml/-mh`). */
-export type MemoryModel =
-  | "tiny"
-  | "small"
-  | "compact"
-  | "medium"
-  | "large"
-  | "huge";
+export type MemoryModel = "tiny" | "small" | "compact" | "medium" | "large" | "huge";
 
 /** Options for {@link compile} / {@link compileAsm}, mirroring the `bcc` flags. */
 export interface CompileOptions {
@@ -52,8 +46,7 @@ let ready: Promise<void> | undefined;
 async function ensure(): Promise<void> {
   if (!ready) {
     const url = new URL("../wasm/bcc_wasm_bg.wasm", import.meta.url);
-    const isNode =
-      typeof process !== "undefined" && process.versions?.node != null;
+    const isNode = typeof process !== "undefined" && process.versions?.node != null;
     if (isNode) {
       const { readFile } = await import("node:fs/promises");
       const bytes = await readFile(url);
@@ -84,19 +77,13 @@ function flags(
 }
 
 /** Compile C source to an OMF object file (`bcc -c`). */
-export async function compile(
-  source: string,
-  options: CompileOptions = {},
-): Promise<Uint8Array> {
+export async function compile(source: string, options: CompileOptions = {}): Promise<Uint8Array> {
   await ensure();
   return wasm.compile(source, ...flags(options));
 }
 
 /** Compile C source to assembly text (`bcc -S`). */
-export async function compileAsm(
-  source: string,
-  options: CompileOptions = {},
-): Promise<string> {
+export async function compileAsm(source: string, options: CompileOptions = {}): Promise<string> {
   await ensure();
   return wasm.compile_asm(source, ...flags(options));
 }
@@ -108,10 +95,7 @@ export async function assemble(source: string): Promise<Uint8Array> {
 }
 
 /** Assemble with an explicit BCC memory-model marker COMENT byte. */
-export async function assembleWithModel(
-  source: string,
-  modelMarker: number,
-): Promise<Uint8Array> {
+export async function assembleWithModel(source: string, modelMarker: number): Promise<Uint8Array> {
   await ensure();
   return wasm.assemble_with_model(source, modelMarker);
 }
@@ -133,10 +117,7 @@ export async function link(
 }
 
 /** Build an OMF library archive from objects (`tlib`). */
-export async function makeLibrary(
-  objects: NamedBytes[],
-  extended = false,
-): Promise<Uint8Array> {
+export async function makeLibrary(objects: NamedBytes[], extended = false): Promise<Uint8Array> {
   await ensure();
   const librarian = new wasm.Librarian();
   try {

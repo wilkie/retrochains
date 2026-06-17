@@ -286,6 +286,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "decompile-wasm"
+version = "0.0.0"
+dependencies = [
+ "decompile",
+ "fingerprint",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,6 +582,14 @@ version = "0.0.0"
 dependencies = [
  "obj",
  "thiserror",
+]
+
+[[package]]
+name = "msc-wasm"
+version = "0.0.0"
+dependencies = [
+ "msc",
+ "wasm-bindgen",
 ]
 
 [[package]]

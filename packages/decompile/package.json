@@ -1,8 +1,8 @@
 {
-  "name": "@retrochains/bcc",
+  "name": "@retrochains/decompile",
   "version": "0.0.0",
   "private": true,
-  "description": "TypeScript wrapper around the WASM build of the Rust Borland C++ 2.0 toolchain reimplementation",
+  "description": "TypeScript wrapper around the WASM build of the Rust decompiler + fingerprint analyzer (compiler-free)",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,7 +17,7 @@
     "wasm"
   ],
   "scripts": {
-    "build:wasm": "bash ../../scripts/build-wasm.sh",
+    "build:wasm": "bash ../../scripts/build-wasm.sh decompile-wasm decompile decompile_wasm",
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:wasm && npm run build:ts",
     "test": "node --test",

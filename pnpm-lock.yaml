@@ -39,6 +39,18 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  packages/decompile:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
+  packages/msc:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
 packages:
 
   '@eslint-community/eslint-utils@4.9.1':
