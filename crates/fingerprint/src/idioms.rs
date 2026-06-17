@@ -413,6 +413,8 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluAxImm, pat: &[M(0xc7, 0x05), A, A] },
     // unary group 3 (imul/idiv/...) and shift-by-1.
     Def { idiom: Idiom::Grp3, pat: &[L(0xf7), REG] },
+    Def { idiom: Idiom::Grp3, pat: &[L(0xf7), BP_DISP8, A] },   // imul/idiv [bp±N]
+    Def { idiom: Idiom::Grp3, pat: &[L(0xf7), DISP16, A, A] },  // imul/idiv [disp16]
     Def { idiom: Idiom::Shift1, pat: &[L(0xd1), REG] },
     Def { idiom: Idiom::NearCall, pat: &[L(0xe8), A, A] },
     Def { idiom: Idiom::LoadImmAx, pat: &[L(0xb8), A, A] }, // ax-specific; before LoadImmReg

@@ -257,7 +257,16 @@ Recovery is driven by the idioms, not guessed:
   byte-store, and the byte register idioms `b0+r`, `8a/88` mod=11, `02/0a/…`
   mod=11.)*
 - **Signedness** — `Cbw`/`Cwd`/`sar`/`idiv` ⇒ signed; zero-extend / `shr`
-  / `div` ⇒ unsigned.
+  / `div` ⇒ unsigned. *(Multiply/divide built: `imul`/`idiv` produce `dx:ax`,
+  but an `int` result is the low word, so `a * b` (`imul [b]` or `mov dx,K;
+  imul dx`) folds to `a * b` and `a / b` (`cwd; idiv [b]`) to `a / b` — `cwd` is
+  the dividend setup, a no-op for the fold. `a % b` is the same `idiv` followed
+  by `mov ax,dx` (the remainder): the fold remembers the `(dividend, divisor)` at
+  the `idiv` and synthesizes a `Mod` operator when the `dx` result is read. Only
+  signed `imul`/`idiv` for now; the unsigned `mul`/`div` and the shift-based
+  power-of-two divides are deferred. Needed recognizer additions: `f7` with a
+  memory operand (`imul/idiv [bp±N]`/`[disp16]`), which was an `Asm` gap that
+  even mis-lifted `idiv [bp+N]` as a stray `jle`.)*
 - **Pointers** — `Lea` of a slot, or `PointerLoad`/`PointerStore` through
   `[si]/[di]`, ⇒ a pointer; near vs far from the relocation form. *(Built for
   near `int *` reads: `*p` is `mov bx,p; mov ax,[bx]`, so a `bx` tracker holds

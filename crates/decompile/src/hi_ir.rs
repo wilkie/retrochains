@@ -417,6 +417,9 @@ impl Ctx {
         // current accumulator value is a `long` (its high word in `dx`).
         let mut dx: Option<DxState> = None;
         let mut acc_long = false;
+        // After an `idiv`/`div`, `dx` holds the remainder of `(dividend, divisor)`
+        // — a `mov ax,dx` that reads it recovers the `%` operator.
+        let mut dx_rem: Option<(Expr, Expr)> = None;
         // Arguments pushed for the call currently being assembled (push order).
         let mut pending_args: Vec<Expr> = Vec::new();
         // Each `return <expr>` is `mov ax,val; jmp epilogue`, so a jump to the
@@ -426,15 +429,16 @@ impl Ctx {
         let mut returned = false;
         for i in lo..hi {
             match self.insns[i].op.clone() {
-                // Frame setup/teardown carry no value, and `cbw` is the implicit
-                // `char`→`int` promotion — the accumulator already holds the
-                // value, and emitting the source recompiles to the same `cbw`.
+                // Frame setup/teardown carry no value. `cbw`/`cwd` are sign
+                // promotions the accumulator already reflects — `cbw` is the
+                // implicit `char`→`int`, `cwd` sets up `dx:ax` as the `idiv`
+                // dividend (the fold's accumulator is that dividend).
                 LoOp::Enter { .. }
                 | LoOp::Leave
                 | LoOp::SaveReg { .. }
                 | LoOp::RestoreReg { .. }
                 | LoOp::Cleanup { .. }
-                | LoOp::Promote { kind: crate::lo_ir::Promote::Cbw } => {}
+                | LoOp::Promote { kind: crate::lo_ir::Promote::Cbw | crate::lo_ir::Promote::Cwd } => {}
 
                 // A jump to the epilogue is a `return <accumulator>`.
                 LoOp::Jump { target } if self.is_epilogue(target) => {
@@ -534,6 +538,14 @@ impl Ctx {
                 // `mov dx, [slot]` — load the high word of a `long` variable.
                 LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Local(hi) } => {
                     dx = Some(DxState::High(hi));
+                }
+
+                // `mov ax, dx` right after an `idiv` — take the remainder (`%`).
+                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Reg(Reg::Dx) }
+                    if dx_rem.is_some() =>
+                {
+                    let (l, r) = dx_rem.take().expect("checked");
+                    acc = Some(Expr::Binary(BinOp::Mod, Box::new(l), Box::new(r)));
                 }
 
                 // `mov ax, …` starts a fresh accumulator value, discarding any
@@ -642,6 +654,39 @@ impl Ctx {
                 {
                     match (acc.take(), self.operand(rhs)) {
                         (Some(l), Some(r)) => acc = Some(Expr::Binary(op, Box::new(l), Box::new(r))),
+                        _ => self.complete = false,
+                    }
+                }
+
+                // `imul <operand>` — signed multiply; the `int` result is the low
+                // word (`ax`). The operand is a memory operand or a constant the
+                // multiplier loaded into `dx` (`mov dx,K; imul dx`).
+                LoOp::Bin { dst: Place::DxAx, op: BinOp::Imul, lhs: Place::Reg(Reg::Ax), rhs } => {
+                    let r = match rhs {
+                        Place::Reg(Reg::Dx) => match dx.take() {
+                            Some(DxState::Const(v)) => Some(Expr::Const(v)),
+                            _ => None,
+                        },
+                        other => self.operand(other),
+                    };
+                    match (acc.take(), r) {
+                        (Some(l), Some(r)) => {
+                            acc = Some(Expr::Binary(BinOp::Imul, Box::new(l), Box::new(r)));
+                        }
+                        _ => self.complete = false,
+                    }
+                }
+
+                // `idiv <operand>` — signed divide. The quotient is the low word
+                // (`ax`), the remainder the high word (`dx`); a following
+                // `mov ax,dx` recovers `%`. The preceding `cwd` set up `dx:ax`
+                // from the accumulator (the dividend).
+                LoOp::Bin { dst: Place::DxAx, op: BinOp::Idiv, lhs: Place::DxAx, rhs } => {
+                    match (acc.take(), self.operand(rhs)) {
+                        (Some(l), Some(r)) => {
+                            dx_rem = Some((l.clone(), r.clone()));
+                            acc = Some(Expr::Binary(BinOp::Idiv, Box::new(l), Box::new(r)));
+                        }
                         _ => self.complete = false,
                     }
                 }
@@ -1249,11 +1294,30 @@ mod tests {
     }
 
     #[test]
-    fn a_multiply_marks_the_function_incomplete() {
-        // `a * a` lowers to imul (dx:ax), which the int-accumulator fold doesn't
-        // model — so the function isn't recovered.
-        let f = recover_c("int f(int a) { return a * a; }\n");
-        assert!(!f.complete, "an unmodelled multiply leaves the function incomplete");
+    fn multiply_and_modulo_recover() {
+        // `a * b` is imul (low word = the int product); `a % b` is idiv then
+        // `mov ax,dx` (the remainder).
+        let m = recover_stack("int f(int a, int b) { return a * b; }\n");
+        assert!(m.complete);
+        let Some(Stmt::Return(Some(Expr::Binary(op, ..)))) = m.body.last() else {
+            panic!("expected `return a * b`");
+        };
+        assert_eq!(*op, BinOp::Imul);
+
+        let r = recover_stack("int f(int a, int b) { return a % b; }\n");
+        assert!(r.complete);
+        let Some(Stmt::Return(Some(Expr::Binary(op, ..)))) = r.body.last() else {
+            panic!("expected `return a % b`");
+        };
+        assert_eq!(*op, BinOp::Mod, "idiv remainder via mov ax,dx is `%`");
+    }
+
+    #[test]
+    fn an_unsigned_comparison_marks_the_function_incomplete() {
+        // An unsigned compare uses `jb`/`ja`, which `cond_to_relop` doesn't model
+        // yet (it needs unsigned operand types) — so the function isn't recovered.
+        let f = recover_c("int f(unsigned a) { if (a > 5) { return 1; } return 0; }\n");
+        assert!(!f.complete, "an unsigned comparison leaves the function incomplete");
     }
 
     #[test]

@@ -116,6 +116,9 @@ pub enum BinOp {
     Imul,
     Div,
     Idiv,
+    /// Not a single instruction — the remainder of an `idiv`/`div` (its `dx`
+    /// result), synthesized by the decompiler for the C `%` operator.
+    Mod,
     Shl,
     Shr,
     Sar,
@@ -448,15 +451,21 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
 
         // ---- group 3 (f7) and shift-by-1 (d1), both mod=11 -----------------
         Idiom::Grp3 => {
-            let rm = R(rm_of(1));
-            match modrm(1) >> 3 & 7 {
-                0 | 1 => vec![LoOp::Bin { dst: Place::Flags, op: BinOp::Test, lhs: rm, rhs: rm }],
-                2 => vec![LoOp::Un { dst: rm, op: UnOp::Not, operand: rm }],
-                3 => vec![LoOp::Un { dst: rm, op: UnOp::Neg, operand: rm }],
-                4 => vec![LoOp::Bin { dst: Place::DxAx, op: BinOp::Mul, lhs: R(Reg::Ax), rhs: rm }],
-                5 => vec![LoOp::Bin { dst: Place::DxAx, op: BinOp::Imul, lhs: R(Reg::Ax), rhs: rm }],
-                6 => vec![LoOp::Bin { dst: Place::DxAx, op: BinOp::Div, lhs: Place::DxAx, rhs: rm }],
-                _ => vec![LoOp::Bin { dst: Place::DxAx, op: BinOp::Idiv, lhs: Place::DxAx, rhs: rm }],
+            // The operand is a register or a memory operand (`[bp±N]`/`[disp16]`).
+            let m = modrm(1);
+            let operand = match m & 0xc7 {
+                0x46 => Local(disp8_at(bytes, 2)),
+                0x06 => Global(u16_at(bytes, 2)),
+                _ => R(rm_of(1)),
+            };
+            match m >> 3 & 7 {
+                0 | 1 => vec![LoOp::Bin { dst: Place::Flags, op: BinOp::Test, lhs: operand, rhs: operand }],
+                2 => vec![LoOp::Un { dst: operand, op: UnOp::Not, operand }],
+                3 => vec![LoOp::Un { dst: operand, op: UnOp::Neg, operand }],
+                4 => vec![LoOp::Bin { dst: Place::DxAx, op: BinOp::Mul, lhs: R(Reg::Ax), rhs: operand }],
+                5 => vec![LoOp::Bin { dst: Place::DxAx, op: BinOp::Imul, lhs: R(Reg::Ax), rhs: operand }],
+                6 => vec![LoOp::Bin { dst: Place::DxAx, op: BinOp::Div, lhs: Place::DxAx, rhs: operand }],
+                _ => vec![LoOp::Bin { dst: Place::DxAx, op: BinOp::Idiv, lhs: Place::DxAx, rhs: operand }],
             }
         }
         Idiom::Shift1 => {

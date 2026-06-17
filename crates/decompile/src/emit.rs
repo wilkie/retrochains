@@ -325,6 +325,9 @@ fn binop_token(op: crate::lo_ir::BinOp) -> &'static str {
         // Arithmetic/logical right shift both print as `>>`; the operand's
         // signedness decides which the compiler re-emits.
         BinOp::Shr | BinOp::Sar => ">>",
+        BinOp::Imul | BinOp::Mul => "*",
+        BinOp::Idiv | BinOp::Div => "/",
+        BinOp::Mod => "%",
         // The fold only produces the operators above; the rest never reach here.
         _ => "?",
     }
@@ -441,6 +444,17 @@ mod tests {
         assert_roundtrips_stack(
             "int f(int *p) { int s; s = 0; while (*p > s) { s = s + 1; } return s; }\n",
         );
+    }
+
+    #[test]
+    fn multiply_divide_modulo_roundtrip() {
+        // imul (memory or via dx for a constant), idiv quotient, and the idiv
+        // remainder (`mov ax,dx`) → `%`.
+        assert_roundtrips_stack("int f(int a, int b) { return a * b; }\n");
+        assert_roundtrips_stack("int f(int a) { return a * 3; }\n");
+        assert_roundtrips_stack("int f(int a, int b) { return a / b; }\n");
+        assert_roundtrips_stack("int f(int a, int b) { return a % b; }\n");
+        assert_roundtrips_stack("int f(int a, int b, int c) { return a * b + c; }\n");
     }
 
     #[test]
@@ -572,10 +586,11 @@ mod tests {
 
     #[test]
     fn incomplete_function_emits_nothing() {
-        // A multiply (imul → dx:ax) isn't modelled yet — the recovery declines
-        // rather than emit a wrong body.
+        // An unsigned comparison (jb/ja) isn't modelled yet — the recovery
+        // declines rather than emit a wrong body.
         let opts = CompileOpts::default();
-        let code = recompile_text("int f(int a) { return a * a; }\n", &opts).expect("compiles");
+        let code = recompile_text("int f(unsigned a) { if (a > 5) { return 1; } return 0; }\n", &opts)
+            .expect("compiles");
         assert!(decompile(&code).is_none(), "an incomplete recovery emits no C");
     }
 }
