@@ -22,6 +22,8 @@ struct Names {
     chars: Vec<Var>,
     /// Variables that are pointers — declared `int *`.
     ptrs: Vec<Var>,
+    /// Pointers dereferenced at byte width — declared `char *`.
+    char_ptrs: Vec<Var>,
     /// Variables loaded as a `dx:ax` pair — declared `long`.
     longs: Vec<Var>,
     /// Variables compared/shifted as unsigned — declared `unsigned`.
@@ -40,9 +42,13 @@ fn decl_str(
     name: &str,
     chars: &[Var],
     ptrs: &[Var],
+    char_ptrs: &[Var],
     longs: &[Var],
     unsigneds: &[Var],
 ) -> String {
+    if char_ptrs.contains(&var) {
+        return format!("char *{name}");
+    }
     if ptrs.contains(&var) {
         return format!("int *{name}");
     }
@@ -72,6 +78,7 @@ impl Names {
         vars: &[Var],
         char_vars: &[Var],
         ptr_vars: &[Var],
+        char_ptr_vars: &[Var],
         long_vars: &[Var],
         unsigned_vars: &[Var],
     ) -> Names {
@@ -99,8 +106,15 @@ impl Names {
                 let var = Var::Param(off);
                 let name = format!("p{pidx}");
                 if vars.contains(&var) {
-                    sig_parts
-                        .push(decl_str(var, &name, char_vars, ptr_vars, long_vars, unsigned_vars));
+                    sig_parts.push(decl_str(
+                        var,
+                        &name,
+                        char_vars,
+                        ptr_vars,
+                        char_ptr_vars,
+                        long_vars,
+                        unsigned_vars,
+                    ));
                     bindings.push((var, name));
                     off += if long_vars.contains(&var) { 4 } else { 2 };
                 } else {
@@ -127,6 +141,7 @@ impl Names {
             bindings,
             chars: char_vars.to_vec(),
             ptrs: ptr_vars.to_vec(),
+            char_ptrs: char_ptr_vars.to_vec(),
             longs: long_vars.to_vec(),
             unsigneds: unsigned_vars.to_vec(),
             signature: sig_parts.join(", "),
@@ -140,7 +155,7 @@ impl Names {
 
     /// A full typed declaration `<type> <name>`.
     fn decl(&self, var: Var, name: &str) -> String {
-        decl_str(var, name, &self.chars, &self.ptrs, &self.longs, &self.unsigneds)
+        decl_str(var, name, &self.chars, &self.ptrs, &self.char_ptrs, &self.longs, &self.unsigneds)
     }
 
     /// The pre-rendered parameter list (`int p1, long p2`).
@@ -188,7 +203,14 @@ pub fn to_c(f: &Function) -> Option<String> {
         Type::Long => "long",
         Type::Void => "void",
     };
-    let names = Names::build(&f.vars, &f.char_vars, &f.ptr_vars, &f.long_vars, &f.unsigned_vars);
+    let names = Names::build(
+        &f.vars,
+        &f.char_vars,
+        &f.ptr_vars,
+        &f.char_ptr_vars,
+        &f.long_vars,
+        &f.unsigned_vars,
+    );
 
     let mut s = String::new();
     // The callee of every recovered call is an opaque external (its identity
@@ -481,6 +503,19 @@ mod tests {
         assert_roundtrips_stack(
             "int f(int *p) { int s; s = 0; while (*p > s) { s = s + 1; } return s; }\n",
         );
+    }
+
+    #[test]
+    fn char_pointers_roundtrip() {
+        // A `char *` derefs at byte width (`mov al,[bx]`, vs `mov ax,[bx]` for an
+        // `int *`), so the pointer is declared `char *`. Read (with the usual
+        // `cbw` promotion to `int`), arithmetic, a write of a `char` value, and a
+        // `char` immediate store (`mov byte ptr [bx],imm8`) all recover.
+        assert_roundtrips_stack("int f(char *p) { return *p; }\n");
+        assert_roundtrips_stack("int f(char *p) { return *p + 1; }\n");
+        assert_roundtrips_stack("void f(char *p, char v) { *p = v; }\n");
+        assert_roundtrips_stack("void f(char *p) { *p = 5; }\n");
+        assert_roundtrips_stack("int f(char *p) { *p = 7; return *p; }\n");
     }
 
     #[test]

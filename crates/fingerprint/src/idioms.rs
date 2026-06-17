@@ -123,6 +123,9 @@ pub enum Idiom {
     /// `c6 06 aa aa ii` — `mov byte ptr [mem], imm8`: store a `char` literal to
     /// a global.
     StoreImmGlobalByte,
+    /// `c6 07 ii` — `mov byte ptr [bx], imm8`: store a `char` literal through a
+    /// `char *` (`*p = const`).
+    StoreImmByteDeref,
     /// `98` — `cbw`: sign-extend al→ax (the `char`→`int` promotion).
     Cbw,
     /// `f7 /r` with mod=11 — group 3 (`imul/idiv/mul/div/neg/not`).
@@ -277,6 +280,7 @@ impl Idiom {
             Idiom::IncDecByteReg => "inc/dec byte reg",
             Idiom::AluDeref => "alu reg, [bx]",
             Idiom::StoreImmDeref => "store imm via pointer (mov [bx], imm16)",
+            Idiom::StoreImmByteDeref => "store byte imm via pointer (mov [bx], imm8)",
             Idiom::AluAxImm => "alu ax, imm16",
         }
     }
@@ -334,6 +338,7 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::StoreImmGlobal, pat: &[L(0xc7), L(0x06), A, A, A, A] },
     Def { idiom: Idiom::StoreImmLocalByte, pat: &[L(0xc6), L(0x46), A, A] },
     Def { idiom: Idiom::StoreImmGlobalByte, pat: &[L(0xc6), L(0x06), A, A, A] },
+    Def { idiom: Idiom::StoreImmByteDeref, pat: &[L(0xc6), M(0xc7, 0x07), A] }, // mov [bx], imm8
     // bp-relative loads/stores (word and byte), and lea of a local.
     Def { idiom: Idiom::LoadLocal, pat: &[L(0x8b), BP_DISP8, A] },
     Def { idiom: Idiom::StoreLocal, pat: &[L(0x89), BP_DISP8, A] },

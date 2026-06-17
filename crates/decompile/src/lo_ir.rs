@@ -435,6 +435,10 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         Idiom::StoreImmDeref => {
             vec![LoOp::Store { dst: Deref(deref_base(modrm(1))), src: Imm(i32::from(u16_at(bytes, 2))) }]
         }
+        // `mov byte ptr [bx], imm8` — a `char` literal stored through a `char *`.
+        Idiom::StoreImmByteDeref => {
+            vec![LoOp::StoreImmByte { dst: Deref(deref_base(modrm(1))), imm: i32::from(bytes[2]) }]
+        }
         // ALU with a `[bx]` deref operand: `<op> reg, [bx]`.
         Idiom::AluDeref => {
             let op = alu_op(bytes[0]);

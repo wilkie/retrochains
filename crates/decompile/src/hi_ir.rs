@@ -282,6 +282,9 @@ pub struct Function {
     /// The subset of `vars` that are pointers (dereferenced somewhere) —
     /// declared `int *` rather than `int`.
     pub ptr_vars: Vec<Var>,
+    /// The subset of pointers dereferenced at byte width — declared `char *`.
+    /// Disjoint from `ptr_vars` (a `char *` is never also an `int *`).
+    pub char_ptr_vars: Vec<Var>,
     /// The subset of `vars` that are 32-bit `long` (loaded as a `dx:ax` pair).
     pub long_vars: Vec<Var>,
     /// The subset of `vars` that are `unsigned` (compared with `jb`/`ja` or
@@ -346,6 +349,7 @@ struct Ctx {
     vars: Vec<Var>,
     char_vars: Vec<Var>,
     ptr_vars: Vec<Var>,
+    char_ptr_vars: Vec<Var>,
     long_vars: Vec<Var>,
     unsigned_vars: Vec<Var>,
     complete: bool,
@@ -376,6 +380,13 @@ impl Ctx {
     fn note_ptr(&mut self, var: Var) {
         if !self.ptr_vars.contains(&var) {
             self.ptr_vars.push(var);
+        }
+    }
+
+    /// Note a pointer dereferenced at byte width — it's a `char *`.
+    fn note_char_ptr(&mut self, var: Var) {
+        if !self.char_ptr_vars.contains(&var) {
+            self.char_ptr_vars.push(var);
         }
     }
 
@@ -583,6 +594,22 @@ impl Ctx {
                     }
                     // Otherwise the `return`s were emitted at the jumps to the
                     // epilogue; the physical `ret` they land on adds nothing.
+                }
+
+                // `mov al, [bx]` — dereference a `char *` (a byte load). The
+                // pointer in bx is a `char *`; the value is a `char` (a following
+                // `cbw` promoting it for an `int` context is the usual no-op).
+                LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::Deref(Reg::Bx) } => {
+                    flush_call(&mut acc, out);
+                    match bx.clone() {
+                        Some(ptr) => {
+                            if let Expr::Var(v) = ptr {
+                                self.note_char_ptr(v);
+                            }
+                            acc = Some(Expr::Deref(Box::new(ptr)));
+                        }
+                        None => self.complete = false,
+                    }
                 }
 
                 // `mov ax, [bx]` — dereference the pointer held in bx (`*p`).
@@ -899,6 +926,21 @@ impl Ctx {
                     }
                 }
 
+                // `mov [bx], al` — store a `char` through a `char *` (`*p = v`).
+                // The byte in `al` is the accumulator (a `char` loaded just
+                // before); the pointer in bx is a `char *`.
+                LoOp::Store { dst: Place::Deref(Reg::Bx), src: Place::Byte(ByteReg::Al) } => {
+                    match (bx.clone(), acc.take()) {
+                        (Some(ptr), Some(e)) => {
+                            if let Expr::Var(v) = ptr {
+                                self.note_char_ptr(v);
+                            }
+                            out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), e));
+                        }
+                        _ => self.complete = false,
+                    }
+                }
+
                 // `mov [bx], ax` / `mov [bx], imm` — store through a pointer
                 // (`*p = v` / `*p = const`).
                 LoOp::Store { dst: Place::Deref(Reg::Bx), src } => {
@@ -943,6 +985,21 @@ impl Ctx {
                     flush_call(&mut acc, out);
                     match self.dest(dst) {
                         Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(v))),
+                        None => self.complete = false,
+                    }
+                }
+
+                // `mov byte ptr [bx], imm` — a `char` immediate stored through a
+                // `char *` (`*p = const`).
+                LoOp::StoreImmByte { dst: Place::Deref(Reg::Bx), imm } => {
+                    flush_call(&mut acc, out);
+                    match bx.clone() {
+                        Some(ptr) => {
+                            if let Expr::Var(v) = ptr {
+                                self.note_char_ptr(v);
+                            }
+                            out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), Expr::Const(imm)));
+                        }
                         None => self.complete = false,
                     }
                 }
@@ -1243,6 +1300,7 @@ pub fn recover(code: &[u8]) -> Function {
         vars: Vec::new(),
         char_vars: Vec::new(),
         ptr_vars: Vec::new(),
+        char_ptr_vars: Vec::new(),
         long_vars: Vec::new(),
         unsigned_vars: Vec::new(),
         complete: true,
@@ -1277,6 +1335,7 @@ pub fn recover(code: &[u8]) -> Function {
         vars: ctx.vars,
         char_vars: ctx.char_vars,
         ptr_vars: ctx.ptr_vars,
+        char_ptr_vars: ctx.char_ptr_vars,
         long_vars: ctx.long_vars,
         unsigned_vars: ctx.unsigned_vars,
         body,

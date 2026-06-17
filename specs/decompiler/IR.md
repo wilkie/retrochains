@@ -323,7 +323,17 @@ Recovery is driven by the idioms, not guessed:
   `mov ax,[bx]; or ax,ax; jle`, where `or ax,ax` is the accumulator truthiness
   test and `ax` holds `*p`. This subsumed the old one-instruction-back operand
   resolver: a `cmp`/`or` register operand now resolves to whatever the test run
-  computed, however many instructions it took.)*
+  computed, however many instructions it took. **`char *` is built**: the
+  discriminator is the deref *width* — `mov al,[bx]` (a byte load) vs `mov
+  ax,[bx]` (a word load) marks the pointer a `char *` rather than an `int *`
+  (recorded in `char_ptr_vars`, declared `char *`, disjoint from `ptr_vars`).
+  The deref'd value is a `char`, so an `int` context promotes it with the usual
+  no-op `cbw`. The write side mirrors it: `mov [bx],al` (`*p = v` storing a
+  `char`) and `mov byte ptr [bx],imm8` (`*p = const`) — the latter the one
+  recognizer addition (`c6 07 ib`, `StoreImmByteDeref`, the byte analogue of the
+  `c7 07` word store-imm). The `char` *return* type these often want is a
+  separate deferred concern, so the round-trips use `int`/`void`-returning
+  forms.)*
 - **Promotions** — `Cbw`/`Cwd` become explicit `Cast` nodes, so the emitted C's
   implicit promotions recompile to the same `cbw`/`cwd`.
 - **Aggregates** — a `Lea base` then indexed access ⇒ array; a constant field
