@@ -22,6 +22,8 @@ struct Names {
     chars: Vec<Var>,
     /// Variables that are pointers — declared `int *`.
     ptrs: Vec<Var>,
+    /// Variables loaded as a `dx:ax` pair — declared `long`.
+    longs: Vec<Var>,
     /// The number of parameters to declare — the highest parameter slot used
     /// decides it, since intermediate parameters must be declared to push the
     /// later ones to the right offset even when they're unread.
@@ -46,7 +48,7 @@ impl Names {
     /// `v1, v2, …` in BCC's allocation order — register variables first (`si`
     /// before `di`), then stack slots closest-to-bp first — so recompiling a
     /// plain `int` reproduces the same storage assignment.
-    fn build(vars: &[Var], char_vars: &[Var], ptr_vars: &[Var]) -> Names {
+    fn build(vars: &[Var], char_vars: &[Var], ptr_vars: &[Var], long_vars: &[Var]) -> Names {
         let mut bindings = Vec::new();
 
         let mut param_count = 0;
@@ -79,7 +81,14 @@ impl Names {
             bindings.push((v, format!("v{}", i + 1)));
         }
 
-        Names { bindings, chars: char_vars.to_vec(), ptrs: ptr_vars.to_vec(), param_count, global_count }
+        Names {
+            bindings,
+            chars: char_vars.to_vec(),
+            ptrs: ptr_vars.to_vec(),
+            longs: long_vars.to_vec(),
+            param_count,
+            global_count,
+        }
     }
 
     fn of(&self, var: Var) -> &str {
@@ -87,10 +96,12 @@ impl Names {
     }
 
     /// A full typed declaration `<type> <name>` — `int *p` for a pointer (the
-    /// `*` binds to the name), `char c` for a byte var, else `int x`.
+    /// `*` binds to the name), `long l`, `char c`, else `int x`.
     fn decl(&self, var: Var, name: &str) -> String {
         if self.ptrs.contains(&var) {
             format!("int *{name}")
+        } else if self.longs.contains(&var) {
+            format!("long {name}")
         } else if self.chars.contains(&var) {
             format!("char {name}")
         } else {
@@ -146,9 +157,10 @@ pub fn to_c(f: &Function) -> Option<String> {
 
     let ret = match f.ret {
         Type::Int => "int",
+        Type::Long => "long",
         Type::Void => "void",
     };
-    let names = Names::build(&f.vars, &f.char_vars, &f.ptr_vars);
+    let names = Names::build(&f.vars, &f.char_vars, &f.ptr_vars, &f.long_vars);
 
     let mut s = String::new();
     // The callee of every recovered call is an opaque external (its identity
@@ -429,6 +441,16 @@ mod tests {
         assert_roundtrips_stack(
             "int f(int *p) { int s; s = 0; while (*p > s) { s = s + 1; } return s; }\n",
         );
+    }
+
+    #[test]
+    fn longs_roundtrip() {
+        // 32-bit `long` via dx:ax — a constant (high word zero or not) and a
+        // long parameter pass-through.
+        assert_roundtrips_stack("long f() { return 5; }\n");
+        assert_roundtrips_stack("long f() { return 0; }\n");
+        assert_roundtrips_stack("long f() { return 100000; }\n");
+        assert_roundtrips_stack("long f(long a) { return a; }\n");
     }
 
     #[test]

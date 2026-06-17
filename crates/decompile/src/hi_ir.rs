@@ -130,6 +130,15 @@ pub enum LValue {
     Deref(Box<Expr>),
 }
 
+/// What the `dx` register holds while a 32-bit `long` is being assembled (its
+/// high word): a constant (`xor dx,dx` → 0, or `mov dx,imm`), or the slot above a
+/// `long` variable's low word (`mov dx,[lo+2]`).
+#[derive(Clone, Copy)]
+enum DxState {
+    Const(i32),
+    High(i16),
+}
+
 /// Is `r` one of the registers BCC uses for `int` register variables?
 fn is_reg_var(r: Reg) -> bool {
     matches!(r, Reg::Si | Reg::Di)
@@ -221,10 +230,13 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
     out
 }
 
-/// A recovered value type. Minimal for now — this increment is all `int`.
+/// A recovered value type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int,
+    /// 32-bit `long` — held in `dx:ax` (high:low), two adjacent slots on the
+    /// stack.
+    Long,
     Void,
 }
 
@@ -243,6 +255,8 @@ pub struct Function {
     /// The subset of `vars` that are pointers (dereferenced somewhere) —
     /// declared `int *` rather than `int`.
     pub ptr_vars: Vec<Var>,
+    /// The subset of `vars` that are 32-bit `long` (loaded as a `dx:ax` pair).
+    pub long_vars: Vec<Var>,
     /// The recovered statements.
     pub body: Vec<Stmt>,
     /// `false` if any op couldn't be modelled — the function is only partially
@@ -280,8 +294,10 @@ struct Ctx {
     vars: Vec<Var>,
     char_vars: Vec<Var>,
     ptr_vars: Vec<Var>,
+    long_vars: Vec<Var>,
     complete: bool,
     returns_value: bool,
+    returns_long: bool,
 }
 
 impl Ctx {
@@ -307,6 +323,13 @@ impl Ctx {
     fn note_ptr(&mut self, var: Var) {
         if !self.ptr_vars.contains(&var) {
             self.ptr_vars.push(var);
+        }
+    }
+
+    /// Note a variable loaded as a `dx:ax` pair — it's a 32-bit `long`.
+    fn note_long(&mut self, var: Var) {
+        if !self.long_vars.contains(&var) {
+            self.long_vars.push(var);
         }
     }
 
@@ -390,6 +413,10 @@ impl Ctx {
         // The pointer value loaded into `bx` (for a `mov bx,p; mov ax,[bx]`
         // dereference).
         let mut bx: Option<Expr> = None;
+        // The high word of a `long` being assembled in `dx`, and whether the
+        // current accumulator value is a `long` (its high word in `dx`).
+        let mut dx: Option<DxState> = None;
+        let mut acc_long = false;
         // Arguments pushed for the call currently being assembled (push order).
         let mut pending_args: Vec<Expr> = Vec::new();
         // Each `return <expr>` is `mov ax,val; jmp epilogue`, so a jump to the
@@ -414,6 +441,9 @@ impl Ctx {
                     let v = acc.take();
                     if v.is_some() {
                         self.returns_value = true;
+                        if acc_long {
+                            self.returns_long = true;
+                        }
                     }
                     out.push(Stmt::Return(v));
                     returned = true;
@@ -491,13 +521,51 @@ impl Ctx {
                     }
                 }
 
+                // `xor dx,dx` — zero the high word of a `long` (high of a constant).
+                LoOp::Bin { dst: Place::Reg(Reg::Dx), op: BinOp::Xor, lhs: Place::Reg(Reg::Dx), rhs: Place::Reg(Reg::Dx) } => {
+                    dx = Some(DxState::Const(0));
+                }
+
+                // `mov dx, imm` — the (non-zero) high word of a `long` constant.
+                LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Imm(h) } => {
+                    dx = Some(DxState::Const(h));
+                }
+
+                // `mov dx, [slot]` — load the high word of a `long` variable.
+                LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Local(hi) } => {
+                    dx = Some(DxState::High(hi));
+                }
+
                 // `mov ax, …` starts a fresh accumulator value, discarding any
-                // call result the previous statement left unused.
+                // call result the previous statement left unused. With `dx` set
+                // up, the value is a `long` (its high word in `dx`).
                 LoOp::Load { dst: Place::Reg(Reg::Ax), src } => {
                     flush_call(&mut acc, out);
-                    acc = self.operand(src);
-                    if acc.is_none() {
-                        self.complete = false;
+                    acc_long = false;
+                    match (dx.take(), src) {
+                        // `mov dx,h; mov ax,lo` → the `long` constant (h<<16)|lo.
+                        (Some(DxState::Const(h)), Place::Imm(lo)) => {
+                            acc = Some(Expr::Const((h << 16) | (lo & 0xFFFF)));
+                            acc_long = true;
+                        }
+                        // `mov dx,[lo+2]; mov ax,[lo]` → the `long` variable at lo.
+                        (Some(DxState::High(hi)), Place::Local(lo)) if hi == lo + 2 => {
+                            if let Some(v) = Self::var_of(Place::Local(lo)) {
+                                self.note(v);
+                                self.note_long(v);
+                                acc = Some(Expr::Var(v));
+                                acc_long = true;
+                            } else {
+                                self.complete = false;
+                                acc = None;
+                            }
+                        }
+                        (_, src) => {
+                            acc = self.operand(src);
+                            if acc.is_none() {
+                                self.complete = false;
+                            }
+                        }
                     }
                 }
 
@@ -929,17 +997,40 @@ pub fn recover(code: &[u8]) -> Function {
         vars: Vec::new(),
         char_vars: Vec::new(),
         ptr_vars: Vec::new(),
+        long_vars: Vec::new(),
         complete: true,
         returns_value: false,
+        returns_long: false,
     };
     let len = ctx.insns.len();
     let body = fold_for_loops(ctx.structure(0, len));
-    let ret = if ctx.returns_value { Type::Int } else { Type::Void };
+    // A `long` occupies two slots (lo, lo+2). If the high-word slot was also
+    // recovered as a separate variable (e.g. a `long` local's paired stores read
+    // as two `int` stores), the layout is double-counted — bail rather than emit
+    // it. (This guards the deferred `long`-local store-pairing case.)
+    for &lv in &ctx.long_vars {
+        let high = match lv {
+            Var::Slot(lo) => Some(Var::Slot(lo + 2)),
+            Var::Param(lo) => Some(Var::Param(lo + 2)),
+            _ => None,
+        };
+        if high.is_some_and(|h| ctx.vars.contains(&h)) {
+            ctx.complete = false;
+        }
+    }
+    let ret = if ctx.returns_long {
+        Type::Long
+    } else if ctx.returns_value {
+        Type::Int
+    } else {
+        Type::Void
+    };
     Function {
         ret,
         vars: ctx.vars,
         char_vars: ctx.char_vars,
         ptr_vars: ctx.ptr_vars,
+        long_vars: ctx.long_vars,
         body,
         complete: ctx.complete,
     }
@@ -1182,6 +1273,30 @@ mod tests {
             matches!(f.body.last(), Some(Stmt::Return(Some(Expr::Deref(_))))),
             "returns a dereference",
         );
+    }
+
+    #[test]
+    fn long_constant_and_parameter_recover() {
+        // `long f() { return 5; }` — `xor dx,dx; mov ax,5` → a long return.
+        let f = recover_stack("long f() { return 5; }\n");
+        assert!(f.complete);
+        assert_eq!(f.ret, Type::Long, "the dx:ax setup marks the return long");
+        assert_eq!(f.body, vec![Stmt::Return(Some(Expr::Const(5)))]);
+
+        // A long parameter loaded as a dx:ax pair is recovered and typed long.
+        let g = recover_stack("long f(long a) { return a; }\n");
+        assert!(g.complete);
+        assert_eq!(g.ret, Type::Long);
+        assert!(g.long_vars.contains(&Var::Param(4)), "the long param is `long`");
+    }
+
+    #[test]
+    fn a_long_local_assignment_is_incomplete() {
+        // The two-store `long` local (`x = 7;` → store high, store low) aliases a
+        // two-int layout; the high-word slot doubles as a variable, so the
+        // recovery bails rather than emit a double-counted layout.
+        let f = recover_stack("long f() { long x; x = 7; return x; }\n");
+        assert!(!f.complete, "long-local store pairing is deferred (bails, not wrong)");
     }
 
     #[test]

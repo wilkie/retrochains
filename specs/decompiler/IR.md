@@ -230,7 +230,17 @@ near/far pointer (by model), `unsigned` variants, array, struct, `void`.
 Recovery is driven by the idioms, not guessed:
 
 - **Width** — byte ops (`LoadLocalByte`, `c6`) ⇒ `char`; word ops ⇒ `int`;
-  `Cwd` + `dx:ax` arithmetic ⇒ `long`. *(Built: a `char` var is one accessed at
+  `dx:ax` pairing ⇒ `long`. *(Long is built for constants and pass-through: a
+  `dx` tracker pairs the high word with the low — `xor dx,dx` / `mov dx,imm`
+  (constant high) or `mov dx,[lo+2]` (a variable's high slot) — and the
+  following `mov ax,…` forms the `long`: `(high<<16)|low` for a constant, or the
+  variable at `lo` (which is recorded in `long_vars` and declared `long`). The
+  return type is `long` when the returned accumulator is. A `long` occupies two
+  slots `(lo, lo+2)`; if the high-word slot is *also* recovered as a separate
+  variable (the deferred `long`-local store-pairing, which aliases a two-`int`
+  layout), the recovery bails rather than emit a double-counted frame. `long`
+  arithmetic — the `add`/`adc` low/high pair — is deferred (the `adc` idiom
+  isn't recognized yet).)* *(Built: a `char` var is one accessed at
   byte width — `8a`/`88`/`a0`/`a2`, `StoreImmByte`, the `80` byte group-1 compare
   — recorded in `Function::char_vars` and declared `char` instead of `int`; `cbw`
   is the implicit `char`→`int` promotion, folded as a no-op since emitting the
