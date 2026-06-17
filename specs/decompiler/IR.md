@@ -214,6 +214,17 @@ Recovery is driven by the idioms, not guessed:
   offset added before a deref ⇒ struct field. Layout is checked the only way that
   matters: recompiling and diffing.
 
+Near globals are built (`hi_ir.rs`). A global is a `Var::Global(offset)` — and
+crucially the offset is *not* a placeholder like a call target: it's the real
+DGROUP-relative displacement (`int a; int b;` ⇒ `a`@0, `b`@2), kept verbatim in
+`_TEXT`. So globals are recovered like stack slots — distinguished by offset and
+reproduced by declaring file-scope `int gv1, gv2, …` in offset order, sized by
+the highest offset used, so recompiling re-derives the same displacements. Only
+even (word/`int`) offsets are taken for now; odd offsets (`char` globals,
+struct/array interiors) mark the function incomplete. Closing the
+global-in-a-condition case also added the `cmp [disp16], imm8` group-1 form to
+the recognizer (until then `cmp word ptr [global], 0` was an `Asm` gap).
+
 ## 7. Calling-convention recovery (cdecl)
 
 BCC is cdecl: arguments pushed **right-to-left**, a near/far `call`, and

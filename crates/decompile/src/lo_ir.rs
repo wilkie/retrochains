@@ -360,15 +360,14 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             vec![LoOp::Bin { dst, op, lhs: R(Reg::Ax), rhs: Imm(imm) }]
         }
         Idiom::AluImm => {
-            // group 1 with imm8 (sign-extended). Local form: `83 46 disp imm`;
-            // register form: `83 modrm imm`.
-            let reg_field = modrm(1) >> 3;
-            let op = group1_op(reg_field);
-            let is_local = (modrm(1) & 0xc7) == 0x46;
-            let (lhs, imm) = if is_local {
-                (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed()))
-            } else {
-                (R(rm_of(1)), i32::from(bytes[2].cast_signed()))
+            // group 1 with a sign-extended imm8, against a local (`83 46 disp
+            // imm`), a global (`83 06 disp16 imm`), or a register (`83 modrm imm`).
+            let m = modrm(1);
+            let op = group1_op(m >> 3);
+            let (lhs, imm) = match m & 0xc7 {
+                0x46 => (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed())),
+                0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed())),
+                _ => (R(rm_of(1)), i32::from(bytes[2].cast_signed())),
             };
             let dst = if op == BinOp::Cmp { Place::Flags } else { lhs };
             vec![LoOp::Bin { dst, op, lhs, rhs: Imm(imm) }]

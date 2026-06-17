@@ -22,11 +22,19 @@ struct Names {
     /// decides it, since intermediate parameters must be declared to push the
     /// later ones to the right offset even when they're unread.
     param_count: usize,
+    /// The number of file-scope globals to declare — likewise sized by the
+    /// highest global offset used, so each access lands at the right offset.
+    global_count: usize,
 }
 
 /// The 1-based parameter index of a `[bp+off]` slot (small model: `[bp+4]` = 1).
 fn param_index(off: i16) -> usize {
     usize::try_from((off - 4) / 2 + 1).unwrap_or(0)
+}
+
+/// The 1-based index of a word global at data-segment offset `off`.
+fn global_index(off: u16) -> usize {
+    usize::from(off / 2 + 1)
 }
 
 impl Names {
@@ -38,11 +46,20 @@ impl Names {
         let mut bindings = Vec::new();
 
         let mut param_count = 0;
+        let mut global_count = 0;
         for &v in vars {
-            if let Var::Param(off) = v {
-                let idx = param_index(off);
-                param_count = param_count.max(idx);
-                bindings.push((v, format!("p{idx}")));
+            match v {
+                Var::Param(off) => {
+                    let idx = param_index(off);
+                    param_count = param_count.max(idx);
+                    bindings.push((v, format!("p{idx}")));
+                }
+                Var::Global(off) => {
+                    let idx = global_index(off);
+                    global_count = global_count.max(idx);
+                    bindings.push((v, format!("gv{idx}")));
+                }
+                Var::Slot(_) | Var::Reg(_) => {}
             }
         }
 
@@ -57,7 +74,7 @@ impl Names {
             bindings.push((v, format!("v{}", i + 1)));
         }
 
-        Names { bindings, param_count }
+        Names { bindings, param_count, global_count }
     }
 
     fn of(&self, var: Var) -> &str {
@@ -69,11 +86,18 @@ impl Names {
         (1..=self.param_count).map(|i| format!("int p{i}")).collect::<Vec<_>>().join(", ")
     }
 
-    /// The names of the local variables to declare (parameters excluded).
+    /// The file-scope global declarations — `gv1, gv2, …` in offset order, so
+    /// recompiling re-derives the same data-segment offsets.
+    fn global_decls(&self) -> impl Iterator<Item = String> {
+        (1..=self.global_count).map(|i| format!("gv{i}"))
+    }
+
+    /// The names of the local variables to declare (parameters and globals
+    /// excluded — those are the signature and file scope respectively).
     fn local_decls(&self) -> impl Iterator<Item = &str> {
         self.bindings
             .iter()
-            .filter(|(v, _)| !matches!(v, Var::Param(_)))
+            .filter(|(v, _)| matches!(v, Var::Slot(_) | Var::Reg(_)))
             .map(|(_, n)| n.as_str())
     }
 }
@@ -105,6 +129,10 @@ pub fn to_c(f: &Function) -> Option<String> {
     // isn't in `_TEXT`); one K&R prototype lets us call it with any arguments.
     if body_has_call(&f.body) {
         s.push_str("extern int g0();\n");
+    }
+    // File-scope globals, in offset order, so they get the same offsets.
+    for g in names.global_decls() {
+        let _ = writeln!(s, "int {g};");
     }
     let _ = writeln!(s, "{ret} f({}) {{", names.signature());
     for decl in names.local_decls() {
@@ -369,11 +397,23 @@ mod tests {
     }
 
     #[test]
+    fn globals_roundtrip() {
+        // Near globals: a scalar read/write, two distinct globals (distinguished
+        // by their data-segment offset), a read-modify-write, and a global in an
+        // `if` condition (`cmp [global], imm`).
+        assert_roundtrips("int gv; int f() { return gv; }\n");
+        assert_roundtrips("int gv; void f() { gv = 5; }\n");
+        assert_roundtrips("int a; int b; int f() { a = b; return a; }\n");
+        assert_roundtrips("int gv; int f() { gv = gv + 1; return gv; }\n");
+        assert_roundtrips("int gv; int f(int a) { gv = a; if (gv > 0) { gv = gv - 1; } return gv; }\n");
+    }
+
+    #[test]
     fn incomplete_function_emits_nothing() {
-        // A global isn't modelled yet, so the recovery declines rather than
-        // emit a body that references an undeclared variable.
+        // A `char` (byte) global isn't modelled yet — the recovery declines
+        // rather than emit a body referencing an undeclared variable.
         let opts = CompileOpts::default();
-        let code = recompile_text("int gv; int f() { return gv; }\n", &opts).expect("compiles");
+        let code = recompile_text("char cv; int f() { return cv; }\n", &opts).expect("compiles");
         assert!(decompile(&code).is_none(), "an incomplete recovery emits no C");
     }
 }

@@ -343,6 +343,7 @@ const IDIOMS: &[Def] = &[
     // group-1 ALU with imm8 (reg or local); CdeclPopN (`83 c4`) wins first.
     Def { idiom: Idiom::CdeclPopN, pat: &[L(0x83), L(0xc4), A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), BP_DISP8, A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), DISP16, A, A, A] }, // alu [disp16], imm8 (global)
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), REG, A] },
     // alu ax, imm16 — the accumulator short forms (05/0d/15/1d/25/2d/35/3d), all
     // `00xxx101`, distinguished by the `reg`-like bits from the 81/83 groups.

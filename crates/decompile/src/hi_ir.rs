@@ -104,6 +104,11 @@ pub enum Var {
     /// A parameter at `[bp+disp]` (`disp ≥ 4`, past the saved bp and return
     /// address). In the small model the first parameter is `[bp+4]`.
     Param(i16),
+    /// A near global, identified by its offset within the data segment. Unlike a
+    /// call target, this offset is *not* a placeholder — it's the real
+    /// DGROUP-relative displacement the linker keeps, so reproducing it means
+    /// declaring globals in the same order to get the same offsets.
+    Global(u16),
 }
 
 /// An assignable location.
@@ -204,6 +209,9 @@ impl Ctx {
             Place::Local(d) if d < 0 => Some(Var::Slot(d)),
             Place::Local(d) if d >= 4 => Some(Var::Param(d)),
             Place::Reg(r) if is_reg_var(r) => Some(Var::Reg(r)),
+            // An even offset is a word (`int`) global; odd offsets (`char`
+            // globals, struct/array interiors) aren't modelled yet.
+            Place::Global(a) if a % 2 == 0 => Some(Var::Global(a)),
             _ => None,
         }
     }
@@ -720,10 +728,20 @@ mod tests {
     }
 
     #[test]
-    fn a_global_marks_the_function_incomplete() {
-        // Globals aren't modelled yet, so a function reading one isn't recovered.
-        let f = recover_c("int gv; int f() { return gv; }\n");
-        assert!(!f.complete, "an unmodelled global leaves the function incomplete");
+    fn near_globals_recover_by_offset() {
+        // Two distinct globals are told apart by their data-segment offset
+        // (`a`@0, `b`@2) — the displacement is real, not a placeholder.
+        let f = recover_c("int a; int b; int f() { a = b; return a; }\n");
+        assert!(f.complete, "scalar near globals are recovered");
+        assert!(f.vars.contains(&Var::Global(0)), "a is at offset 0");
+        assert!(f.vars.contains(&Var::Global(2)), "b is at offset 2");
+    }
+
+    #[test]
+    fn a_byte_global_marks_the_function_incomplete() {
+        // `char` (byte-width) globals aren't modelled yet.
+        let f = recover_c("char cv; int f() { return cv; }\n");
+        assert!(!f.complete, "an unmodelled byte global leaves the function incomplete");
     }
 
     #[test]
