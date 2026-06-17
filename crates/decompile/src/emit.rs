@@ -333,6 +333,9 @@ fn body_has_call(stmts: &[Stmt]) -> bool {
                 || body_has_call(std::slice::from_ref(step))
                 || body_has_call(b)
         }
+        Stmt::Switch(scrut, arms) => {
+            expr_has_call(scrut) || arms.iter().any(|(_, b)| body_has_call(b))
+        }
     })
 }
 
@@ -412,6 +415,16 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
                 assign_inline(step, names),
             );
             emit_block(body, depth + 1, false, names, out);
+            indent(depth, out);
+            out.push_str("}\n");
+        }
+        Stmt::Switch(scrut, arms) => {
+            let _ = writeln!(out, "switch ({}) {{", expr_str(scrut, names));
+            for (value, body) in arms {
+                indent(depth, out);
+                let _ = writeln!(out, "case {value}:");
+                emit_block(body, depth + 1, false, names, out);
+            }
             indent(depth, out);
             out.push_str("}\n");
         }
@@ -591,6 +604,19 @@ mod tests {
     #[test]
     fn while_roundtrips() {
         assert_roundtrips_stack("int f() { int x; x = 0; while (x < 10) { x = x + 1; } return x; }\n");
+    }
+
+    #[test]
+    fn compare_chain_switch_roundtrips() {
+        // A small switch is a compare-chain (`cmp ax,K; je case`) — recovered as
+        // a `switch` with the no-match path as the post-switch code. Two and
+        // three cases, with sparse and dense values.
+        assert_roundtrips_stack(
+            "int f(int a) { switch (a) { case 1: return 10; case 2: return 20; case 3: return 30; } return 0; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int a) { switch (a) { case 5: return 1; case 9: return 2; } return 0; }\n",
+        );
     }
 
     #[test]
@@ -922,11 +948,12 @@ mod tests {
 
     #[test]
     fn incomplete_function_emits_nothing() {
-        // A multi-case switch isn't structured yet — the recovery declines
-        // rather than emit a wrong body.
+        // A dense switch that BCC lowers to a *jump table* (≥ 4 contiguous cases)
+        // isn't structured yet — the recovery declines rather than emit a wrong
+        // body. (The compare-chain form, ≤ 3 cases, does recover.)
         let opts = CompileOpts::default();
         let code = recompile_text(
-            "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n",
+            "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; } return 0; }\n",
             &opts,
         )
         .expect("compiles");

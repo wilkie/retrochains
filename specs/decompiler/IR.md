@@ -211,6 +211,18 @@ body region, returning the test accumulator), reads the condition off the
 `cmp`/`Jcc` taken verbatim (not negated — the branch *continues* the loop), and
 emits `Stmt::Do`.
 
+**`switch` (compare-chain form) is recovered.** A small `switch` (≤ 3 cases)
+BCC lowers to a compare-chain: `cmp ax,K1; je T1; cmp ax,K2; je T2; …; jmp
+default`, then the case bodies laid out contiguously. The structurer detects a
+run of ≥ 2 consecutive `cmp ax,Ki; je Ti` links (the scrutinee in `ax`,
+recovered from the run's accumulator) ending in an unconditional jump; each case
+body runs from its target to the next case's (or the no-match block); the
+no-match block is the **post-switch code** (so an absent `default` is the code
+that follows, matching C's fall-through). It emits `Stmt::Switch(scrutinee,
+[(value, body)…])`. A *dense* switch (≥ 4 contiguous cases) BCC lowers to a
+**jump table** (`dec bx; cmp bx,N; ja default; shl bx,1; jmp cs:[bx+table]` plus
+the table data) — a distinct shape not yet structured, so it stays incomplete.
+
 **Early returns / multi-exit are recovered.** Every `return <expr>` is `mov
 ax,val; jmp epilogue` — a jump to the shared epilogue (which begins at the
 register-variable restores, if any, then `Leave`/`Ret`). So the fold treats a

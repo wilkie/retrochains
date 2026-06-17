@@ -193,6 +193,10 @@ pub enum Stmt {
     /// variable is initialized just before it and stepped at the body's tail
     /// (BCC lowers `for` to exactly that shape).
     For(Box<Stmt>, Expr, Box<Stmt>, Vec<Stmt>),
+    /// `switch (scrutinee) { case K: body … }` — recovered from a compare-chain
+    /// (`cmp ax,K; je case`)*. No explicit `default`: the no-match path is the
+    /// code that follows the switch.
+    Switch(Expr, Vec<(i32, Vec<Stmt>)>),
 }
 
 /// Does `expr` mention variable `var`? Used to confirm a `for` loop variable.
@@ -219,6 +223,9 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
         Stmt::While(c, b) => Stmt::While(c, fold_for_loops(b)),
         Stmt::Do(c, b) => Stmt::Do(c, fold_for_loops(b)),
         Stmt::For(i, c, st, b) => Stmt::For(i, c, st, fold_for_loops(b)),
+        Stmt::Switch(s, arms) => {
+            Stmt::Switch(s, arms.into_iter().map(|(k, b)| (k, fold_for_loops(b))).collect())
+        }
         other => other,
     });
 
@@ -1557,6 +1564,52 @@ impl Ctx {
         self.idx_of(e)
     }
 
+    /// Recognize a `switch` compare-chain starting at the `cmp` index
+    /// `first_cmp`: consecutive `cmp ax,Ki; je Ti` pairs ending in an
+    /// unconditional `jmp` to the no-match target. Returns the `(value, body
+    /// index)` cases and the index of the no-match (post-switch) block, or
+    /// `None`. Needs ≥ 2 cases — a single `cmp/je` is a plain `if`.
+    fn detect_switch(&self, first_cmp: usize) -> Option<(Vec<(i32, usize)>, usize)> {
+        let mut cases: Vec<(i32, usize)> = Vec::new();
+        let mut c = first_cmp;
+        while let Some(case) = self.switch_case_at(c) {
+            cases.push(case);
+            c += 2;
+        }
+        if cases.len() < 2 {
+            return None;
+        }
+        // The chain ends in an unconditional jump to the no-match block.
+        let LoOp::Jump { target: def } = self.insns.get(c)?.op else {
+            return None;
+        };
+        let def_idx = self.idx_of(def)?;
+        Some((cases, def_idx))
+    }
+
+    /// One `cmp ax,K; je T` link of a switch compare-chain at index `c`: the case
+    /// value and the body's instruction index, or `None` if it isn't that shape.
+    fn switch_case_at(&self, c: usize) -> Option<(i32, usize)> {
+        let value = match self.insns.get(c).map(|n| &n.op) {
+            Some(LoOp::Bin {
+                dst: Place::Flags,
+                op: BinOp::Cmp,
+                lhs: Place::Reg(Reg::Ax),
+                rhs: Place::Imm(k),
+            }) => *k,
+            _ => return None,
+        };
+        let (cond, target) = match self.insns.get(c + 1).map(|n| &n.op) {
+            Some(LoOp::Branch { cond, target }) => (*cond, *target),
+            _ => return None,
+        };
+        if cond_to_relop(cond) != Some(RelOp::Eq) {
+            return None;
+        }
+        let ti = self.idx_of(target)?;
+        Some((value, ti))
+    }
+
     /// Recognize a loop-rotated `while` whose header jump is at index `i`:
     /// `jmp test; body…; test: cmp…; jcc body`. Returns the body range, the
     /// `cmp`/branch indices, and the continue index, or `None`.
@@ -1608,15 +1661,38 @@ impl Ctx {
 
             match ctrl {
                 Some((true, target)) if target > here => {
-                    // Forward conditional branch → an `if`. The `cmp` feeding it
-                    // is the previous instruction; everything before that is a
-                    // straight-line run.
+                    // Forward conditional branch → an `if` (or a `switch`). The
+                    // `cmp` feeding it is the previous instruction; everything
+                    // before that is a straight-line run.
                     if i == 0 {
                         self.complete = false;
                         i += 1;
                         continue;
                     }
                     let cmp_idx = i - 1;
+
+                    // A compare-chain (`cmp ax,Ki; je Ti` × N) is a `switch`. The
+                    // scrutinee is the value the run left in `ax`; each case body
+                    // runs from its target to the next case's (or the no-match
+                    // block); the no-match block is the post-switch code.
+                    if let Some((cases, def_idx)) = self.detect_switch(cmp_idx) {
+                        let scrut = self.fold_linear(linear_start, cmp_idx, &mut stmts);
+                        match scrut {
+                            Some(scrutinee) => {
+                                let mut arms = Vec::new();
+                                for (j, &(value, start)) in cases.iter().enumerate() {
+                                    let end = cases.get(j + 1).map_or(def_idx, |&(_, s)| s);
+                                    arms.push((value, self.structure(start, end)));
+                                }
+                                stmts.push(Stmt::Switch(scrutinee, arms));
+                            }
+                            None => self.complete = false,
+                        }
+                        i = def_idx;
+                        linear_start = def_idx;
+                        continue;
+                    }
+
                     // The fold returns the value left in the accumulator (e.g.
                     // `*p` set up before an `or ax,ax` / `cmp ax,K`), which the
                     // condition needs to read a register operand.
@@ -2214,12 +2290,26 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_case_switch_marks_the_function_incomplete() {
-        // A multi-case switch (compare chain / jump table) isn't structured yet
-        // (a single-case switch is just an `if`, which does recover).
+    fn a_compare_chain_switch_recovers() {
+        // A small switch (≤ 3 cases) is a compare-chain (`cmp ax,K; je case`),
+        // which recovers as a `Stmt::Switch`.
         let f =
             recover_c("int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n");
-        assert!(!f.complete, "a multi-case switch leaves the function incomplete");
+        assert!(f.complete, "a compare-chain switch is recovered");
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms) if arms.len() == 3)),
+            "recovers a 3-arm switch",
+        );
+    }
+
+    #[test]
+    fn a_jump_table_switch_marks_the_function_incomplete() {
+        // A dense switch (≥ 4 contiguous cases) BCC lowers to a jump table
+        // (`dec bx; cmp bx,N; ja default; jmp cs:[bx+table]`), not yet structured.
+        let f = recover_c(
+            "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; } return 0; }\n",
+        );
+        assert!(!f.complete, "a jump-table switch leaves the function incomplete");
     }
 
     #[test]
