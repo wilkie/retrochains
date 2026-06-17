@@ -21,13 +21,19 @@ use crate::lo_ir::{BinOp, Reg};
 /// this picks the surface syntax, and the recompile verifier is the gate on the
 /// choice ([`crate::render_idiomatic`]). The seam a second pass — or a human, or
 /// a UI toggle — would use to retune the output.
+///
+/// Neither form is universally compilable, which is *why* the verifier decides:
+/// our `bcc` builds a constant-offset store either way, but a *variable*-index
+/// store only as a subscript (`p[i] = v`), while some other shapes only build as
+/// pointer arithmetic. [`Subscript`](AccessForm::Subscript) is the default
+/// because it covers the most recovered cases today.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AccessForm {
-    /// `base[k]` — array/pointer subscript. The idiomatic first choice.
+    /// `base[k]` — array/pointer subscript. The idiomatic default and the
+    /// first choice the verifier tries.
     Subscript,
-    /// `*(base + k)` — explicit pointer arithmetic. The widest-coverage form
-    /// (our `bcc` compiles some accesses only in this shape), and the safe
-    /// default.
+    /// `*(base + k)` — explicit pointer arithmetic. The fallback for shapes the
+    /// subscript form can't express or the compiler won't build as a subscript.
     PointerArith,
 }
 
@@ -165,7 +171,7 @@ impl Names {
             unsigneds: unsigned_vars.to_vec(),
             signature: sig_parts.join(", "),
             global_count,
-            form: AccessForm::PointerArith,
+            form: AccessForm::Subscript,
         }
     }
 
@@ -211,11 +217,12 @@ pub fn decompile(code: &[u8]) -> Option<String> {
 }
 
 /// Render a recovered function as C, or `None` if it isn't
-/// [`complete`](Function::complete). Uses the safe default form
-/// ([`AccessForm::PointerArith`]); [`to_c_with_form`] selects another.
+/// [`complete`](Function::complete). Uses the default form
+/// ([`AccessForm::Subscript`]); [`to_c_with_form`] selects another, and
+/// [`crate::render_idiomatic`] picks the first form that recompiles.
 #[must_use]
 pub fn to_c(f: &Function) -> Option<String> {
-    to_c_with_form(f, AccessForm::PointerArith)
+    to_c_with_form(f, AccessForm::Subscript)
 }
 
 /// Render a recovered function as C with a chosen access [`form`](AccessForm),
@@ -386,9 +393,9 @@ fn lvalue_str(lv: &LValue, names: &Names) -> String {
 fn deref_str(inner: &Expr, names: &Names) -> String {
     if names.form == AccessForm::Subscript
         && let Expr::Binary(BinOp::Add, base, idx) = inner
-        && let Expr::Const(k) = **idx
     {
-        return format!("{}[{}]", expr_str(base, names), k);
+        // `base[k]` for a constant index, `base[i]` for a variable one.
+        return format!("{}[{}]", expr_str(base, names), expr_str(idx, names));
     }
     format!("*{}", expr_str(inner, names))
 }
@@ -565,6 +572,13 @@ mod tests {
         assert_roundtrips_stack("void f(int *p) { p[2] = 5; }\n");
         assert_roundtrips_stack("void f(int *p, int v) { *(p + 2) = v; }\n");
         assert_roundtrips_stack("void f(int *p) { p[1] = 10; p[2] = 20; }\n");
+        // Variable index — `p[i]` scales the index by the pointee stride
+        // (`i << 1` for `int`) and adds it to the pointer in bx. The base's
+        // provenance (a loaded pointer, `mov bx,[p]`) makes it a pointer index;
+        // a read, a use in a larger expression, and a write all recover.
+        assert_roundtrips_stack("int f(int *p, int i) { return p[i]; }\n");
+        assert_roundtrips_stack("int f(int *p, int i) { return p[i] + 1; }\n");
+        assert_roundtrips_stack("void f(int *p, int i, int v) { p[i] = v; }\n");
     }
 
     #[test]

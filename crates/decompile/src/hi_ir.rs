@@ -308,6 +308,19 @@ fn flip_addsub(op: BinOp) -> BinOp {
     }
 }
 
+/// Strip the stride-scaling shift from a pointer index. BCC scales a variable
+/// index to a byte offset (`i << log2(stride)`) before adding it to the pointer;
+/// the C-level index is the un-shifted value `i`. A non-shift index (a `char *`,
+/// stride 1, needs no scaling) is itself. The shift *amount* is trusted to match
+/// the pointee — the recompile check is the gate.
+fn strip_scale(index: Expr) -> Expr {
+    if let Expr::Binary(BinOp::Shl, base, _amount) = index {
+        *base
+    } else {
+        index
+    }
+}
+
 /// Build `lhs op rhs`, collapsing a constant shift applied to an existing
 /// constant shift of the same kind: `(x >> a) >> b` ⇒ `x >> (a+b)`.
 fn combine_shift(op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
@@ -715,6 +728,27 @@ impl Ctx {
                         self.complete = false;
                     }
                 }
+
+                // `add bx, ax` — index a pointer by a *variable*: bx holds the
+                // pointer `p` (a `mov bx,[p]` provenance — a loaded value, not an
+                // `lea`), and the accumulator holds the scaled index `i << s`
+                // (`s = log2(stride)`). Recover `p + i`: strip the stride shift to
+                // get the C-level index, so the deref that follows reads `p[i]`.
+                // (An `lea`-based base — a local *array* — would arrive with the
+                // index in bx and the base in ax; that sibling stays unhandled.)
+                LoOp::Bin {
+                    dst: Place::Reg(Reg::Bx),
+                    op: BinOp::Add,
+                    lhs: Place::Reg(Reg::Bx),
+                    rhs: Place::Reg(Reg::Ax),
+                } => match (bx.take(), acc.take()) {
+                    (Some(Expr::Var(p)), Some(index)) => {
+                        self.note_ptr(p);
+                        let idx = strip_scale(index);
+                        bx = Some(Expr::Binary(BinOp::Add, Box::new(Expr::Var(p)), Box::new(idx)));
+                    }
+                    _ => self.complete = false,
+                },
 
                 // `lea ax, [bp+disp]` — the address of a variable (`&x`).
                 LoOp::Lea { dst: Place::Reg(Reg::Ax), src } => {

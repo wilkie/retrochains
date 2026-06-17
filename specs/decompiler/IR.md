@@ -64,7 +64,11 @@ it and `*(p+K)` is the automatic, zero-risk fallback. This is the hook a second
 pass, a human, or a UI toggle uses to retune the output without ever risking
 faithfulness — every rendering is verified before it's offered. (Today the only
 policy axis is subscript-vs-arithmetic; struct-field and array forms join it as
-type/provenance recovery grows, the same way.)
+type/provenance recovery grows, the same way.) Neither form is universally
+compilable — our `bcc` builds a *variable*-index store only as a subscript
+(`p[i] = v`) and other shapes only as pointer arithmetic — which is exactly *why*
+the verifier, not a fixed rule, decides. Subscript is the unverified default
+(`to_c`/`decompile`) because it covers the most recovered cases.
 
 ## 3. The value and storage model
 
@@ -376,11 +380,18 @@ Recovery is driven by the idioms, not guessed:
   mirrors it: `mov [bx+disp],ax` (`PointerStoreDisp8`) and `mov word ptr
   [bx+disp],imm16` (`StoreImmDispDeref`) recover as `*(p + K) = value` (an
   `LValue::Deref` of the same offset-pointer expression), for a constant or a
-  variable RHS. Recovering as `*(p+K)` rather than the `p[K]` subscript is
-  deliberate: BCC compiles them identically, but the explicit-arithmetic store
-  path has wider coverage in our `bcc` (the subscript variable-RHS write is
-  still a `bcc` gap). Scoped to `int` writes — a `char` indexed-immediate write
-  hits a separate `bcc`/TASM gap (`byte ptr [bx+disp],imm`).)*
+  variable RHS. The surface form (`p[K]` vs `*(p+K)`) is the rendering seam's
+  choice, not baked in — see §2. **Variable index** (`p[i]`) is built too:
+  `mov ax,i; shl ax,s; mov bx,p; add bx,ax; mov ax,[bx]` — the index is scaled
+  to a byte offset (`i << s`, `s = log2(stride)`), so the fold strips the shift
+  to recover the C-level index and the `add bx,ax` makes `bx = Deref(p + i)`.
+  The **provenance** of the base register is the array-vs-pointer
+  discriminator: a base loaded from memory (`mov bx,[p]`) is a *pointer* index,
+  so this recovers `p[i]`; a base from `lea bx,[bp-N]` would be a local *array*
+  (`a[i]`) — that sibling, with the index arriving in `bx` and the base in `ax`,
+  stays unhandled pending array-extent recovery. Scoped to `int` writes — a
+  `char` indexed-immediate write hits a separate `bcc`/TASM gap (`byte ptr
+  [bx+disp],imm`).)*
 - **Promotions** — `Cbw`/`Cwd` become explicit `Cast` nodes, so the emitted C's
   implicit promotions recompile to the same `cbw`/`cwd`.
 - **Aggregates** — a `Lea base` then indexed access ⇒ array; a constant field
