@@ -314,19 +314,31 @@ pub struct ArraySpec {
     pub base: i16,
     /// The element count.
     pub len: u16,
+    /// `char` elements (stride 1, byte access) rather than `int` (stride 2).
+    pub elem_char: bool,
 }
 
 impl ArraySpec {
+    /// The element width: 1 for `char`, 2 for `int`.
+    fn stride(self) -> i16 {
+        if self.elem_char {
+            1
+        } else {
+            2
+        }
+    }
+
     /// The `bp` offset just past the last element (exclusive upper bound).
     fn end(self) -> i16 {
-        self.base + 2 * self.len.cast_signed()
+        self.base + self.stride() * self.len.cast_signed()
     }
 
     /// The element index a slot offset maps to, if it lies on this array.
     #[must_use]
     pub fn index_of(self, off: i16) -> Option<u16> {
-        if off >= self.base && off < self.end() && (off - self.base) % 2 == 0 {
-            u16::try_from((off - self.base) / 2).ok()
+        let s = self.stride();
+        if off >= self.base && off < self.end() && (off - self.base) % s == 0 {
+            u16::try_from((off - self.base) / s).ok()
         } else {
             None
         }
@@ -407,6 +419,11 @@ struct Ctx {
     /// front so the store side can tell a `long` store *pair* (`[hi]=…;[lo]=…`)
     /// from two adjacent `int` stores, which are byte-identical at the store.
     long_slots: std::collections::HashSet<i16>,
+    /// Local-array bases (`lea` offsets) dereferenced at byte width — `char`
+    /// arrays. The element type of a purely variable-indexed array isn't in any
+    /// slot, only in the byte-vs-word deref, so this carries that signal to the
+    /// frame-layout pass.
+    char_array_bases: Vec<i16>,
     complete: bool,
     returns_value: bool,
     returns_long: bool,
@@ -436,6 +453,18 @@ impl Ctx {
     fn note_ptr(&mut self, var: Var) {
         if !self.ptr_vars.contains(&var) {
             self.ptr_vars.push(var);
+        }
+    }
+
+    /// If `base` is a local-array element address `&a[0] + i` (an `AddrOf` of a
+    /// slot, plus an index), record that array base as `char` — a byte deref of
+    /// it is the only element-type evidence a variable-only-indexed array has.
+    fn note_char_array_base(&mut self, base: &Expr) {
+        if let Expr::Binary(BinOp::Add, lhs, _) = base
+            && let Expr::AddrOf(Var::Slot(off)) = **lhs
+            && !self.char_array_bases.contains(&off)
+        {
+            self.char_array_bases.push(off);
         }
     }
 
@@ -702,6 +731,7 @@ impl Ctx {
                             if let Expr::Var(v) = ptr {
                                 self.note_char_ptr(v);
                             }
+                            self.note_char_array_base(&ptr);
                             acc = Some(Expr::Deref(Box::new(ptr)));
                         }
                         None => self.complete = false,
@@ -1110,6 +1140,7 @@ impl Ctx {
                             if let Expr::Var(v) = ptr {
                                 self.note_char_ptr(v);
                             }
+                            self.note_char_array_base(&ptr);
                             out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), e));
                         }
                         _ => self.complete = false,
@@ -1554,6 +1585,7 @@ pub fn recover(code: &[u8]) -> Function {
         long_vars: Vec::new(),
         unsigned_vars: Vec::new(),
         long_slots,
+        char_array_bases: Vec::new(),
         complete: true,
         returns_value: false,
         returns_long: false,
@@ -1619,24 +1651,39 @@ fn detect_local_array(ctx: &Ctx) -> Vec<ArraySpec> {
     if frame < 2 || frame % 2 != 0 {
         return Vec::new();
     }
-    // Only plain-`int` stack slots; any typed slot (char/long/pointer) opts out.
-    let typed = |v: &Var| {
-        ctx.char_vars.contains(v)
-            || ctx.long_vars.contains(v)
-            || ctx.ptr_vars.contains(v)
-            || ctx.char_ptr_vars.contains(v)
-    };
+    // Determine the element type: all stack slots must be plain `int`, or all
+    // `char` — a `long`/pointer slot, or a mix of `int` and `char`, opts out (the
+    // layout is subtler). A `char` array is stride 1 (byte access, any offset
+    // parity); an `int` array is stride 2 (even offsets).
     let mut slots: Vec<i16> = Vec::new();
+    let mut any_char = false;
+    let mut any_int = false;
     for v in &ctx.vars {
         if let Var::Slot(off) = v {
-            if typed(v) || *off >= 0 || *off % 2 != 0 || *off < -frame {
+            if ctx.long_vars.contains(v) || ctx.ptr_vars.contains(v) || ctx.char_ptr_vars.contains(v) {
+                return Vec::new();
+            }
+            // A slot is `char` if accessed at byte width, or it's the base of a
+            // byte-dereferenced (variable-indexed) array — the latter being the
+            // only element-type evidence such an array has.
+            if ctx.char_vars.contains(v) || ctx.char_array_bases.contains(off) {
+                any_char = true;
+            } else {
+                any_int = true;
+            }
+            if *off >= 0 || *off < -frame {
                 return Vec::new();
             }
             slots.push(*off);
         }
     }
-    if slots.is_empty() {
+    if slots.is_empty() || (any_char && any_int) {
         return Vec::new();
+    }
+    let elem_char = any_char;
+    let stride: i16 = if elem_char { 1 } else { 2 };
+    if !elem_char && slots.iter().any(|o| o % 2 != 0) {
+        return Vec::new(); // an int array can't sit on an odd offset
     }
     // The determinate signal: a `lea` of a frame slot is an array base (its
     // address is taken / it's variable-indexed). Partition the frame on those
@@ -1648,9 +1695,7 @@ fn detect_local_array(ctx: &Ctx) -> Vec<ArraySpec> {
         .insns
         .iter()
         .filter_map(|i| match i.op {
-            LoOp::Lea { src: Place::Local(off), .. } if off < 0 && off % 2 == 0 && off >= -frame => {
-                Some(off)
-            }
+            LoOp::Lea { src: Place::Local(off), .. } if off < 0 && off >= -frame => Some(off),
             _ => None,
         })
         .collect();
@@ -1665,25 +1710,27 @@ fn detect_local_array(ctx: &Ctx) -> Vec<ArraySpec> {
         let mut arrays: Vec<ArraySpec> = Vec::new();
         for &base in &lea_bases {
             let next = bounds.iter().copied().find(|&b| b > base).unwrap_or(0);
-            let len = u16::try_from((next - base) / 2).unwrap_or(0);
+            let len = u16::try_from((next - base) / stride).unwrap_or(0);
             // A single-element "array" is an address-taken scalar, not an array.
             if len >= 2 {
-                arrays.push(ArraySpec { base, len });
+                arrays.push(ArraySpec { base, len, elem_char });
             }
         }
         if !arrays.is_empty() {
             return arrays;
         }
     }
-    // Genuine top-packed scalars: offsets are exactly {-2,-4,…,-2k} and fill the
-    // frame. Keep them as scalars.
-    slots.sort_unstable_by(|a, b| b.cmp(a)); // descending: -2, -4, …
-    let top_packed = slots.iter().enumerate().all(|(k, &o)| o == -2 * (i16::try_from(k).unwrap_or(0) + 1));
-    if top_packed && 2 * i16::try_from(slots.len()).unwrap_or(0) == frame {
+    // Genuine top-packed scalars: offsets are exactly {-s,-2s,…,-ks} and fill the
+    // frame (a `char` frame is padded up to even). Keep them as scalars.
+    slots.sort_unstable_by(|a, b| b.cmp(a)); // descending toward bp
+    let k = i16::try_from(slots.len()).unwrap_or(0);
+    let top_packed = slots.iter().enumerate().all(|(j, &o)| o == -stride * (i16::try_from(j).unwrap_or(0) + 1));
+    let scalar_frame = if elem_char { (k + 1) & !1 } else { 2 * k };
+    if top_packed && scalar_frame == frame {
         return Vec::new();
     }
     // No array anchor and not a scalar layout — model the frame as one array.
-    vec![ArraySpec { base: -frame, len: u16::try_from(frame / 2).unwrap_or(0) }]
+    vec![ArraySpec { base: -frame, len: u16::try_from(frame / stride).unwrap_or(0), elem_char }]
 }
 
 #[cfg(test)]
@@ -1723,7 +1770,7 @@ mod tests {
         let f = recover_stack("int f() { int a[4]; a[0] = 1; return a[2]; }\n");
         assert!(f.complete);
         assert_eq!(f.arrays.len(), 1, "one reconstructed array");
-        assert_eq!(f.arrays[0], ArraySpec { base: -8, len: 4 });
+        assert_eq!(f.arrays[0], ArraySpec { base: -8, len: 4, elem_char: false });
     }
 
     #[test]
@@ -1741,7 +1788,17 @@ mod tests {
         // merged a[5].
         let f = recover_stack("int f(int i) { int x; int a[4]; x = 9; return x + a[i]; }\n");
         assert!(f.complete);
-        assert_eq!(f.arrays, vec![ArraySpec { base: -10, len: 4 }]);
+        assert_eq!(f.arrays, vec![ArraySpec { base: -10, len: 4, elem_char: false }]);
+    }
+
+    #[test]
+    fn a_char_array_is_stride_one() {
+        // Byte accesses (`char a[4]`) reconstruct a stride-1 array; a
+        // variable-only-indexed array is typed `char` from the byte deref alone.
+        let f = recover_stack("int f() { char a[4]; a[0] = 65; return a[2]; }\n");
+        assert_eq!(f.arrays, vec![ArraySpec { base: -4, len: 4, elem_char: true }]);
+        let g = recover_stack("int f(int i) { char a[8]; return a[i]; }\n");
+        assert_eq!(g.arrays, vec![ArraySpec { base: -8, len: 8, elem_char: true }]);
     }
 
     #[test]

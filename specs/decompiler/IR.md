@@ -429,9 +429,16 @@ Recovery is driven by the idioms, not guessed:
   then orders locals **closest-to-`bp` first**, because BCC lays them out in
   declaration order top-down — only that order reproduces the offsets. A frame
   with *no* lea anchor stays the sole-array fallback (genuinely ambiguous: a
-  constant-index-only `int x; int a[4]` is byte-identical to one `a[5]`). Scoped
-  to all-`int` frames for now, since `char`/`long`/pointer slot widths make the
-  layout subtler.)*
+  constant-index-only `int x; int a[4]` is byte-identical to one `a[5]`).
+  **`char` arrays** join `int`: the element type is carried on the `ArraySpec`
+  (stride 1 vs 2), so a frame of byte-accessed slots reconstructs a `char a[M]`.
+  Its layout is subtler — stride 1, any offset parity (`char a[4]`@`-4..-1`), and
+  a `char` frame is padded up to even (a lone `char` is frame 2 at `-1`), which
+  the scalar check accounts for. A variable-only-indexed `char` array (no
+  constant element access, so no `char`-typed slot) is typed from the **byte
+  deref alone** — `mov al,[bx]` through `&a[0] + i` records the base as a `char`
+  array, the only element-type evidence it has. (`long`/pointer slots still opt
+  out; a frame mixing `int` and `char` slots opts out too.)*
 
 Near globals are built (`hi_ir.rs`). A global is a `Var::Global(offset)` — and
 crucially the offset is *not* a placeholder like a call target: it's the real

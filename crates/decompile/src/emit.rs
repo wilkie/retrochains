@@ -230,7 +230,10 @@ impl Names {
             .arrays
             .iter()
             .enumerate()
-            .map(|(i, a)| (a.base, format!("int a{}[{}]", i + 1, a.len)))
+            .map(|(i, a)| {
+                let ty = if a.elem_char { "char" } else { "int" };
+                (a.base, format!("{ty} a{}[{}]", i + 1, a.len))
+            })
             .collect();
         for (v, n) in &self.bindings {
             if let Var::Slot(off) = v
@@ -620,6 +623,18 @@ mod tests {
         // scalar below it, both work.
         assert_roundtrips_stack("int f(int i) { int x; int a[4]; x = 9; return x + a[i]; }\n");
         assert_roundtrips_stack("int f(int i) { int a[4]; int x; a[i] = 1; x = 9; return x; }\n");
+    }
+
+    #[test]
+    fn local_char_array_roundtrips() {
+        // A `char` array is stride 1 (byte accesses, any offset parity), declared
+        // `char a[M]`. A constant-index read, a variable index (read + write), and
+        // a variable-only-indexed array (typed `char` from the byte deref alone,
+        // no constant access) all recover.
+        assert_roundtrips_stack("int f() { char a[4]; a[0] = 65; return a[2]; }\n");
+        assert_roundtrips_stack("int f(int i) { char a[4]; a[0] = 65; return a[i]; }\n");
+        assert_roundtrips_stack("void f(int i, int v) { char a[4]; a[i] = v; }\n");
+        assert_roundtrips_stack("int f(int i) { char a[8]; return a[i]; }\n");
     }
 
     #[test]
