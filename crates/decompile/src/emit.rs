@@ -216,7 +216,7 @@ fn body_has_call(stmts: &[Stmt]) -> bool {
         Stmt::Assign(_, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => expr_has_call(e),
         Stmt::Return(None) => false,
         Stmt::If(c, t, e) => expr_has_call(c) || body_has_call(t) || body_has_call(e),
-        Stmt::While(c, b) => expr_has_call(c) || body_has_call(b),
+        Stmt::While(c, b) | Stmt::Do(c, b) => expr_has_call(c) || body_has_call(b),
         Stmt::For(init, c, step, b) => {
             body_has_call(std::slice::from_ref(init))
                 || expr_has_call(c)
@@ -286,6 +286,12 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
             emit_block(body, depth + 1, false, names, out);
             indent(depth, out);
             out.push_str("}\n");
+        }
+        Stmt::Do(cond, body) => {
+            out.push_str("do {\n");
+            emit_block(body, depth + 1, false, names, out);
+            indent(depth, out);
+            let _ = writeln!(out, "}} while ({});", expr_str(cond, names));
         }
         Stmt::For(init, cond, step, body) => {
             let _ = writeln!(
@@ -504,6 +510,24 @@ mod tests {
         assert_roundtrips_stack("int f(int a, int b) { return a / b; }\n");
         assert_roundtrips_stack("int f(int a, int b) { return a % b; }\n");
         assert_roundtrips_stack("int f(int a, int b, int c) { return a * b + c; }\n");
+        // Division by a constant lowers to `mov bx,K; cwd; idiv bx` — the bx
+        // tracker resolves the divisor. Signed and unsigned, quotient and
+        // remainder.
+        assert_roundtrips_stack("int f(int a) { return a / 2; }\n");
+        assert_roundtrips_stack("unsigned f(unsigned a) { return a / 2; }\n");
+        assert_roundtrips_stack("int f(int a) { return a % 2; }\n");
+    }
+
+    #[test]
+    fn do_while_roundtrips() {
+        // A `do { } while` is a backward conditional branch with no header jump —
+        // the body runs once before the test. Recovered as `Stmt::Do`.
+        assert_roundtrips_stack(
+            "int f(int a) { int s; s = 0; do { s = s + 1; a = a - 1; } while (a > 0); return s; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int n) { int i; i = 0; do { i = i + 1; } while (i < n); return i; }\n",
+        );
     }
 
     #[test]

@@ -186,6 +186,9 @@ pub enum Stmt {
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     /// `while (cond) { body }`.
     While(Expr, Vec<Stmt>),
+    /// `do { body } while (cond);` — a backward branch with no header jump (the
+    /// body runs at least once).
+    Do(Expr, Vec<Stmt>),
     /// `for (init; cond; step) { body }` — recovered from a `while` whose loop
     /// variable is initialized just before it and stepped at the body's tail
     /// (BCC lowers `for` to exactly that shape).
@@ -214,6 +217,7 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
     let recursed = stmts.into_iter().map(|s| match s {
         Stmt::If(c, t, e) => Stmt::If(c, fold_for_loops(t), fold_for_loops(e)),
         Stmt::While(c, b) => Stmt::While(c, fold_for_loops(b)),
+        Stmt::Do(c, b) => Stmt::Do(c, fold_for_loops(b)),
         Stmt::For(i, c, st, b) => Stmt::For(i, c, st, fold_for_loops(b)),
         other => other,
     });
@@ -829,7 +833,13 @@ impl Ctx {
                 // `mov ax,dx` recovers `%`. The preceding `cwd` set up `dx:ax`
                 // from the accumulator (the dividend).
                 LoOp::Bin { dst: Place::DxAx, op: BinOp::Idiv, lhs: Place::DxAx, rhs } => {
-                    match (acc.take(), self.operand(rhs)) {
+                    // The divisor is a memory operand, or a constant the compiler
+                    // loaded into bx (`mov bx,2; idiv bx` for `a / 2`).
+                    let divisor = match rhs {
+                        Place::Reg(Reg::Bx) => bx.clone(),
+                        other => self.operand(other),
+                    };
+                    match (acc.take(), divisor) {
                         (Some(l), Some(r)) => {
                             dx_rem = Some((l.clone(), r.clone()));
                             acc = Some(Expr::Binary(BinOp::Idiv, Box::new(l), Box::new(r)));
@@ -1191,10 +1201,29 @@ impl Ctx {
                         i += 1; // exit jump — folded (ignored) with the linear run
                     }
                 }
-                Some((true, _)) => {
-                    // A backward conditional branch we didn't fold into a loop.
-                    self.complete = false;
-                    i += 1;
+                Some((true, target)) => {
+                    // A backward conditional branch with no header jump is a
+                    // `do { body } while (cond)`: the body runs, then the branch
+                    // loops back to the body start when the condition holds.
+                    let cmp_idx = i - 1;
+                    if i > 0
+                        && let Some(body_start) = self.idx_of(target)
+                        && body_start <= cmp_idx
+                    {
+                        // Everything before the body is pre-loop init.
+                        self.fold_linear(linear_start, body_start, &mut stmts);
+                        // Fold the body straight-line; its trailing accumulator is
+                        // the `cmp`'s operand setup, which the condition reads.
+                        let mut body = Vec::new();
+                        let cond_acc = self.fold_linear(body_start, cmp_idx, &mut body);
+                        let cond = self.condition(cmp_idx, i, false, cond_acc.as_ref());
+                        stmts.push(Stmt::Do(cond, body));
+                        i += 1;
+                        linear_start = i;
+                    } else {
+                        self.complete = false;
+                        i += 1;
+                    }
                 }
                 None => i += 1,
             }

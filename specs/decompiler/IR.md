@@ -182,6 +182,16 @@ step stays a `while` (an empty-body `for` lowers differently — the recompile
 check catches that, so the pass requires a real body). For and the equivalent
 while lower identically, so this is a faithful re-rendering the oracle confirms.
 
+**`do`/`while` loops are recovered** as `do { } while (cond);`. BCC lowers a
+do-while to `loop: body; cmp; if (cond) goto loop` — a **backward** conditional
+branch with *no* header jump (the body always runs once before the test). That
+absence is the discriminator: a loop-rotated `while` jumps to its bottom test
+first, a `do` does not. So when the structurer meets a backward branch whose
+target sits at or before the `cmp`, it folds the body (`fold_linear` over the
+body region, returning the test accumulator), reads the condition off the
+`cmp`/`Jcc` taken verbatim (not negated — the branch *continues* the loop), and
+emits `Stmt::Do`.
+
 **Early returns / multi-exit are recovered.** Every `return <expr>` is `mov
 ax,val; jmp epilogue` — a jump to the shared epilogue (which begins at the
 register-variable restores, if any, then `Leave`/`Ret`). So the fold treats a
@@ -273,8 +283,12 @@ Recovery is driven by the idioms, not guessed:
   the dividend setup, a no-op for the fold. `a % b` is the same `idiv` followed
   by `mov ax,dx` (the remainder): the fold remembers the `(dividend, divisor)` at
   the `idiv` and synthesizes a `Mod` operator when the `dx` result is read. Only
-  signed `imul`/`idiv` for now; the unsigned `mul`/`div` and the shift-based
-  power-of-two divides are deferred. Needed recognizer additions: `f7` with a
+  signed `imul`/`idiv` for now; the unsigned `mul`/`div` are deferred. Division
+  by a constant lowers to `mov bx,K; cwd; idiv bx` rather than a memory `idiv`,
+  so the fold resolves an `idiv bx` divisor through the `bx` const tracker — `a /
+  2` (signed), `a / 2` (unsigned `div`), and `a % 2` all fold and round-trip. (A
+  `long` constant divide is a runtime helper call, not `idiv`, so it stays
+  deferred.) Needed recognizer additions: `f7` with a
   memory operand (`imul/idiv [bp±N]`/`[disp16]`), which was an `Asm` gap that
   even mis-lifted `idiv [bp+N]` as a stray `jle`. Unsigned built too: an unsigned
   compare (`jb`/`ja`/`jbe`/`jae` → `ULt`/`UGt`/…) marks its operands `unsigned`,
