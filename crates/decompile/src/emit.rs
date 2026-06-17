@@ -462,7 +462,7 @@ fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_has_external_call(a, callees) || expr_has_external_call(b, callees)
         }
-        Expr::Not(a) | Expr::Deref(a) => expr_has_external_call(a, callees),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => expr_has_external_call(a, callees),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
@@ -494,7 +494,7 @@ fn expr_has_call(e: &Expr) -> bool {
     match e {
         Expr::Call(..) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
-        Expr::Not(a) | Expr::Deref(a) => expr_has_call(a),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => expr_has_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
@@ -667,6 +667,7 @@ fn expr_str(e: &Expr, names: &Names) -> String {
             let list = args.iter().map(|a| expr_str(a, names)).collect::<Vec<_>>().join(", ");
             format!("{}({list})", names.callee(*target))
         }
+        Expr::Cast(ty, e) => format!("({}){}", type_str(*ty), expr_str(e, names)),
     }
 }
 
@@ -1179,6 +1180,21 @@ mod tests {
         assert_roundtrips(
             "int f(int n){ int s; int i; s=0; for(i=0;i<n;i++){ s+=i; } return s; }\n",
         );
+    }
+
+    #[test]
+    fn int_to_char_narrowing_recovers_a_cast() {
+        // Storing an `int` into a `char` reads the low byte (`mov al,[x]`); a
+        // plain `c = x` would re-evaluate `x` at word width, so the narrowing
+        // recovers an explicit `(char)` cast. The byte-load typing also keeps the
+        // frame from being mis-modelled as a `char` array (which crashed `bcc`).
+        // Whichever load width BCC used — an explicit `(char)x` reads the low
+        // byte (`mov al,[x]`), an implicit `c = x` re-evaluates at word width —
+        // the recovery distinguishes them and round-trips both.
+        assert_roundtrips("int f(){ int x; char c; x=300; c=(char)x; return c; }\n");
+        assert_roundtrips("int f(){ int x; char c; x=300; c=x; return c; }\n");
+        assert_roundtrips("int f(){ int x; char c; x=70; c=x; return c; }\n");
+        assert_roundtrips("int g; char c; void f(){ c = g; }\n");
     }
 
     #[test]

@@ -110,6 +110,11 @@ pub enum Expr {
     /// so it stays an opaque extern (any declared extern reproduces those bytes —
     /// only the argument count/types matter).
     Call(usize, Vec<Expr>),
+    /// `(ty)e` — a narrowing cast. Recovered when an `int` value is stored to a
+    /// `char` via its low byte (`mov al,[x]; mov [c],al`): a plain `c = x` would
+    /// re-evaluate `x` at word width (`mov ax,[x]`), so the cast is what
+    /// reproduces the byte load.
+    Cast(Type, Box<Expr>),
 }
 
 /// Does an expression contain a (side-effecting) call anywhere?
@@ -117,7 +122,7 @@ fn contains_call(e: &Expr) -> bool {
     match e {
         Expr::Call(..) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
-        Expr::Not(a) | Expr::Deref(a) => contains_call(a),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => contains_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
@@ -218,7 +223,7 @@ fn expr_mentions(expr: &Expr, var: Var) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_mentions(a, var) || expr_mentions(b, var)
         }
-        Expr::Not(a) | Expr::Deref(a) => expr_mentions(a, var),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => expr_mentions(a, var),
         Expr::Call(_, args) => args.iter().any(|a| expr_mentions(a, var)),
         Expr::Const(_) | Expr::LongConst(_) => false,
     }
@@ -286,7 +291,7 @@ fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
             walk_vars_expr(a, f);
             walk_vars_expr(b, f);
         }
-        Expr::Not(a) | Expr::Deref(a) => walk_vars_expr(a, f),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => walk_vars_expr(a, f),
         Expr::Call(_, args) => args.iter_mut().for_each(|a| walk_vars_expr(a, f)),
         Expr::Const(_) | Expr::LongConst(_) => {}
     }
@@ -671,6 +676,16 @@ impl Ctx {
         }
     }
 
+    /// Is `place` a word-accessed slot/global — an `int` (or wider), so a byte
+    /// load of it is reading the low byte of an `int`, not a `char`?
+    fn is_word_place(&self, place: Place) -> bool {
+        match place {
+            Place::Local(o) => self.word_slots.contains(&o),
+            Place::Global(a) => self.word_globals.contains(&a),
+            _ => false,
+        }
+    }
+
     /// Re-type any word-accessed variable in `e` back to `int`: a byte load of an
     /// `int`'s low byte (the rhs of a `char op= int`) char-marks the slot, but
     /// the slot's word stores prove it's an `int`. Undoes that local mis-marking.
@@ -762,7 +777,7 @@ impl Ctx {
                 self.mark_unsigned(a);
                 self.mark_unsigned(b);
             }
-            Expr::Not(a) | Expr::Deref(a) => self.mark_unsigned(a),
+            Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => self.mark_unsigned(a),
             Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..) => {}
         }
     }
@@ -1245,6 +1260,14 @@ impl Ctx {
                     flush_call(&mut acc, out);
                     acc = match src {
                         Place::Imm(v) => Some(Expr::Const(v)),
+                        // A byte load of a word-accessed slot reads the low byte of
+                        // an `int` — a narrowing `(char)x`. Keep the variable `int`
+                        // (don't char-mark it) and record the cast, which is what
+                        // makes a `char` store re-emit the byte load (a plain
+                        // `c = x` would re-evaluate `x` at word width).
+                        other if self.is_word_place(other) => {
+                            self.operand(other).map(|e| Expr::Cast(Type::Char, Box::new(e)))
+                        }
                         other => self.char_operand(other),
                     };
                     if acc.is_none() {
@@ -1499,12 +1522,19 @@ impl Ctx {
                     if r == l && is_byte_reg_var(r) && Self::is_compound_op(op) =>
                 {
                     let rhs_expr = match rhs {
-                        // A simple value in `al` (`c op= b` / `c op= n`). A
+                        // A simple value in `al` — a variable (`c op= b`), a
+                        // constant, or a narrowed `int` (`c op= n`, `(char)n`). A
                         // *complex* `al` (e.g. `a*b` applied through a `dl` temp,
                         // `mov dl,bl; add dl,al; mov bl,dl`) isn't a direct compound
                         // on this register — decline rather than mis-attribute it.
                         Place::Byte(ByteReg::Al) => match acc.take() {
-                            Some(e @ (Expr::Var(_) | Expr::Const(_))) => Some(e),
+                            v @ Some(Expr::Var(_) | Expr::Const(_)) => v,
+                            // The compound's byte op narrows implicitly, so drop a
+                            // `(char)` the load attached — `c |= n`, not
+                            // `c |= (char)n`.
+                            Some(Expr::Cast(_, inner)) if matches!(*inner, Expr::Var(_)) => {
+                                Some(*inner)
+                            }
                             _ => None,
                         },
                         Place::Imm(v) => {

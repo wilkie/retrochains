@@ -158,7 +158,8 @@ Stmt   = Assign(LValue, Expr) | Compound(LValue, op, Expr) | Call(target, [Expr]
        | Return(Expr?) | Break | Continue | Switch(Expr, cases)
 Expr   = Const | Var | Global | Param | Binary(op, Expr, Expr) | Unary(op, Expr)
        | Deref(Expr) | AddrOf(LValue) | Index(Expr, Expr) | Field(Expr, name)
-       | Cast(Type, Expr) | CallExpr(target, [Expr])
+       | Cast(Type, Expr)  // a narrowing `(char)x` — see §6
+       | CallExpr(target, [Expr])
 LValue = Var | Global | Deref | Index | Field
 ```
 
@@ -324,7 +325,19 @@ near/far pointer (by model), `unsigned` variants, array, struct, `void`.
 Recovery is driven by the idioms, not guessed:
 
 - **Width** — byte ops (`LoadLocalByte`, `c6`) ⇒ `char`; word ops ⇒ `int`;
-  `dx:ax` pairing ⇒ `long`. *(Long is built for constants and pass-through: a
+  `dx:ax` pairing ⇒ `long`. **But a byte op isn't always a `char`:** a
+  `mov al,[x]` that reads the *low byte of an `int`* is a narrowing `(char)x`,
+  not a `char` load. A pre-pass records the **word-accessed** slots/globals (a
+  full-register or word-immediate load/store — byte accesses use `Byte(_)` /
+  `StoreImmByte`); a byte load of one of those is wrapped in `Cast(Char, …)`
+  rather than char-marking the variable. This keeps `int x` typed `int` (so a
+  mixed `int`/`char` frame isn't mis-modelled as a `char` array — which fed `bcc`
+  an `a[i]=a[j]` it crashed on), and it reproduces the byte load: a plain `c = x`
+  re-evaluates `x` at word width (`mov ax,[x]`), whereas the recovered
+  `c = (char)x` reads the low byte (`mov al,[x]`). The cast is **dropped** inside
+  an in-place `char` compound (`c |= n`, not `c |= (char)n`) — the byte op
+  already narrows — and likewise the `char op= int` rhs stays `int`.
+  *(Long is built for constants and pass-through: a
   `dx` tracker pairs the high word with the low — `xor dx,dx` / `mov dx,imm`
   (constant high) or `mov dx,[lo+2]` (a variable's high slot) — and the
   following `mov ax,…` forms the `long`: `(high<<16)|low` for a constant, or the

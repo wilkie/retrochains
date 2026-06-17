@@ -20,14 +20,19 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | multi-fn | in-place | var-shift | param-promo | char-compound | meaning |
-|-------------|--------:|---------:|---------:|----------:|------------:|--------------:|---------|
-| **MATCH**   |  1433 (34.7%) | 1580 (38.2%) | 1761 (42.6%) | 1817 (44.0%) | 1826 (44.2%) | **1846 (44.7%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | 2129 | 2000 | 1940 | 1940 | 1920 (46.5%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | 389 | 336 | 340 | 331 | 331 (8.0%) | recovered C recompiles to *different* bytes |
-| cerr        |     2 |   2 |  2 |  2 |  2 |  2 | recovered C didn't compile |
-| notext      |     5 |   5 |  5 |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 |  27 | 27 | 26 | 26 | 26 | recover/verify crashed |
+| bucket      | initial | … | param-promo | char-compound | narrowing-cast | meaning |
+|-------------|--------:|---|------------:|--------------:|---------------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 1826 (44.2%) | 1846 (44.7%) | **1862 (45.1%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1940 | 1920 | 1920 (46.5%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 331 | 331 | 323 (7.8%) | recovered C recompiles to *different* bytes |
+| cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
+| notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
+| PANIC       |    27 | … | 26 | 26 | 19 | recover/verify crashed |
+
+(Intermediate columns multi-fn/in-place/var-shift elided; see git history. The
+narrowing-cast step is a triple win: +16 match, −8 mismatch, **−7 panic** — the
+panics were mixed `int`/`char` frames mis-modelled as `char` arrays feeding `bcc`
+an `a[i]=a[j]` it crashed on; correct `int` typing dissolves them.)
 
 (The +4 mismatch at the var-shift step is cast/bitfield-adjacent: folding the
 shift exposes a missing narrowing — `(char)(v>>4)` drops the cast, a signed
@@ -126,8 +131,12 @@ clears most of them.
    does, *locally* in the compound arm (a global pass exposed unrelated cast
    narrowings). A complex `al` rhs (`c += a*b`, applied through a `dl` temp)
    declines rather than mis-attribute the temp.
-6. **Panic → sound-incomplete** (26), **shared globals across functions**, then
-   casts/bitfields/narrowing (the var-shift + char-narrow mismatch tail),
-   arrays/struct/pointer-deref. The `int→char` cast/assign (`char c = (char)x`)
-   is now the most common *incomplete* near this cluster — a cast/narrowing
-   recovery would unlock it.
+6. ~~**`int→char` narrowing cast**~~ — **DONE** (MATCH 44.7% → 45.1%, MISMATCH
+   331 → 323, PANIC 26 → 19; zero regressions). A byte load of a word-accessed
+   slot is the low byte of an `int`, not a `char`: a word-slot pre-pass wraps it
+   in `Expr::Cast(Char, …)` instead of char-marking, so `c = (char)x` reproduces
+   the byte load (a plain `c = x` would word-load) and a mixed `int`/`char` frame
+   is no longer mis-modelled as a `char` array (the panic source). The cast is
+   dropped inside a `char` compound (`c |= n`).
+7. **Panic → sound-incomplete** (19), **shared globals across functions**, then
+   `int→long`/`char*char→int` widening, bitfields, arrays/struct/pointer-deref.
