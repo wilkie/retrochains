@@ -210,27 +210,37 @@ impl Names {
     }
 
     /// The local-variable declarations (parameters and globals excluded — those
-    /// are the signature and file scope respectively), each typed. Reconstructed
-    /// arrays come first (`int aN[len]`), then scalars — a slot that lands on an
-    /// array is an element, not a scalar, so it isn't declared again.
+    /// are the signature and file scope respectively), each typed.
+    ///
+    /// Order matters: BCC lays out locals in declaration order top-down from
+    /// `bp`, so the recompiled offsets only match if stack locals are declared
+    /// closest-to-`bp` (least-negative base) first. Register variables (no stack
+    /// base) lead; then arrays and scalars are interleaved by base. A slot that
+    /// lands on an array is an element, declared via the array, not a scalar.
     fn local_decls(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .arrays
-            .iter()
-            .enumerate()
-            .map(|(i, a)| format!("int a{}[{}]", i + 1, a.len))
-            .collect();
+        let mut out: Vec<String> = Vec::new();
+        // Register variables first — they don't occupy the stack frame.
         for (v, n) in &self.bindings {
-            // A slot that lands on an array is an element, declared via the array.
-            if let Var::Slot(off) = v
-                && self.array_index(*off).is_some()
-            {
-                continue;
-            }
-            if matches!(v, Var::Slot(_) | Var::Reg(_) | Var::ByteReg(_)) {
+            if matches!(v, Var::Reg(_) | Var::ByteReg(_)) {
                 out.push(self.decl(*v, n));
             }
         }
+        // Stack locals (arrays + scalars), ordered top-down by base offset.
+        let mut stack: Vec<(i16, String)> = self
+            .arrays
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (a.base, format!("int a{}[{}]", i + 1, a.len)))
+            .collect();
+        for (v, n) in &self.bindings {
+            if let Var::Slot(off) = v
+                && self.array_index(*off).is_none()
+            {
+                stack.push((*off, self.decl(*v, n)));
+            }
+        }
+        stack.sort_by_key(|&(base, _)| std::cmp::Reverse(base)); // closest to bp first
+        out.extend(stack.into_iter().map(|(_, d)| d));
         out
     }
 
@@ -600,6 +610,16 @@ mod tests {
         assert_roundtrips_stack("int f(int i) { int a[4]; a[0] = 1; return a[i]; }\n");
         assert_roundtrips_stack("void f(int i, int v) { int a[4]; a[i] = v; }\n");
         assert_roundtrips_stack("int f(int i) { int a[8]; return a[i]; }\n");
+    }
+
+    #[test]
+    fn mixed_frame_partitions_into_scalar_and_array() {
+        // A `lea` of the array base anchors the partition, so a scalar + an array
+        // recover as `int x; int a[M]` (in BCC's declaration-order top-down
+        // layout), not one merged array — and round-trip. Scalar above the array,
+        // scalar below it, both work.
+        assert_roundtrips_stack("int f(int i) { int x; int a[4]; x = 9; return x + a[i]; }\n");
+        assert_roundtrips_stack("int f(int i) { int a[4]; int x; a[i] = 1; x = 9; return x; }\n");
     }
 
     #[test]

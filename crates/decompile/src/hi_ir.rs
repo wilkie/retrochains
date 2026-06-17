@@ -1638,6 +1638,43 @@ fn detect_local_array(ctx: &Ctx) -> Vec<ArraySpec> {
     if slots.is_empty() {
         return Vec::new();
     }
+    // The determinate signal: a `lea` of a frame slot is an array base (its
+    // address is taken / it's variable-indexed). Partition the frame on those
+    // anchors — each lea-array runs from its base up to the next boundary (the
+    // next-higher accessed slot or lea base), and the rest stays scalar. This
+    // splits genuine mixed frames (`int x; int a[4]`) that the sole-array
+    // fallback below would otherwise merge into one array.
+    let mut lea_bases: Vec<i16> = ctx
+        .insns
+        .iter()
+        .filter_map(|i| match i.op {
+            LoOp::Lea { src: Place::Local(off), .. } if off < 0 && off % 2 == 0 && off >= -frame => {
+                Some(off)
+            }
+            _ => None,
+        })
+        .collect();
+    lea_bases.sort_unstable();
+    lea_bases.dedup();
+    if !lea_bases.is_empty() {
+        // Boundaries: every accessed slot and lea base, plus the frame top (0).
+        let mut bounds: Vec<i16> = slots.iter().chain(lea_bases.iter()).copied().collect();
+        bounds.push(0);
+        bounds.sort_unstable();
+        bounds.dedup();
+        let mut arrays: Vec<ArraySpec> = Vec::new();
+        for &base in &lea_bases {
+            let next = bounds.iter().copied().find(|&b| b > base).unwrap_or(0);
+            let len = u16::try_from((next - base) / 2).unwrap_or(0);
+            // A single-element "array" is an address-taken scalar, not an array.
+            if len >= 2 {
+                arrays.push(ArraySpec { base, len });
+            }
+        }
+        if !arrays.is_empty() {
+            return arrays;
+        }
+    }
     // Genuine top-packed scalars: offsets are exactly {-2,-4,…,-2k} and fill the
     // frame. Keep them as scalars.
     slots.sort_unstable_by(|a, b| b.cmp(a)); // descending: -2, -4, …
@@ -1645,7 +1682,7 @@ fn detect_local_array(ctx: &Ctx) -> Vec<ArraySpec> {
     if top_packed && 2 * i16::try_from(slots.len()).unwrap_or(0) == frame {
         return Vec::new();
     }
-    // The slots can't be the whole scalar layout — model the frame as one array.
+    // No array anchor and not a scalar layout — model the frame as one array.
     vec![ArraySpec { base: -frame, len: u16::try_from(frame / 2).unwrap_or(0) }]
 }
 
@@ -1694,6 +1731,24 @@ mod tests {
         // Two `int` locals are a tight top-packed layout (-2, -4, frame 4) — they
         // stay scalars, not a 2-element array.
         let f = recover_stack("int f() { int x; int y; x = 3; y = 4; return x + y; }\n");
+        assert!(f.complete && f.arrays.is_empty());
+    }
+
+    #[test]
+    fn a_lea_anchor_partitions_a_mixed_frame() {
+        // `int x; int a[4]` with `a[i]`: the `lea` of a's base (-10) anchors a
+        // 4-element array there; the scalar x at -2 stays out of it — not one
+        // merged a[5].
+        let f = recover_stack("int f(int i) { int x; int a[4]; x = 9; return x + a[i]; }\n");
+        assert!(f.complete);
+        assert_eq!(f.arrays, vec![ArraySpec { base: -10, len: 4 }]);
+    }
+
+    #[test]
+    fn an_address_taken_scalar_is_not_an_array() {
+        // `&x` is a `lea` too, but its one-element span isn't an array — `x` stays
+        // a scalar.
+        let f = recover_stack("int f() { int x; int *p; x = 3; p = &x; return *p; }\n");
         assert!(f.complete && f.arrays.is_empty());
     }
 

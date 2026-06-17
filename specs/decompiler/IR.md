@@ -420,9 +420,18 @@ Recovery is driven by the idioms, not guessed:
   `lea` proves the array even with *no* constant access (`int a[8]; return a[i]`
   recovers from the `lea` and frame alone), and it's the lever for the
   non-sole-array case. The emit spells `Deref(&a[0] + i)` as the array name
-  `a[i]` (or `*(a + i)`), not the literal `(&a[0])[i]`. Scoped to all-`int`
-  frames for now, since `char`/`long`/pointer slot widths make the layout
-  subtler.)*
+  `a[i]` (or `*(a + i)`), not the literal `(&a[0])[i]`. **Mixed frames are
+  partitioned on the `lea` anchors**: each lea base starts an array running up to
+  the next boundary (the next-higher accessed slot or lea base), the rest stays
+  scalar — so `int x; int a[4]` recovers as a scalar plus a 4-array, not one
+  merged `a[5]` (and round-trips, which the merge sometimes didn't). A
+  single-element span is an address-taken scalar (`&x`), not an array. The emit
+  then orders locals **closest-to-`bp` first**, because BCC lays them out in
+  declaration order top-down — only that order reproduces the offsets. A frame
+  with *no* lea anchor stays the sole-array fallback (genuinely ambiguous: a
+  constant-index-only `int x; int a[4]` is byte-identical to one `a[5]`). Scoped
+  to all-`int` frames for now, since `char`/`long`/pointer slot widths make the
+  layout subtler.)*
 
 Near globals are built (`hi_ir.rs`). A global is a `Var::Global(offset)` — and
 crucially the offset is *not* a placeholder like a call target: it's the real
