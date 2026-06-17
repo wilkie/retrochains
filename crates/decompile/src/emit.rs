@@ -1262,6 +1262,12 @@ mod tests {
         assert_roundtrips("int f(int *p){ p++; p++; return *p; }\n");
         assert_roundtrips("int f(int *p){ p--; return *p; }\n");
         assert_roundtrips("int f(char *p){ p++; return *p; }\n");
+        // `p += K` on an `int *` is `add si, K*2` (a byte offset); the recovered
+        // constant rescales to the element count `K`.
+        assert_roundtrips("int f(int *p){ p += 2; return *p; }\n");
+        assert_roundtrips("int f(int *p){ p += 3; return *p; }\n");
+        assert_roundtrips("int f(int *p){ p -= 2; return *p; }\n");
+        assert_roundtrips("int f(char *p){ p += 2; return *p; }\n");
     }
 
     #[test]

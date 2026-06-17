@@ -420,6 +420,18 @@ fn coalesce_inc_pairs(stmts: &mut Vec<Stmt>, pred: &impl Fn(&Var) -> bool) {
         }
         i += 1;
     }
+    // `p += K` on an `int *` is `add si, K*2` (the constant is a *byte* offset);
+    // rescale it to the element count. The coalesced `++` is `Const(1)` (odd) and
+    // is left alone — genuine byte offsets are even (stride 2).
+    for s in stmts.iter_mut() {
+        if let Stmt::Compound(LValue::Var(v), op, Expr::Const(k)) = s
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && pred(v)
+            && *k % 2 == 0
+        {
+            *k /= 2;
+        }
+    }
 }
 
 /// Recover BCC's promotion of a parameter into a register variable. When a
