@@ -152,8 +152,11 @@ pub enum Type {
 pub struct Function {
     /// The return type, inferred from whether any `return` carries a value.
     pub ret: Type,
-    /// The local variables the body touches, in first-appearance order. All `int`.
+    /// The local variables the body touches, in first-appearance order.
     pub vars: Vec<Var>,
+    /// The subset of `vars` accessed at byte width — these are `char` (the rest
+    /// are `int`). Width is inferred from the access, not guessed.
+    pub char_vars: Vec<Var>,
     /// The recovered statements.
     pub body: Vec<Stmt>,
     /// `false` if any op couldn't be modelled — the function is only partially
@@ -189,6 +192,7 @@ fn flush_call(acc: &mut Option<Expr>, out: &mut Vec<Stmt>) {
 struct Ctx {
     insns: Vec<LoInsn>,
     vars: Vec<Var>,
+    char_vars: Vec<Var>,
     complete: bool,
     returns_value: bool,
 }
@@ -199,6 +203,29 @@ impl Ctx {
         if !self.vars.contains(&var) {
             self.vars.push(var);
         }
+    }
+
+    /// Note a variable accessed at byte width — it's a `char`.
+    fn note_char(&mut self, var: Var) {
+        if !self.char_vars.contains(&var) {
+            self.char_vars.push(var);
+        }
+    }
+
+    /// A byte-width source operand: note the variable as `char` and return it.
+    fn char_operand(&mut self, place: Place) -> Option<Expr> {
+        let var = Self::var_of(place)?;
+        self.note(var);
+        self.note_char(var);
+        Some(Expr::Var(var))
+    }
+
+    /// A byte-width destination: note the variable as `char` and return it.
+    fn char_dest(&mut self, place: Place) -> Option<LValue> {
+        let var = Self::var_of(place)?;
+        self.note(var);
+        self.note_char(var);
+        Some(LValue::Var(var))
     }
 
     /// The variable a place names — a stack slot or a register variable — or
@@ -255,12 +282,15 @@ impl Ctx {
         let mut emitted_ret = false;
         for i in lo..hi {
             match self.insns[i].op.clone() {
-                // Frame setup/teardown carry no value.
+                // Frame setup/teardown carry no value, and `cbw` is the implicit
+                // `char`→`int` promotion — the accumulator already holds the
+                // value, and emitting the source recompiles to the same `cbw`.
                 LoOp::Enter { .. }
                 | LoOp::Leave
                 | LoOp::SaveReg { .. }
                 | LoOp::RestoreReg { .. }
-                | LoOp::Cleanup { .. } => {}
+                | LoOp::Cleanup { .. }
+                | LoOp::Promote { kind: crate::lo_ir::Promote::Cbw } => {}
 
                 LoOp::Jump { .. } => saw_exit_jump = true,
 
@@ -309,6 +339,16 @@ impl Ctx {
                 LoOp::Load { dst: Place::Reg(Reg::Ax), src } => {
                     flush_call(&mut acc, out);
                     acc = self.operand(src);
+                    if acc.is_none() {
+                        self.complete = false;
+                    }
+                }
+
+                // `mov al, …` loads a `char` into the accumulator (a following
+                // `cbw` promotes it to `int`, handled below as a no-op).
+                LoOp::Load { dst: Place::Byte(_), src } => {
+                    flush_call(&mut acc, out);
+                    acc = self.char_operand(src);
                     if acc.is_none() {
                         self.complete = false;
                     }
@@ -386,10 +426,27 @@ impl Ctx {
                     }
                 }
 
+                // `mov [dst], al` — store the accumulator to a `char`.
+                LoOp::Store { dst, src: Place::Byte(_) } => {
+                    match (self.char_dest(dst), acc.take()) {
+                        (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
+                        _ => self.complete = false,
+                    }
+                }
+
                 LoOp::Store { dst, src: Place::Imm(v) } => {
                     flush_call(&mut acc, out);
                     match self.dest(dst) {
                         Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(v))),
+                        None => self.complete = false,
+                    }
+                }
+
+                // `mov byte ptr [dst], imm` — a `char` immediate store.
+                LoOp::StoreImmByte { dst, imm } => {
+                    flush_call(&mut acc, out);
+                    match self.char_dest(dst) {
+                        Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(imm))),
                         None => self.complete = false,
                     }
                 }
@@ -573,11 +630,12 @@ impl Ctx {
 #[must_use]
 pub fn recover(code: &[u8]) -> Function {
     let insns: Vec<LoInsn> = lift(code);
-    let mut ctx = Ctx { insns, vars: Vec::new(), complete: true, returns_value: false };
+    let mut ctx =
+        Ctx { insns, vars: Vec::new(), char_vars: Vec::new(), complete: true, returns_value: false };
     let len = ctx.insns.len();
     let body = ctx.structure(0, len);
     let ret = if ctx.returns_value { Type::Int } else { Type::Void };
-    Function { ret, vars: ctx.vars, body, complete: ctx.complete }
+    Function { ret, vars: ctx.vars, char_vars: ctx.char_vars, body, complete: ctx.complete }
 }
 
 #[cfg(test)]
@@ -738,10 +796,20 @@ mod tests {
     }
 
     #[test]
-    fn a_byte_global_marks_the_function_incomplete() {
-        // `char` (byte-width) globals aren't modelled yet.
+    fn char_width_is_recovered_from_byte_access() {
+        // A byte-accessed global is a `char` — the `a0` load + `cbw` promotion.
         let f = recover_c("char cv; int f() { return cv; }\n");
-        assert!(!f.complete, "an unmodelled byte global leaves the function incomplete");
+        assert!(f.complete, "a char global is recovered");
+        assert!(f.char_vars.contains(&Var::Global(0)), "byte access marks it char");
+        assert_eq!(f.body, vec![Stmt::Return(Some(Expr::Var(Var::Global(0))))]);
+    }
+
+    #[test]
+    fn a_multiply_marks_the_function_incomplete() {
+        // `a * a` lowers to imul (dx:ax), which the int-accumulator fold doesn't
+        // model — so the function isn't recovered.
+        let f = recover_c("int f(int a) { return a * a; }\n");
+        assert!(!f.complete, "an unmodelled multiply leaves the function incomplete");
     }
 
     #[test]

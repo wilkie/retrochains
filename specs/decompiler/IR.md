@@ -203,7 +203,15 @@ near/far pointer (by model), `unsigned` variants, array, struct, `void`.
 Recovery is driven by the idioms, not guessed:
 
 - **Width** — byte ops (`LoadLocalByte`, `c6`) ⇒ `char`; word ops ⇒ `int`;
-  `Cwd` + `dx:ax` arithmetic ⇒ `long`.
+  `Cwd` + `dx:ax` arithmetic ⇒ `long`. *(Built: a `char` var is one accessed at
+  byte width — `8a`/`88`/`a0`/`a2`, `StoreImmByte`, the `80` byte group-1 compare
+  — recorded in `Function::char_vars` and declared `char` instead of `int`; `cbw`
+  is the implicit `char`→`int` promotion, folded as a no-op since emitting the
+  `char` source recompiles to it. Width must be right: it changes both the access
+  encoding and the storage size/offsets. `char` locals/globals BCC promotes to a
+  byte register variable — `dl` etc., the `char` analogue of `si`/`di` — aren't
+  modelled yet, so those bail. Closing the `char`-in-condition case added the `80
+  /r … imm8` byte group-1 and `c6 06` global byte-store idioms to the recognizer.)*
 - **Signedness** — `Cbw`/`Cwd`/`sar`/`idiv` ⇒ signed; zero-extend / `shr`
   / `div` ⇒ unsigned.
 - **Pointers** — `Lea` of a slot, or `PointerLoad`/`PointerStore` through

@@ -160,6 +160,10 @@ pub enum LoOp {
     Load { dst: Place, src: Place },
     /// `*dst ← src`.
     Store { dst: Place, src: Place },
+    /// `*dst ← imm` at **byte** width (`mov byte ptr [dst], imm`). A separate op
+    /// because a memory immediate store carries no register operand to reveal its
+    /// width, and byte width is what marks the destination a `char`.
+    StoreImmByte { dst: Place, imm: i32 },
     /// `dst ← lhs op rhs`. For `Cmp`/`Test`, `dst` is [`Place::Flags`].
     Bin { dst: Place, op: BinOp, lhs: Place, rhs: Place },
     /// `dst ← op operand` (`inc`/`dec`/`neg`/`not`).
@@ -314,7 +318,10 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             vec![LoOp::Store { dst: Local(disp8_at(bytes, 2)), src: Imm(i32::from(u16_at(bytes, 3))) }]
         }
         Idiom::StoreImmLocalByte => {
-            vec![LoOp::Store { dst: Local(disp8_at(bytes, 2)), src: Imm(i32::from(bytes[3])) }]
+            vec![LoOp::StoreImmByte { dst: Local(disp8_at(bytes, 2)), imm: i32::from(bytes[3]) }]
+        }
+        Idiom::StoreImmGlobalByte => {
+            vec![LoOp::StoreImmByte { dst: Global(u16_at(bytes, 2)), imm: i32::from(bytes[4]) }]
         }
         Idiom::LeaLocal => vec![LoOp::Lea { dst: R(reg_of(1)), src: Local(disp8_at(bytes, 2)) }],
 
@@ -351,6 +358,18 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let op = alu_op(bytes[0]);
             let dst = if op == BinOp::Cmp { Place::Flags } else { R(reg_of(1)) };
             vec![LoOp::Bin { dst, op, lhs: R(reg_of(1)), rhs: Global(u16_at(bytes, 2)) }]
+        }
+        Idiom::AluImmByte => {
+            // Byte group-1 with imm8, same operand shapes as `AluImm`.
+            let m = modrm(1);
+            let op = group1_op(m >> 3);
+            let (lhs, imm) = match m & 0xc7 {
+                0x46 => (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed())),
+                0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed())),
+                _ => (R(rm_of(1)), i32::from(bytes[2].cast_signed())),
+            };
+            let dst = if op == BinOp::Cmp { Place::Flags } else { lhs };
+            vec![LoOp::Bin { dst, op, lhs, rhs: Imm(imm) }]
         }
         Idiom::AluAxImm => {
             // The op lives in the same bit positions as the group-1 `reg` field.

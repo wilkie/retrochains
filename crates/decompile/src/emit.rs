@@ -18,6 +18,8 @@ use crate::lo_ir::Reg;
 /// slot, parameter, or register), so emitted references stay consistent.
 struct Names {
     bindings: Vec<(Var, String)>,
+    /// Variables accessed at byte width — declared `char` rather than `int`.
+    chars: Vec<Var>,
     /// The number of parameters to declare — the highest parameter slot used
     /// decides it, since intermediate parameters must be declared to push the
     /// later ones to the right offset even when they're unread.
@@ -42,7 +44,7 @@ impl Names {
     /// `v1, v2, …` in BCC's allocation order — register variables first (`si`
     /// before `di`), then stack slots closest-to-bp first — so recompiling a
     /// plain `int` reproduces the same storage assignment.
-    fn build(vars: &[Var]) -> Names {
+    fn build(vars: &[Var], char_vars: &[Var]) -> Names {
         let mut bindings = Vec::new();
 
         let mut param_count = 0;
@@ -74,31 +76,45 @@ impl Names {
             bindings.push((v, format!("v{}", i + 1)));
         }
 
-        Names { bindings, param_count, global_count }
+        Names { bindings, chars: char_vars.to_vec(), param_count, global_count }
     }
 
     fn of(&self, var: Var) -> &str {
         self.bindings.iter().find(|(v, _)| *v == var).map_or("v?", |(_, n)| n.as_str())
     }
 
-    /// The parameter list for the signature — `int p1, int p2` (or empty).
+    /// The C type for a variable — `char` if byte-accessed, else `int`.
+    fn ty(&self, var: Var) -> &'static str {
+        if self.chars.contains(&var) { "char" } else { "int" }
+    }
+
+    /// The parameter list for the signature — `int p1, char p2` (or empty).
     fn signature(&self) -> String {
-        (1..=self.param_count).map(|i| format!("int p{i}")).collect::<Vec<_>>().join(", ")
+        (1..=self.param_count)
+            .map(|i| {
+                let off = i16::try_from(i).unwrap_or(0) * 2 + 2; // [bp+4] is param 1
+                format!("{} p{i}", self.ty(Var::Param(off)))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The file-scope global declarations — `gv1, gv2, …` in offset order, so
     /// recompiling re-derives the same data-segment offsets.
-    fn global_decls(&self) -> impl Iterator<Item = String> {
-        (1..=self.global_count).map(|i| format!("gv{i}"))
+    fn global_decls(&self) -> impl Iterator<Item = String> + '_ {
+        (1..=self.global_count).map(|i| {
+            let off = u16::try_from(i - 1).unwrap_or(0) * 2;
+            format!("{} gv{i}", self.ty(Var::Global(off)))
+        })
     }
 
-    /// The names of the local variables to declare (parameters and globals
-    /// excluded — those are the signature and file scope respectively).
-    fn local_decls(&self) -> impl Iterator<Item = &str> {
+    /// The local-variable declarations (parameters and globals excluded — those
+    /// are the signature and file scope respectively), each typed.
+    fn local_decls(&self) -> impl Iterator<Item = String> + '_ {
         self.bindings
             .iter()
             .filter(|(v, _)| matches!(v, Var::Slot(_) | Var::Reg(_)))
-            .map(|(_, n)| n.as_str())
+            .map(|(v, n)| format!("{} {n}", self.ty(*v)))
     }
 }
 
@@ -122,7 +138,7 @@ pub fn to_c(f: &Function) -> Option<String> {
         Type::Int => "int",
         Type::Void => "void",
     };
-    let names = Names::build(&f.vars);
+    let names = Names::build(&f.vars, &f.char_vars);
 
     let mut s = String::new();
     // The callee of every recovered call is an opaque external (its identity
@@ -132,11 +148,11 @@ pub fn to_c(f: &Function) -> Option<String> {
     }
     // File-scope globals, in offset order, so they get the same offsets.
     for g in names.global_decls() {
-        let _ = writeln!(s, "int {g};");
+        let _ = writeln!(s, "{g};");
     }
     let _ = writeln!(s, "{ret} f({}) {{", names.signature());
     for decl in names.local_decls() {
-        let _ = writeln!(s, "  int {decl};");
+        let _ = writeln!(s, "  {decl};");
     }
 
     emit_block(&f.body, 1, true, &names, &mut s);
@@ -409,11 +425,24 @@ mod tests {
     }
 
     #[test]
+    fn chars_roundtrip() {
+        // char globals (read/write/RMW/condition), a stack char local, and a
+        // char parameter — byte loads/stores, the cbw promotion, and the byte
+        // group-1 compare.
+        assert_roundtrips("char cv; int f() { return cv; }\n");
+        assert_roundtrips("char cv; void f() { cv = 5; }\n");
+        assert_roundtrips("char cv; void f() { cv = cv + 1; }\n");
+        assert_roundtrips("char cv; int f() { if (cv > 0) { cv = 0; } return cv; }\n");
+        assert_roundtrips("int f() { char c; c = 3; return c; }\n");
+        assert_roundtrips("int f(char a) { return a; }\n");
+    }
+
+    #[test]
     fn incomplete_function_emits_nothing() {
-        // A `char` (byte) global isn't modelled yet — the recovery declines
-        // rather than emit a body referencing an undeclared variable.
+        // A multiply (imul → dx:ax) isn't modelled yet — the recovery declines
+        // rather than emit a wrong body.
         let opts = CompileOpts::default();
-        let code = recompile_text("char cv; int f() { return cv; }\n", &opts).expect("compiles");
+        let code = recompile_text("int f(int a) { return a * a; }\n", &opts).expect("compiles");
         assert!(decompile(&code).is_none(), "an incomplete recovery emits no C");
     }
 }

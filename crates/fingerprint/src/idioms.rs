@@ -120,6 +120,9 @@ pub enum Idiom {
     LeaLocal,
     /// `c6 46 N ii` — `mov [bp±disp], imm8`: store a `char` literal to a local.
     StoreImmLocalByte,
+    /// `c6 06 aa aa ii` — `mov byte ptr [mem], imm8`: store a `char` literal to
+    /// a global.
+    StoreImmGlobalByte,
     /// `98` — `cbw`: sign-extend al→ax (the `char`→`int` promotion).
     Cbw,
     /// `f7 /r` with mod=11 — group 3 (`imul/idiv/mul/div/neg/not`).
@@ -146,6 +149,10 @@ pub enum Idiom {
     StoreGlobalByte,
     /// `03/2b/0b/23/33/3b /r [mem]` — an ALU op against a global.
     AluGlobal,
+    /// `80 /r ... ii` — a group-1 ALU op at **byte** width with an `imm8`
+    /// (`cmp/add/… byte ptr [mem|reg], imm`). The byte counterpart of
+    /// [`AluImm`], emitted for `char` operands.
+    AluImmByte,
     /// `05/0d/15/1d/25/2d/35/3d ii ii` — an ALU op on `ax` with an `imm16`
     /// (`add/or/adc/sbb/and/sub/xor/cmp ax, imm`). The accumulator-specific
     /// short encoding BCC/TASM prefer over `81 /r` for `ax`.
@@ -231,6 +238,7 @@ impl Idiom {
             Idiom::AluImm => "alu r/m, imm8",
             Idiom::LeaLocal => "lea (address of local)",
             Idiom::StoreImmLocalByte => "store char imm to local (mov [bp±N], imm8)",
+            Idiom::StoreImmGlobalByte => "store char imm to global (mov [mem], imm8)",
             Idiom::Cbw => "cbw (sign-extend al→ax)",
             Idiom::Grp3 => "grp3 (imul/idiv/neg/not)",
             Idiom::Shift1 => "shift/rotate by 1",
@@ -244,6 +252,7 @@ impl Idiom {
             Idiom::LoadGlobalByte => "load global byte (mov al, [mem])",
             Idiom::StoreGlobalByte => "store global byte (mov [mem], al)",
             Idiom::AluGlobal => "alu reg, global",
+            Idiom::AluImmByte => "alu byte [mem|reg], imm8",
             Idiom::AluAxImm => "alu ax, imm16",
         }
     }
@@ -300,6 +309,7 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::StoreImmLocal, pat: &[L(0xc7), L(0x46), A, A, A] },
     Def { idiom: Idiom::StoreImmGlobal, pat: &[L(0xc7), L(0x06), A, A, A, A] },
     Def { idiom: Idiom::StoreImmLocalByte, pat: &[L(0xc6), L(0x46), A, A] },
+    Def { idiom: Idiom::StoreImmGlobalByte, pat: &[L(0xc6), L(0x06), A, A, A] },
     // bp-relative loads/stores (word and byte), and lea of a local.
     Def { idiom: Idiom::LoadLocal, pat: &[L(0x8b), BP_DISP8, A] },
     Def { idiom: Idiom::StoreLocal, pat: &[L(0x89), BP_DISP8, A] },
@@ -345,6 +355,10 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), BP_DISP8, A, A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), DISP16, A, A, A] }, // alu [disp16], imm8 (global)
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), REG, A] },
+    // byte group-1 with imm8 (local / global / register) — `char` operands.
+    Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), BP_DISP8, A, A] },
+    Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), DISP16, A, A, A] },
+    Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), REG, A] },
     // alu ax, imm16 — the accumulator short forms (05/0d/15/1d/25/2d/35/3d), all
     // `00xxx101`, distinguished by the `reg`-like bits from the 81/83 groups.
     Def { idiom: Idiom::AluAxImm, pat: &[M(0xc7, 0x05), A, A] },
