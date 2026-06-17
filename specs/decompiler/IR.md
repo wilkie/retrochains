@@ -231,10 +231,15 @@ case value `base+k` to the body at `table[k]`. (The indirect jump `2e ff a7
 disp16` is a `JumpTableJmp` recognizer idiom — `IndirectJump { disp }` — so the
 linear lift consumes the `disp16` cleanly instead of mis-decoding the table
 boundary; the structural range is trimmed to the last `ret` so the trailing
-table data isn't structured as code.) Scoped to the simple dense case: distinct,
-strictly-increasing entries, none the no-match block — a table with gaps or
-fall-through (repeated entries) declines, staying incomplete rather than
-mis-shaped.
+table data isn't structured as code.) A table entry equal to the no-match block is a **gap** (that
+index has no case — `case 5` after a missing `4`); consecutive equal entries are
+**fall-through** (case values sharing a body, rendered as empty lead cases:
+`case 1: case 2: body`). The bodies are laid out in value order, so the present
+entries must be non-decreasing — an out-of-value-order source switch lays them
+out non-monotonically and declines (sound, not mis-shaped). A sparse switch
+(`case 1,2,4`) BCC emits as a compare-chain, not a table, so it's recovered
+there; a `default:` block recovers as the post-switch code (equivalent when it
+returns).
 
 **Early returns / multi-exit are recovered.** Every `return <expr>` is `mov
 ax,val; jmp epilogue` — a jump to the shared epilogue (which begins at the

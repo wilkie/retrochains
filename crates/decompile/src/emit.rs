@@ -648,6 +648,18 @@ mod tests {
         assert_roundtrips_stack(
             "int f(int a) { int r; r = 0; switch (a) { case 1: r = 10; break; case 2: r = 20; break; case 3: r = 30; break; case 4: r = 40; break; } return r; }\n",
         );
+        // Fall-through (case values sharing a body → empty lead cases), a gap
+        // within the dense range (`case 5` after a missing 4 → a table entry to
+        // the no-match block), and a `default:` (recovered as post-switch code).
+        assert_roundtrips_stack(
+            "int f(int a) { switch (a) { case 1: case 2: return 5; case 3: return 6; case 4: return 7; } return 99; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; case 5: return 5; } return 99; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; default: return 9; } }\n",
+        );
     }
 
     #[test]
@@ -979,13 +991,13 @@ mod tests {
 
     #[test]
     fn incomplete_function_emits_nothing() {
-        // A jump-table switch with *fall-through* (two case values sharing a
-        // body, so the table has repeated entries) isn't structured yet — the
-        // recovery declines rather than emit a wrong body. (Distinct dense cases
-        // do recover.)
+        // A jump-table switch whose source cases are out of value order lays the
+        // bodies out non-monotonically, which the table reader declines — so the
+        // recovery emits nothing rather than a wrong body. (In-order dense cases,
+        // fall-through, and gaps all recover.)
         let opts = CompileOpts::default();
         let code = recompile_text(
-            "int f(int a) { switch (a) { case 1: case 2: return 5; case 3: return 6; case 4: return 7; } return 0; }\n",
+            "int f(int a) { switch (a) { case 4: return 4; case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n",
             &opts,
         )
         .expect("compiles");

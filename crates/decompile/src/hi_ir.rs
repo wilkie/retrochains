@@ -1706,27 +1706,33 @@ impl Ctx {
     }
 
     /// Read a jump table's `(N+1)` word entries and turn them into `(case value,
-    /// body index)` pairs plus the no-match block index. Scoped to the simple
-    /// dense case — distinct, strictly-increasing entries, none the no-match
-    /// block — so a table with gaps or fall-through (shared entries) returns
-    /// `None` (the recovery then declines, not mis-shapes).
+    /// body index)` pairs plus the no-match block index. An entry equal to the
+    /// no-match block is a **gap** (that index has no case); consecutive equal
+    /// entries are **fall-through** (case values sharing a body, which
+    /// [`build_switch_arms`] renders as empty lead cases). The case bodies are
+    /// laid out in value order, so the entries must be non-decreasing among the
+    /// present cases — otherwise (an unexpected layout) decline.
     fn jump_table_cases(&self, jt: &JumpTable) -> Option<(Vec<(i32, usize)>, usize)> {
         let count = usize::try_from(jt.n).ok()?.checked_add(1)?;
         if jt.table_disp.checked_add(2 * count)? > self.code.len() {
             return None;
         }
-        let mut entries = Vec::with_capacity(count);
+        let mut cases = Vec::with_capacity(count);
+        let mut prev_off: Option<usize> = None;
         for k in 0..count {
             let o = jt.table_disp + 2 * k;
-            entries.push(usize::from(self.code[o]) | (usize::from(self.code[o + 1]) << 8));
-        }
-        let increasing = entries.windows(2).all(|w| w[0] < w[1]);
-        if !increasing || entries.contains(&jt.default_off) {
-            return None;
-        }
-        let mut cases = Vec::with_capacity(count);
-        for (k, &off) in entries.iter().enumerate() {
+            let off = usize::from(self.code[o]) | (usize::from(self.code[o + 1]) << 8);
+            if off == jt.default_off {
+                continue; // a gap — this index falls to the no-match block
+            }
+            if prev_off.is_some_and(|p| off < p) {
+                return None; // bodies must be laid out in value order
+            }
+            prev_off = Some(off);
             cases.push((jt.base + i32::try_from(k).ok()?, self.idx_of(off)?));
+        }
+        if cases.is_empty() {
+            return None;
         }
         Some((cases, self.idx_of(jt.default_off)?))
     }
@@ -2461,13 +2467,27 @@ mod tests {
     }
 
     #[test]
-    fn a_fallthrough_jump_table_marks_the_function_incomplete() {
+    fn a_fallthrough_jump_table_recovers() {
         // Fall-through (two case values sharing a body) gives the table repeated
-        // entries — not the simple distinct dense case, so it stays incomplete.
+        // entries, rendered as empty lead cases (`case 1: case 2: body`).
         let f = recover_c(
             "int f(int a) { switch (a) { case 1: case 2: return 5; case 3: return 6; case 4: return 7; } return 0; }\n",
         );
-        assert!(!f.complete, "a fall-through jump table leaves the function incomplete");
+        assert!(f.complete, "a fall-through jump table is recovered");
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms) if arms.len() == 4)),
+            "four case labels (two of them sharing one body)",
+        );
+    }
+
+    #[test]
+    fn an_out_of_order_jump_table_marks_the_function_incomplete() {
+        // Source cases out of value order lay the bodies out non-monotonically;
+        // the table reader declines rather than mis-attribute them.
+        let f = recover_c(
+            "int f(int a) { switch (a) { case 4: return 4; case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n",
+        );
+        assert!(!f.complete, "an out-of-order jump table leaves the function incomplete");
     }
 
     #[test]
