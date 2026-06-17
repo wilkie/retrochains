@@ -21,7 +21,7 @@
 //! rather than present a half-recovery; the recompile-verify loop adjudicates
 //! the rest.
 
-use crate::lo_ir::{lift, BinOp, Cond, LoInsn, LoOp, Place, Reg, UnOp};
+use crate::lo_ir::{lift, BinOp, ByteReg, Cond, LoInsn, LoOp, Place, Reg, UnOp};
 
 /// A relational operator recovered from a `cmp` + conditional branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,8 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     /// `lhs rel rhs` — a comparison (the condition of an `if`/`while`).
     Rel(RelOp, Box<Expr>, Box<Expr>),
+    /// `!e` — logical negation, recovered from the `or r,r; jnz` truthiness test.
+    Not(Box<Expr>),
     /// A call with its argument list (source order). The callee is an opaque
     /// external: a `call` is a placeholder `e8 00 00` patched by a relocation,
     /// so the target's identity isn't in `_TEXT` and any declared extern
@@ -86,6 +88,7 @@ fn contains_call(e: &Expr) -> bool {
     match e {
         Expr::Call(_) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
+        Expr::Not(a) => contains_call(a),
         Expr::Const(_) | Expr::Var(_) => false,
     }
 }
@@ -109,6 +112,9 @@ pub enum Var {
     /// DGROUP-relative displacement the linker keeps, so reproducing it means
     /// declaring globals in the same order to get the same offsets.
     Global(u16),
+    /// A `char` register variable (`dl`, `bl`, …) — the byte analogue of a
+    /// [`Var::Reg`]. Always `char`.
+    ByteReg(ByteReg),
 }
 
 /// An assignable location.
@@ -118,9 +124,15 @@ pub enum LValue {
     Var(Var),
 }
 
-/// Is `r` one of the registers BCC uses for register variables?
+/// Is `r` one of the registers BCC uses for `int` register variables?
 fn is_reg_var(r: Reg) -> bool {
     matches!(r, Reg::Si | Reg::Di)
+}
+
+/// Is `r` a byte register BCC uses for a `char` register variable? `al`/`ah` are
+/// excluded — `ax` is the accumulator, not a variable.
+fn is_byte_reg_var(r: ByteReg) -> bool {
+    matches!(r, ByteReg::Cl | ByteReg::Dl | ByteReg::Bl | ByteReg::Ch | ByteReg::Dh | ByteReg::Bh)
 }
 
 /// A recovered statement.
@@ -198,10 +210,14 @@ struct Ctx {
 }
 
 impl Ctx {
-    /// Record a variable the first time it's seen (preserving order).
+    /// Record a variable the first time it's seen (preserving order). A byte
+    /// register variable is always `char`.
     fn note(&mut self, var: Var) {
         if !self.vars.contains(&var) {
             self.vars.push(var);
+        }
+        if matches!(var, Var::ByteReg(_)) {
+            self.note_char(var);
         }
     }
 
@@ -239,6 +255,9 @@ impl Ctx {
             // An even offset is a word (`int`) global; odd offsets (`char`
             // globals, struct/array interiors) aren't modelled yet.
             Place::Global(a) if a % 2 == 0 => Some(Var::Global(a)),
+            // A byte register (other than the `al`/`ah` accumulator) is a `char`
+            // register variable.
+            Place::Byte(r) if is_byte_reg_var(r) => Some(Var::ByteReg(r)),
             _ => None,
         }
     }
@@ -345,12 +364,33 @@ impl Ctx {
                 }
 
                 // `mov al, …` loads a `char` into the accumulator (a following
-                // `cbw` promotes it to `int`, handled below as a no-op).
-                LoOp::Load { dst: Place::Byte(_), src } => {
+                // `cbw` promotes it to `int`, handled above as a no-op).
+                LoOp::Load { dst: Place::Byte(ByteReg::Al), src } => {
                     flush_call(&mut acc, out);
                     acc = self.char_operand(src);
                     if acc.is_none() {
                         self.complete = false;
+                    }
+                }
+
+                // `mov dl, …` — assign to a `char` register variable. The source
+                // is the accumulator (`mov dl,al`), an immediate, or another
+                // `char` variable.
+                LoOp::Load { dst: Place::Byte(r), src } if is_byte_reg_var(r) => {
+                    let val = match src {
+                        Place::Byte(ByteReg::Al) => acc.take(),
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.char_operand(other)
+                        }
+                    };
+                    match (self.char_dest(Place::Byte(r)), val) {
+                        (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
+                        _ => self.complete = false,
                     }
                 }
 
@@ -470,23 +510,16 @@ impl Ctx {
     /// Recover the condition of an `if`/`while` from the test at `cmp_idx` and
     /// the branch at `branch_idx`. `negate` inverts it (for a skip branch).
     ///
-    /// Two test shapes feed a branch: an explicit `cmp lhs, rhs`, and the
-    /// register-variable truthiness idiom `or si,si` (which sets flags without
-    /// changing `si`) — the latter is a comparison of the variable against 0.
+    /// Two test shapes feed a branch and must be told apart because they emit
+    /// differently: an explicit `cmp lhs, rhs` recovers as a relational
+    /// expression, while the register-variable truthiness idiom `or r,r` (which
+    /// sets flags without changing `r`) recovers as the *bare* variable (`if (x)`
+    /// / `if (!x)`). Modelling the latter as `x != 0` would recompile to a `cmp`,
+    /// not the original `or`.
     fn condition(&mut self, cmp_idx: usize, branch_idx: usize, negate: bool) -> Expr {
         let bad = |s: &mut Self| {
             s.complete = false;
             Expr::Const(0)
-        };
-        let (lhs, rhs) = match self.insns[cmp_idx].op.clone() {
-            LoOp::Bin { dst: Place::Flags, op: BinOp::Cmp, lhs, rhs } => (lhs, rhs),
-            // `or si,si` — test a register variable against 0.
-            LoOp::Bin { dst: Place::Reg(r), op: BinOp::Or, lhs: Place::Reg(a), rhs: Place::Reg(b) }
-                if is_reg_var(r) && a == r && b == r =>
-            {
-                (Place::Reg(r), Place::Imm(0))
-            }
-            _ => return bad(self),
         };
         let LoOp::Branch { cond, .. } = self.insns[branch_idx].op else {
             return bad(self);
@@ -497,6 +530,35 @@ impl Ctx {
         if negate {
             rel = rel.negate();
         }
+
+        // A register-variable `or r,r` truthiness test (`int` si/di or `char` dl).
+        let or_test = match self.insns[cmp_idx].op.clone() {
+            LoOp::Bin { dst: Place::Reg(r), op: BinOp::Or, lhs: Place::Reg(a), rhs: Place::Reg(b) }
+                if is_reg_var(r) && a == r && b == r =>
+            {
+                Some(Place::Reg(r))
+            }
+            LoOp::Bin { dst: Place::Byte(r), op: BinOp::Or, lhs: Place::Byte(a), rhs: Place::Byte(b) }
+                if is_byte_reg_var(r) && a == r && b == r =>
+            {
+                Some(Place::Byte(r))
+            }
+            _ => None,
+        };
+        if let Some(place) = or_test {
+            let Some(e) = self.operand(place) else { return bad(self) };
+            return match rel {
+                RelOp::Ne => e,                       // if (x)
+                RelOp::Eq => Expr::Not(Box::new(e)),  // if (!x)
+                _ => bad(self),
+            };
+        }
+
+        // Otherwise an explicit comparison.
+        let LoOp::Bin { dst: Place::Flags, op: BinOp::Cmp, lhs, rhs } = self.insns[cmp_idx].op.clone()
+        else {
+            return bad(self);
+        };
         match (self.operand(lhs), self.operand(rhs)) {
             (Some(l), Some(r)) => Expr::Rel(rel, Box::new(l), Box::new(r)),
             _ => bad(self),
@@ -702,17 +764,15 @@ mod tests {
     #[test]
     fn register_variable_truthiness_test_recovers() {
         // `if (x)` on a register variable is `or si,si; jz` — the truthiness
-        // idiom must recover as `x != 0`.
+        // idiom recovers as the *bare* variable (modelling it as `x != 0` would
+        // recompile to a `cmp`, not the original `or`).
         let f = recover_c("int f() { int x; x = 0; if (x) { x = 1; } return x; }\n");
         assert!(f.complete, "register-variable if is recovered");
-        let Stmt::If(Expr::Rel(op, lhs, rhs), ..) =
-            f.body.iter().find(|s| matches!(s, Stmt::If(..))).expect("an if")
+        let Stmt::If(cond, ..) = f.body.iter().find(|s| matches!(s, Stmt::If(..))).expect("an if")
         else {
-            panic!("expected a relational condition");
+            unreachable!()
         };
-        assert_eq!(*op, RelOp::Ne, "or si,si; jz → x != 0");
-        assert!(matches!(**lhs, Expr::Var(Var::Reg(Reg::Si))));
-        assert_eq!(**rhs, Expr::Const(0));
+        assert_eq!(*cond, Expr::Var(Var::Reg(Reg::Si)), "or si,si; jz → bare `x`");
     }
 
     #[test]
@@ -802,6 +862,16 @@ mod tests {
         assert!(f.complete, "a char global is recovered");
         assert!(f.char_vars.contains(&Var::Global(0)), "byte access marks it char");
         assert_eq!(f.body, vec![Stmt::Return(Some(Expr::Var(Var::Global(0))))]);
+    }
+
+    #[test]
+    fn char_register_variable_is_recovered() {
+        // BCC promotes `c` to the `dl` byte register variable; it recovers as a
+        // char variable (always char — a byte register holds a char).
+        let f = recover_c("int f() { char c; c = 0; if (c == 0) { c = 1; } return c; }\n");
+        assert!(f.complete, "a char register variable is recovered");
+        assert!(matches!(f.vars[0], Var::ByteReg(ByteReg::Dl)), "c lives in dl");
+        assert!(f.char_vars.contains(&Var::ByteReg(ByteReg::Dl)), "a byte reg var is char");
     }
 
     #[test]

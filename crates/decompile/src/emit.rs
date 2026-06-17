@@ -61,18 +61,19 @@ impl Names {
                     global_count = global_count.max(idx);
                     bindings.push((v, format!("gv{idx}")));
                 }
-                Var::Slot(_) | Var::Reg(_) => {}
+                Var::Slot(_) | Var::Reg(_) | Var::ByteReg(_) => {}
             }
         }
 
         let mut regs: Vec<Var> = vars.iter().filter(|v| matches!(v, Var::Reg(_))).copied().collect();
         regs.sort_by_key(|v| usize::from(matches!(v, Var::Reg(Reg::Di))));
+        let byteregs: Vec<Var> = vars.iter().filter(|v| matches!(v, Var::ByteReg(_))).copied().collect();
         let mut slots: Vec<Var> = vars.iter().filter(|v| matches!(v, Var::Slot(_))).copied().collect();
         slots.sort_by(|a, b| match (a, b) {
             (Var::Slot(x), Var::Slot(y)) => y.cmp(x), // descending disp (closest to bp first)
             _ => std::cmp::Ordering::Equal,
         });
-        for (i, v) in regs.into_iter().chain(slots).enumerate() {
+        for (i, v) in regs.into_iter().chain(byteregs).chain(slots).enumerate() {
             bindings.push((v, format!("v{}", i + 1)));
         }
 
@@ -113,7 +114,7 @@ impl Names {
     fn local_decls(&self) -> impl Iterator<Item = String> + '_ {
         self.bindings
             .iter()
-            .filter(|(v, _)| matches!(v, Var::Slot(_) | Var::Reg(_)))
+            .filter(|(v, _)| matches!(v, Var::Slot(_) | Var::Reg(_) | Var::ByteReg(_)))
             .map(|(v, n)| format!("{} {n}", self.ty(*v)))
     }
 }
@@ -174,6 +175,7 @@ fn expr_has_call(e: &Expr) -> bool {
     match e {
         Expr::Call(_) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
+        Expr::Not(a) => expr_has_call(a),
         Expr::Const(_) | Expr::Var(_) => false,
     }
 }
@@ -250,6 +252,7 @@ fn expr_str(e: &Expr, names: &Names) -> String {
         Expr::Rel(op, l, r) => {
             format!("({} {} {})", expr_str(l, names), relop_token(*op), expr_str(r, names))
         }
+        Expr::Not(e) => format!("!{}", expr_str(e, names)),
         Expr::Call(args) => {
             let list = args.iter().map(|a| expr_str(a, names)).collect::<Vec<_>>().join(", ");
             format!("g0({list})")
@@ -435,6 +438,17 @@ mod tests {
         assert_roundtrips("char cv; int f() { if (cv > 0) { cv = 0; } return cv; }\n");
         assert_roundtrips("int f() { char c; c = 3; return c; }\n");
         assert_roundtrips("int f(char a) { return a; }\n");
+    }
+
+    #[test]
+    fn byte_register_variables_roundtrip() {
+        // BCC promotes a used char local to a byte register variable (dl). The
+        // data-flow (mov dl,imm / mov al,dl), the byte compare (cmp dl,imm), and
+        // the byte truthiness test (or dl,dl) all recover and recompile.
+        assert_roundtrips("int f() { char c; c = 0; if (c == 0) { c = 1; } return c; }\n");
+        assert_roundtrips("int f() { char c; c = 0; if (c) { c = 1; } return c; }\n");
+        assert_roundtrips("int f() { char c; c = 5; if (c > 3) { c = 0; } return c; }\n");
+        assert_roundtrips("int f() { char c; c = 1; if (c == 1) { c = 2; } else { c = 3; } return c; }\n");
     }
 
     #[test]

@@ -254,6 +254,18 @@ fn alu_op(opcode: u8) -> BinOp {
     }
 }
 
+/// The `BinOp` for the byte `r8, r/m8` ALU opcodes `02/0a/22/2a/32/3a`.
+fn byte_alu_op(opcode: u8) -> BinOp {
+    match opcode {
+        0x02 => BinOp::Add,
+        0x0a => BinOp::Or,
+        0x22 => BinOp::And,
+        0x2a => BinOp::Sub,
+        0x32 => BinOp::Xor,
+        _ => BinOp::Cmp, // 0x3a
+    }
+}
+
 /// The group-1 `BinOp` from a ModR/M `reg` field (opcode `0x83`).
 fn group1_op(reg: u8) -> BinOp {
     [
@@ -279,6 +291,7 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
     let reg_of = |i: usize| Reg::from3(modrm(i) >> 3);
     let rm_of = |i: usize| Reg::from3(modrm(i));
     let byte_reg_of = |i: usize| ByteReg::from3(modrm(i) >> 3);
+    let byte_rm_of = |i: usize| ByteReg::from3(modrm(i));
     // The in-slice target of a relative jump: the byte after the instruction,
     // plus the signed displacement.
     let rel8_target = |disp: i8| (off + bytes.len()).wrapping_add_signed(isize::from(disp));
@@ -360,16 +373,30 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             vec![LoOp::Bin { dst, op, lhs: R(reg_of(1)), rhs: Global(u16_at(bytes, 2)) }]
         }
         Idiom::AluImmByte => {
-            // Byte group-1 with imm8, same operand shapes as `AluImm`.
+            // Byte group-1 with imm8, same operand shapes as `AluImm` — but the
+            // register form is a *byte* register (a `char`).
             let m = modrm(1);
             let op = group1_op(m >> 3);
             let (lhs, imm) = match m & 0xc7 {
                 0x46 => (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed())),
                 0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed())),
-                _ => (R(rm_of(1)), i32::from(bytes[2].cast_signed())),
+                _ => (Byte(byte_rm_of(1)), i32::from(bytes[2].cast_signed())),
             };
             let dst = if op == BinOp::Cmp { Place::Flags } else { lhs };
             vec![LoOp::Bin { dst, op, lhs, rhs: Imm(imm) }]
+        }
+        Idiom::LoadImmByteReg => {
+            vec![LoOp::Load { dst: Byte(ByteReg::from3(bytes[0])), src: Imm(i32::from(bytes[1])) }]
+        }
+        // `8a /r` = `mov r8, r/m8` (dst is reg); `88 /r` = `mov r/m8, r8` (dst is rm).
+        Idiom::MovByteReg if bytes[0] == 0x8a => {
+            vec![LoOp::Load { dst: Byte(byte_reg_of(1)), src: Byte(byte_rm_of(1)) }]
+        }
+        Idiom::MovByteReg => vec![LoOp::Load { dst: Byte(byte_rm_of(1)), src: Byte(byte_reg_of(1)) }],
+        Idiom::AluByteReg => {
+            let op = byte_alu_op(bytes[0]);
+            let dst = if op == BinOp::Cmp { Place::Flags } else { Byte(byte_reg_of(1)) };
+            vec![LoOp::Bin { dst, op, lhs: Byte(byte_reg_of(1)), rhs: Byte(byte_rm_of(1)) }]
         }
         Idiom::AluAxImm => {
             // The op lives in the same bit positions as the group-1 `reg` field.

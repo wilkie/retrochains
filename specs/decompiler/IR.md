@@ -208,10 +208,17 @@ Recovery is driven by the idioms, not guessed:
   — recorded in `Function::char_vars` and declared `char` instead of `int`; `cbw`
   is the implicit `char`→`int` promotion, folded as a no-op since emitting the
   `char` source recompiles to it. Width must be right: it changes both the access
-  encoding and the storage size/offsets. `char` locals/globals BCC promotes to a
-  byte register variable — `dl` etc., the `char` analogue of `si`/`di` — aren't
-  modelled yet, so those bail. Closing the `char`-in-condition case added the `80
-  /r … imm8` byte group-1 and `c6 06` global byte-store idioms to the recognizer.)*
+  encoding and the storage size/offsets. A `char` local BCC promotes to a byte
+  register variable — `dl` etc., the `char` analogue of `si`/`di` — is recovered
+  too: `Var::ByteReg`, always `char`, with the byte data-flow (`mov dl,imm` /
+  `mov al,dl`), the byte compare, and the `or dl,dl` truthiness test. That test
+  exposed a subtlety: `if (x)` (an `or r,r`) and `if (x != 0)` (a `cmp`) recover
+  to the same shape but emit differently, so a register-variable truthiness test
+  recovers as the **bare** variable (`if (x)` / `if (!x)` via `Expr::Not`), not
+  `x != 0` — `!= 0` would recompile to a `cmp`, not the original `or`. Recognizer
+  additions across the `char` work: `80 /r … imm8` byte group-1, `c6 06` global
+  byte-store, and the byte register idioms `b0+r`, `8a/88` mod=11, `02/0a/…`
+  mod=11.)*
 - **Signedness** — `Cbw`/`Cwd`/`sar`/`idiv` ⇒ signed; zero-extend / `shr`
   / `div` ⇒ unsigned.
 - **Pointers** — `Lea` of a slot, or `PointerLoad`/`PointerStore` through

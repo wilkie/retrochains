@@ -153,6 +153,15 @@ pub enum Idiom {
     /// (`cmp/add/… byte ptr [mem|reg], imm`). The byte counterpart of
     /// [`AluImm`], emitted for `char` operands.
     AluImmByte,
+    /// `b0+r ii` — `mov r8, imm8`: load a byte literal into a byte register
+    /// (often a `char` register variable like `dl`).
+    LoadImmByteReg,
+    /// `8a /r` or `88 /r` with mod=11 — `mov r8, r8` (a byte register copy,
+    /// e.g. `mov al, dl` reading a `char` register variable into the accumulator).
+    MovByteReg,
+    /// `02/0a/22/2a/32/3a /r` with mod=11 — a byte ALU reg-reg op
+    /// (`add/or/and/sub/xor/cmp r8, r8`); `or dl,dl` is the `char` truthiness test.
+    AluByteReg,
     /// `05/0d/15/1d/25/2d/35/3d ii ii` — an ALU op on `ax` with an `imm16`
     /// (`add/or/adc/sbb/and/sub/xor/cmp ax, imm`). The accumulator-specific
     /// short encoding BCC/TASM prefer over `81 /r` for `ax`.
@@ -253,6 +262,9 @@ impl Idiom {
             Idiom::StoreGlobalByte => "store global byte (mov [mem], al)",
             Idiom::AluGlobal => "alu reg, global",
             Idiom::AluImmByte => "alu byte [mem|reg], imm8",
+            Idiom::LoadImmByteReg => "load imm into byte reg (mov r8, imm8)",
+            Idiom::MovByteReg => "byte reg copy (mov r8, r8)",
+            Idiom::AluByteReg => "alu byte reg, reg",
             Idiom::AluAxImm => "alu ax, imm16",
         }
     }
@@ -329,6 +341,16 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::StoreGlobalByte, pat: &[L(0xa2), A, A] },
     Def { idiom: Idiom::LoadGlobal, pat: &[L(0x8b), DISP16, A, A] },
     Def { idiom: Idiom::StoreGlobal, pat: &[L(0x89), DISP16, A, A] },
+    // byte reg-reg mov (mov r8,r8, mod=11) — before nothing else uses 8a/88 REG.
+    Def { idiom: Idiom::MovByteReg, pat: &[L(0x8a), REG] },
+    Def { idiom: Idiom::MovByteReg, pat: &[L(0x88), REG] },
+    // byte ALU reg-reg (the r8,rm8 forms): add/or/and/sub/xor/cmp.
+    Def { idiom: Idiom::AluByteReg, pat: &[L(0x02), REG] },
+    Def { idiom: Idiom::AluByteReg, pat: &[L(0x0a), REG] },
+    Def { idiom: Idiom::AluByteReg, pat: &[L(0x22), REG] },
+    Def { idiom: Idiom::AluByteReg, pat: &[L(0x2a), REG] },
+    Def { idiom: Idiom::AluByteReg, pat: &[L(0x32), REG] },
+    Def { idiom: Idiom::AluByteReg, pat: &[L(0x3a), REG] },
     // reg-to-reg mov, and ALU reg,reg / reg,local (add/sub/or/and/xor/cmp).
     Def { idiom: Idiom::MovReg, pat: &[L(0x8b), REG] },
     Def { idiom: Idiom::MovReg, pat: &[L(0x89), REG] },
@@ -368,6 +390,7 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::NearCall, pat: &[L(0xe8), A, A] },
     Def { idiom: Idiom::LoadImmAx, pat: &[L(0xb8), A, A] }, // ax-specific; before LoadImmReg
     Def { idiom: Idiom::LoadImmReg, pat: &[M(0xf8, 0xb8), A, A] },
+    Def { idiom: Idiom::LoadImmByteReg, pat: &[M(0xf8, 0xb0), A] }, // mov r8, imm8 (b0-b7)
     Def { idiom: Idiom::ShortJump, pat: &[L(0xeb), A] },
     Def { idiom: Idiom::Jcc, pat: &[M(0xf0, 0x70), A] }, // 70-7f conditional jumps
     Def { idiom: Idiom::IncDecReg, pat: &[M(0xf0, 0x40)] }, // 40-4f; after StackReserve2
