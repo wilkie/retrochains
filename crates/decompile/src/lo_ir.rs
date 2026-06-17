@@ -411,6 +411,8 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let (lhs, imm) = match m & 0xc7 {
                 0x46 => (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed())),
                 0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed())),
+                // `[si]`/`[di]` deref (mod=00, rm=100/101) — `cmp byte [si],imm`.
+                0x04 | 0x05 => (Deref(deref_base(m)), i32::from(bytes[2].cast_signed())),
                 _ => (Byte(byte_rm_of(1)), i32::from(bytes[2].cast_signed())),
             };
             if op == BinOp::Cmp {
@@ -471,6 +473,8 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let (lhs, imm) = match m & 0xc7 {
                 0x46 => (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed())),
                 0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed())),
+                // `[si]` / `[di]` deref (mod=00, rm=100/101) — `cmp [si],imm`.
+                0x04 | 0x05 => (Deref(deref_base(m)), i32::from(bytes[2].cast_signed())),
                 _ => (R(rm_of(1)), i32::from(bytes[2].cast_signed())),
             };
             let dst = if op == BinOp::Cmp { Place::Flags } else { lhs };

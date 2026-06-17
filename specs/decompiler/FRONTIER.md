@@ -20,14 +20,21 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | regvar-ptr | regvar-ptr+K | addr-of-global | meaning |
-|-------------|--------:|---|-----------:|-------------:|---------------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 2074 (50.2%) | 2086 (50.5%) | **2103 (50.9%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1746 | 1722 | 1722 (41.7%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 273 | 281 | 264 (6.4%) | recovered C recompiles to *different* bytes |
-| cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
+| bucket      | initial | … | regvar-ptr | addr-of-global | ptr-arith+deref | meaning |
+|-------------|--------:|---|-----------:|---------------:|----------------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 2074 (50.2%) | 2103 (50.9%) | **2130 (51.5%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1746 | 1722 (41.7%) | 1710 (41.3%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 273 | 264 (6.4%) | 275 (6.6%) | recovered C recompiles to *different* bytes |
+| cerr        |     2 | … |  2 |  2 |  7 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 | … | 26 | 30 | 30 | recover/verify crashed |
+| PANIC       |    27 | … | 26 | 30 |  9 | recover/verify crashed |
+
+(The pointer-arithmetic + deref step: array-decay-to-pointer recovery dissolved
+most of the panics (30→9) by giving `bcc` a valid array name instead of a stray
+`&v?`; int-pointer `p++`/`p += K` coalescing and `*p++` (`PostIncDeref`) and
+deref-in-comparison (`cmp [si],n` / `cmp byte [si],n`, both previously
+mis-decoded as raw `Asm`) added the +27 match. The cerr creep is new long-fold
+fixtures from the gap loop, not a regression here.)
 
 (`&global` was a clean conversion: +17 match **and −17 mismatch**, zero new —
 every `&g`-recovered-as-`0` mismatch fixed.)

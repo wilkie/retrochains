@@ -1269,6 +1269,18 @@ mod tests {
     }
 
     #[test]
+    fn deref_in_comparison_recovers() {
+        // `*p` compared directly in a condition is `cmp [si],n` (word) or
+        // `cmp byte [si],n` (char) — mod=00, rm=si/di. Previously mis-decoded as
+        // raw `Asm`; now the deref recovers as `*p <rel> n`. The byte form also
+        // marks `p` a `char *`.
+        assert_roundtrips("int f(int *p){ return *p == 0; }\n");
+        assert_roundtrips("int f(int *p){ if (*p > 0) return 1; return 0; }\n");
+        assert_roundtrips("int f(char *p){ return *p == 65; }\n");
+        assert_roundtrips("int f(char *p){ if (*p > 0) return 1; return 0; }\n");
+    }
+
+    #[test]
     fn int_pointer_increment_coalesces() {
         // An `int *` `p++` is `inc si; inc si` (stride 2). One recovered `p++`
         // recompiles back to the two incs, so the two `Compound`s the fold

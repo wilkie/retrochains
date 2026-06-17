@@ -454,10 +454,18 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), BP_DISP8, A, A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), DISP16, A, A, A] }, // alu [disp16], imm8 (global)
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), REG, A] },
+    // `alu [si]/[di], imm8` (mod=00, rm=si 0x04 / di 0x05) — e.g. `cmp [si],0`
+    // for `*p == 0` in a condition.
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x04), A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x05), A] },
     // byte group-1 with imm8 (local / global / register) — `char` operands.
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), BP_DISP8, A, A] },
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), DISP16, A, A, A] },
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), REG, A] },
+    // `cmp byte [si]/[di], imm8` (mod=00, rm=si 0x04 / di 0x05) — `*cp <rel> n`
+    // for a `char *` register-variable dereferenced in a condition.
+    Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), M(0xc7, 0x04), A] },
+    Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), M(0xc7, 0x05), A] },
     // alu ax, imm16 — the accumulator short forms (05/0d/15/1d/25/2d/35/3d), all
     // `00xxx101`, distinguished by the `reg`-like bits from the 81/83 groups.
     Def { idiom: Idiom::AluAxImm, pat: &[M(0xc7, 0x05), A, A] },

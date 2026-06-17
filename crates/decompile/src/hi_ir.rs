@@ -938,8 +938,15 @@ impl Ctx {
 
     /// Mark the variables directly compared at byte width as `char`.
     fn mark_char(&mut self, expr: &Expr) {
-        if let Expr::Var(v) = expr {
-            self.note_char(*v);
+        match expr {
+            Expr::Var(v) => self.note_char(*v),
+            // A byte comparison on `*p` makes `p` a `char *`.
+            Expr::Deref(inner) => {
+                if let Expr::Var(v) = inner.as_ref() {
+                    self.note_char_ptr(*v);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2289,6 +2296,16 @@ impl Ctx {
     fn cmp_operand(&mut self, place: Place, acc: Option<&Expr>) -> Option<Expr> {
         if matches!(place, Place::Reg(Reg::Ax) | Place::Byte(ByteReg::Al)) {
             acc.cloned()
+        } else if let Place::Deref(r) = place {
+            // `cmp [si],n` for `*p <rel> n` — a register-variable pointer
+            // dereferenced directly in the comparison.
+            if is_reg_var(r) {
+                let v = Var::Reg(r);
+                self.note_ptr(v);
+                Some(Expr::Deref(Box::new(Expr::Var(v))))
+            } else {
+                None
+            }
         } else {
             self.operand(place)
         }
