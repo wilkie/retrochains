@@ -230,10 +230,7 @@ impl Names {
             .arrays
             .iter()
             .enumerate()
-            .map(|(i, a)| {
-                let ty = if a.elem_char { "char" } else { "int" };
-                (a.base, format!("{ty} a{}[{}]", i + 1, a.len))
-            })
+            .map(|(i, a)| (a.base, format!("{} a{}[{}]", a.c_type(), i + 1, a.len)))
             .collect();
         for (v, n) in &self.bindings {
             if let Var::Slot(off) = v
@@ -635,6 +632,16 @@ mod tests {
         assert_roundtrips_stack("int f(int i) { char a[4]; a[0] = 65; return a[i]; }\n");
         assert_roundtrips_stack("void f(int i, int v) { char a[4]; a[i] = v; }\n");
         assert_roundtrips_stack("int f(int i) { char a[8]; return a[i]; }\n");
+    }
+
+    #[test]
+    fn local_long_array_roundtrips() {
+        // A `long` array is stride 4, each element a `dx:ax` word pair. A
+        // variable index scales by `<<2` and reads the pair through the element
+        // address (`mov dx,[bx+2]; mov ax,[bx]`); the array is declared `long`
+        // and the element type comes from that pair deref alone.
+        assert_roundtrips_stack("long f(int i) { long a[8]; return a[i]; }\n");
+        assert_roundtrips_stack("long f(int i) { long a[4]; return a[i]; }\n");
     }
 
     #[test]

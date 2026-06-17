@@ -447,8 +447,18 @@ Recovery is driven by the idioms, not guessed:
   the scalar check accounts for. A variable-only-indexed `char` array (no
   constant element access, so no `char`-typed slot) is typed from the **byte
   deref alone** — `mov al,[bx]` through `&a[0] + i` records the base as a `char`
-  array, the only element-type evidence it has. (`long`/pointer slots still opt
-  out; a frame mixing `int` and `char` slots opts out too.)*
+  array, the only element-type evidence it has. **`long` arrays** complete the
+  axis (`ArraySpec` carries an `ArrayElem` of char/int/long → stride 1/2/4): a
+  `long` element is a `dx:ax` word pair, so a variable index scales by `<<2`
+  (the whole shift chain is stripped to recover the index) and reads the pair
+  through the element address (`mov dx,[bx+2]; mov ax,[bx]`). That pair deref —
+  like the `char` byte deref — types the array `long` with no slot evidence, so
+  `long a[8]; return a[i]` recovers. (The constant-index `long` array, whose
+  store is a word *pair* that isn't yet folded into an array element, stays
+  unmodelled — when such a variable-indexed element is recognized but the frame
+  pass can't reconstruct the array, the recovery bails rather than emit a
+  dangling `&v[i]`.) Pointer slots still opt out; a frame mixing element types
+  opts out too.)*
 
 Near globals are built (`hi_ir.rs`). A global is a `Var::Global(offset)` — and
 crucially the offset is *not* a placeholder like a call target: it's the real
