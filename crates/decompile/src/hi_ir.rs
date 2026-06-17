@@ -126,6 +126,8 @@ pub enum Var {
 pub enum LValue {
     /// A local variable.
     Var(Var),
+    /// `*p` — a store through a pointer.
+    Deref(Box<Expr>),
 }
 
 /// Is `r` one of the registers BCC uses for `int` register variables?
@@ -549,6 +551,22 @@ impl Ctx {
                     }
                 }
 
+                // `<op> ax, [bx]` — the accumulator combined with `*p`.
+                LoOp::Bin {
+                    dst: Place::Reg(Reg::Ax),
+                    op,
+                    lhs: Place::Reg(Reg::Ax),
+                    rhs: Place::Deref(Reg::Bx),
+                } if is_foldable(op) => match (acc.take(), bx.clone()) {
+                    (Some(l), Some(ptr)) => {
+                        if let Expr::Var(v) = ptr {
+                            self.note_ptr(v);
+                        }
+                        acc = Some(Expr::Binary(op, Box::new(l), Box::new(Expr::Deref(Box::new(ptr)))));
+                    }
+                    _ => self.complete = false,
+                },
+
                 LoOp::Bin { dst: Place::Reg(Reg::Ax), op, lhs: Place::Reg(Reg::Ax), rhs }
                     if is_foldable(op) =>
                 {
@@ -606,6 +624,31 @@ impl Ctx {
                             Expr::Binary(step, Box::new(Expr::Var(Var::Reg(r))), Box::new(Expr::Const(1))),
                         )),
                         None => self.complete = false,
+                    }
+                }
+
+                // `mov [bx], ax` / `mov [bx], imm` — store through a pointer
+                // (`*p = v` / `*p = const`).
+                LoOp::Store { dst: Place::Deref(Reg::Bx), src } => {
+                    let value = match src {
+                        Place::Reg(Reg::Ax) => acc.take(),
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
+                    };
+                    match (bx.clone(), value) {
+                        (Some(ptr), Some(e)) => {
+                            if let Expr::Var(v) = ptr {
+                                self.note_ptr(v);
+                            }
+                            out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), e));
+                        }
+                        _ => self.complete = false,
                     }
                 }
 
@@ -1123,6 +1166,18 @@ mod tests {
             matches!(f.body.last(), Some(Stmt::Return(Some(Expr::Deref(_))))),
             "returns a dereference",
         );
+    }
+
+    #[test]
+    fn pointer_write_recovers_as_a_deref_assignment() {
+        // `*p = v` is `mov bx,p; mov ax,v; mov [bx],ax` → an assignment to `*p`.
+        let f = recover_stack("void f(int *p, int v) { *p = v; }\n");
+        assert!(f.complete, "a pointer write is recovered");
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Assign(LValue::Deref(_), _))),
+            "an assignment through a dereference",
+        );
+        assert!(f.ptr_vars.contains(&Var::Param(4)), "the written-through pointer is a pointer");
     }
 
     #[test]

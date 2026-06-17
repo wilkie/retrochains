@@ -165,6 +165,12 @@ pub enum Idiom {
     /// `fe /0` or `fe /1` with mod=11 — `inc r8` / `dec r8` (byte). The `char`
     /// counterpart of [`IncDecReg`]; `inc al` is `char + 1` kept byte-wide.
     IncDecByteReg,
+    /// `03/2b/0b/23/33/3b /r [bx]` — an ALU op with a `[bx]` dereference operand
+    /// (`add ax, [bx]` for `… + *p`).
+    AluDeref,
+    /// `c7 07 ii ii` — `mov word ptr [bx], imm16`: store a literal through a
+    /// pointer (`*p = const`).
+    StoreImmDeref,
     /// `05/0d/15/1d/25/2d/35/3d ii ii` — an ALU op on `ax` with an `imm16`
     /// (`add/or/adc/sbb/and/sub/xor/cmp ax, imm`). The accumulator-specific
     /// short encoding BCC/TASM prefer over `81 /r` for `ax`.
@@ -269,6 +275,8 @@ impl Idiom {
             Idiom::MovByteReg => "byte reg copy (mov r8, r8)",
             Idiom::AluByteReg => "alu byte reg, reg",
             Idiom::IncDecByteReg => "inc/dec byte reg",
+            Idiom::AluDeref => "alu reg, [bx]",
+            Idiom::StoreImmDeref => "store imm via pointer (mov [bx], imm16)",
             Idiom::AluAxImm => "alu ax, imm16",
         }
     }
@@ -344,6 +352,14 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::PointerLoad, pat: &[L(0x8a), M(0xc7, 0x07)] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x89), M(0xc7, 0x07)] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x88), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::StoreImmDeref, pat: &[L(0xc7), M(0xc7, 0x07), A, A] }, // mov [bx], imm16
+    // ALU with a `[bx]` deref operand (add/sub/or/and/xor/cmp reg, [bx]).
+    Def { idiom: Idiom::AluDeref, pat: &[L(0x03), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluDeref, pat: &[L(0x2b), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluDeref, pat: &[L(0x0b), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluDeref, pat: &[L(0x23), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluDeref, pat: &[L(0x33), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluDeref, pat: &[L(0x3b), M(0xc7, 0x07)] },
     // global loads/stores: accumulator-direct (a0-a3) and reg via [disp16].
     Def { idiom: Idiom::LoadGlobal, pat: &[L(0xa1), A, A] },
     Def { idiom: Idiom::StoreGlobal, pat: &[L(0xa3), A, A] },

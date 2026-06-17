@@ -415,6 +415,16 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let op = if (modrm(1) >> 3) & 7 == 1 { UnOp::Dec } else { UnOp::Inc };
             vec![LoOp::Un { dst: reg, op, operand: reg }]
         }
+        // `mov word ptr [bx], imm16` — store a literal through a pointer.
+        Idiom::StoreImmDeref => {
+            vec![LoOp::Store { dst: Deref(deref_base(modrm(1))), src: Imm(i32::from(u16_at(bytes, 2))) }]
+        }
+        // ALU with a `[bx]` deref operand: `<op> reg, [bx]`.
+        Idiom::AluDeref => {
+            let op = alu_op(bytes[0]);
+            let dst = if op == BinOp::Cmp { Place::Flags } else { R(reg_of(1)) };
+            vec![LoOp::Bin { dst, op, lhs: R(reg_of(1)), rhs: Deref(deref_base(modrm(1))) }]
+        }
         Idiom::AluAxImm => {
             // The op lives in the same bit positions as the group-1 `reg` field.
             let op = group1_op(bytes[0] >> 3);

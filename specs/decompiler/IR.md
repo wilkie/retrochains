@@ -256,10 +256,13 @@ Recovery is driven by the idioms, not guessed:
   `ptr_vars` and declared `int *`. The `[bx]` deref needed a recognizer
   addition — `8b/89/8a/88` with mod=00 rm=111, distinct from the `si`/`di` `PTR`
   mask — and a fix to the 16-bit memory-`rm` decode (`100`→`si`, `101`→`di`,
-  `111`→`bx`, not the register encoding). Pointer **writes** (`*p = v`) and
-  multi-deref expressions (`*p + *q`) currently panic in our `bcc` — separate
-  compiler gaps, like the char-register stores were, deferred to a fixture +
-  fix. Deref inside a condition is incomplete (the `cmp`-operand resolver
+  `111`→`bx`, not the register encoding). Pointer **writes** (`*p = v`,
+  `*p = const`) recover as `LValue::Deref` (`mov [bx],ax` / `mov [bx],imm`), and
+  a two-deref expression (`*p + *q`) recovers via `add ax,[bx]` with the second
+  pointer reloaded into bx — both needed recognizer additions (`c7 07` store-imm
+  and `03/2b/… 07` ALU through `[bx]`) and were *also* gated by two `bcc` panics
+  on stack-resident pointers, since closed fixture-driven (fixtures 4271/4272).
+  Deref inside a condition is still incomplete (the `cmp`-operand resolver
   doesn't yet reconstruct a `[bx]` load).)*
 - **Promotions** — `Cbw`/`Cwd` become explicit `Cast` nodes, so the emitted C's
   implicit promotions recompile to the same `cbw`/`cwd`.

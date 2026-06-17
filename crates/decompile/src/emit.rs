@@ -274,6 +274,7 @@ fn assign_inline(stmt: &Stmt, names: &Names) -> String {
 fn lvalue_str(lv: &LValue, names: &Names) -> String {
     match lv {
         LValue::Var(v) => names.of(*v).to_string(),
+        LValue::Deref(e) => format!("*{}", expr_str(e, names)),
     }
 }
 
@@ -414,6 +415,12 @@ mod tests {
         assert_roundtrips_stack("int f() { int x; int *p; x = 3; p = &x; return *p; }\n");
         assert_roundtrips_stack("int f(int *p) { int *q; q = p; return *q; }\n");
         assert_roundtrips_stack("int *gp; int f() { return *gp; }\n");
+        // Pointer writes (`*p = v` / `*p = const`) and a two-deref expression
+        // (`*p + *q`) — store/ALU through a stack-resident pointer in bx.
+        assert_roundtrips_stack("void f(int *p, int v) { *p = v; }\n");
+        assert_roundtrips_stack("void f(int *p) { *p = 5; }\n");
+        assert_roundtrips_stack("int f(int *p, int *q) { return *p + *q; }\n");
+        assert_roundtrips_stack("int f(int *p) { *p = 7; return *p; }\n");
     }
 
     #[test]
