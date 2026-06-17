@@ -14,7 +14,9 @@
   },
   "files": ["dist", "wasm"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build:wasm": "bash ../../scripts/build-wasm.sh",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:wasm && npm run build:ts",
     "test": "node --test",
     "lint": "eslint src"
   },

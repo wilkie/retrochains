@@ -1,6 +1,6 @@
 [package]
 name = "bcc-wasm"
-description = "WASM entry points wrapping the bcc/bcc-tlink/bcc-tasm crates for the @retrochains/bcc TypeScript package"
+description = "WASM bindings for the BCC toolchain (bcc/tasm/tlink/tlib), driving the @retrochains/bcc TypeScript package"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,10 +13,19 @@ name = "bcc_wasm"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
-[dependencies]
+# The whole crate is wasm-only glue (`#![cfg(target_arch = "wasm32")]`), so every
+# dependency — the toolchain crates and wasm-bindgen — is target-gated. On the
+# host this crate compiles to an empty lib and pulls nothing in, so a normal
+# `cargo build --workspace` never needs the wasm toolchain. Build the real module
+# with `scripts/build-wasm.sh` (which targets wasm32-unknown-unknown).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 bcc = { path = "../bcc" }
-bcc-tlink = { path = "../bcc-tlink" }
 bcc-tasm = { path = "../bcc-tasm" }
+bcc-tlink = { path = "../bcc-tlink" }
+bcc-tlib = { path = "../bcc-tlib" }
+# Pin tightly: the wasm-bindgen *crate* version must match the wasm-bindgen-cli
+# the build script runs (the usual version-skew footgun). Bump both together.
+wasm-bindgen = "=0.2.100"
 
 [lints]
 workspace = true

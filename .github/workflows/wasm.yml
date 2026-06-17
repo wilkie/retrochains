@@ -1,0 +1,64 @@
+name: wasm
+
+# Builds the @retrochains/bcc WASM module, enforces the size budget, and runs the
+# Node smoke test that drives bcc/tasm/tlink/tlib end-to-end. This is the wasm
+# analog of the byte-exact discipline: a size *ceiling* (scripts/check-wasm-size.sh)
+# plus a functional check that the module actually compiles/assembles/archives.
+
+on:
+  push:
+    paths:
+      - "crates/**"
+      - "packages/bcc/**"
+      - "scripts/build-wasm.sh"
+      - "scripts/check-wasm-size.sh"
+      - ".github/workflows/wasm.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "packages/bcc/**"
+      - "scripts/build-wasm.sh"
+      - "scripts/check-wasm-size.sh"
+      - ".github/workflows/wasm.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel + wasm32 target; rustup honors it.
+      - name: Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      # wasm-bindgen-cli must match the wasm-bindgen crate version (the pin in
+      # crates/bcc-wasm/Cargo.toml). binstall fetches a prebuilt binary fast.
+      - name: Install wasm-bindgen-cli (version-matched)
+        run: |
+          WB_VER="$(sed -n 's/^wasm-bindgen = "=\(.*\)"/\1/p' crates/bcc-wasm/Cargo.toml)"
+          curl -L --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y "wasm-bindgen-cli@${WB_VER}"
+
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build WASM module
+        run: bash scripts/build-wasm.sh
+
+      - name: Enforce size budget
+        run: bash scripts/check-wasm-size.sh
+
+      - name: Build TypeScript + smoke test
+        working-directory: packages/bcc
+        run: |
+          npm ci || npm install
+          npm run build:ts
+          npm test

@@ -78,3 +78,6 @@ Thumbs.db
 .claude
 scripts/bulk_msc_capture.log
 scripts/bulk_msc_capture.out
+
+# Generated wasm-bindgen output (reproducible build artifact; see scripts/build-wasm.sh)
+packages/*/wasm/
