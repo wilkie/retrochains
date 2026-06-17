@@ -251,6 +251,16 @@ Control-flow structuring is the next increment. (Closing the arithmetic case
 also added the `alu ax, imm16` accumulator idioms — `05/2d/…` — to the
 recognizer; until then `add ax,3` was an `Asm` gap.)
 
+The single-accumulator model has one extension for binary ops whose operands
+*both* need register evaluation (two `char` operands — each needs a `cbw`, so
+neither can be a memory operand — or two calls). BCC spills the left operand
+(`push ax`), evaluates the right into `dx` (`mov dx,ax`), restores the left
+(`pop ax`), and combines (`<op> ax,dx`). The fold reuses the call-argument push
+stack for the spill: `pop ax` restores the spilled left, a `mov dx,ax` parks the
+right in a `dx_temp`, and `<op> ax,dx` folds to `Binary(op, left, right)` —
+operand order preserved, so `x - y` doesn't become `y - x`. This is what
+unblocked `char` arithmetic (`x + y`, `a[0] + a[1]`, `char` params).
+
 ## 6. Types and type recovery
 
 The lattice: `char` (8), `int` (16, the default), `long` (32, `dx:ax`),

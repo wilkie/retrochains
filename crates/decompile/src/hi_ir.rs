@@ -639,7 +639,14 @@ impl Ctx {
         // for the `adc dx,hi` that completes it.
         let mut pending_long: Option<(BinOp, Place)> = None;
         // Arguments pushed for the call currently being assembled (push order).
+        // Also serves the binary-operand *spill* (`push ax` … `pop ax`): the
+        // left operand is pushed here and popped back when both sides have been
+        // evaluated into registers.
         let mut pending_args: Vec<Expr> = Vec::new();
+        // The right operand of a two-register binary op, saved in `dx` by a
+        // `mov dx,ax` while the left is restored from the stack (`pop ax`); the
+        // following `<op> ax,dx` combines them.
+        let mut dx_temp: Option<Expr> = None;
         // Each `return <expr>` is `mov ax,val; jmp epilogue`, so a jump to the
         // epilogue flushes the accumulator as a `Return`. Tracks whether the run
         // already returned that way, so the physical `Ret` it lands on isn't
@@ -709,6 +716,18 @@ impl Ctx {
                     args.reverse();
                     acc = Some(Expr::Call(args));
                 }
+
+                // `mov dx, ax` — save the accumulator (a binary op's right
+                // operand) into `dx` while the left is restored from the stack.
+                LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Reg(Reg::Ax) } => {
+                    dx_temp.clone_from(&acc);
+                }
+
+                // `pop ax` — restore the spilled left operand of a binary op.
+                LoOp::Pop { dst: Place::Reg(Reg::Ax) } => match pending_args.pop() {
+                    Some(e) => acc = Some(e),
+                    None => self.complete = false,
+                },
 
                 LoOp::Ret { .. } => {
                     if !returned {
@@ -984,6 +1003,20 @@ impl Ctx {
                     }
                     _ => self.complete = false,
                 },
+
+                // `<op> ax, dx` — combine the restored left operand (in `ax`)
+                // with the right operand saved in `dx`: `left <op> right`. The
+                // tail of the binary-operand spill (`push ax` … `pop ax`).
+                LoOp::Bin { dst: Place::Reg(Reg::Ax), op, lhs: Place::Reg(Reg::Ax), rhs: Place::Reg(Reg::Dx) }
+                    if is_foldable(op) =>
+                {
+                    match (acc.take(), dx_temp.take()) {
+                        (Some(l), Some(r)) => {
+                            acc = Some(Expr::Binary(op, Box::new(l), Box::new(r)));
+                        }
+                        _ => self.complete = false,
+                    }
+                }
 
                 // `add ax,lo` / `sub ax,lo` where the accumulator is a `long` is
                 // the low-word half; the `adc dx,hi` / `sbb dx,hi` below completes

@@ -638,6 +638,19 @@ mod tests {
     }
 
     #[test]
+    fn char_arithmetic_via_spill_roundtrips() {
+        // Two `char` operands each need a `cbw`, so neither can be a memory
+        // operand: BCC spills the left (`push ax`), evaluates the right into `dx`,
+        // pops the left back, and `add ax,dx`. The fold recovers the binary op,
+        // preserving operand order (so `x - y` isn't `y - x`). Locals, a `char`
+        // array's elements, and `char` parameters all work.
+        assert_roundtrips_stack("int f() { char x; char y; x = 1; y = 2; return x + y; }\n");
+        assert_roundtrips_stack("int f() { char x; char y; x = 9; y = 2; return x - y; }\n");
+        assert_roundtrips_stack("int f() { char a[4]; a[0] = 65; a[1] = 66; return a[0] + a[1]; }\n");
+        assert_roundtrips_stack("int f(char a, char b) { return a + b; }\n");
+    }
+
+    #[test]
     fn pointers_roundtrip() {
         // `*p` is `mov bx,p; mov ax,[bx]`; `&x` is `lea ax,[bp+disp]`. Pointer
         // params/locals/globals, deref in arithmetic, address-of, and a pointer
