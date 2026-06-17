@@ -333,8 +333,10 @@ fn body_has_call(stmts: &[Stmt]) -> bool {
                 || body_has_call(std::slice::from_ref(step))
                 || body_has_call(b)
         }
-        Stmt::Switch(scrut, arms) => {
-            expr_has_call(scrut) || arms.iter().any(|(_, b)| body_has_call(b))
+        Stmt::Switch(scrut, arms, def) => {
+            expr_has_call(scrut)
+                || arms.iter().any(|(_, b)| body_has_call(b))
+                || body_has_call(def)
         }
     })
 }
@@ -418,12 +420,17 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
             indent(depth, out);
             out.push_str("}\n");
         }
-        Stmt::Switch(scrut, arms) => {
+        Stmt::Switch(scrut, arms, def) => {
             let _ = writeln!(out, "switch ({}) {{", expr_str(scrut, names));
             for (value, body) in arms {
                 indent(depth, out);
                 let _ = writeln!(out, "case {value}:");
                 emit_block(body, depth + 1, false, names, out);
+            }
+            if !def.is_empty() {
+                indent(depth, out);
+                out.push_str("default:\n");
+                emit_block(def, depth + 1, false, names, out);
             }
             indent(depth, out);
             out.push_str("}\n");
@@ -659,6 +666,20 @@ mod tests {
         );
         assert_roundtrips_stack(
             "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; default: return 9; } }\n",
+        );
+    }
+
+    #[test]
+    fn switch_default_with_break_roundtrips() {
+        // A `default:` whose body ends in `break` (a jump to the post-switch code,
+        // not the epilogue) is a real `default` arm — distinct from a `default`
+        // that returns (recovered as post-switch code). Compare-chain and jump
+        // table.
+        assert_roundtrips_stack(
+            "int f(int a) { int r; r = 0; switch (a) { case 1: r = 1; break; case 2: r = 2; break; default: r = 9; break; } return r; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int a) { int r; r = 0; switch (a) { case 1: r = 1; break; case 2: r = 2; break; case 3: r = 3; break; case 4: r = 4; break; default: r = 9; break; } return r; }\n",
         );
     }
 

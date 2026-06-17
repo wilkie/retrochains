@@ -193,10 +193,11 @@ pub enum Stmt {
     /// variable is initialized just before it and stepped at the body's tail
     /// (BCC lowers `for` to exactly that shape).
     For(Box<Stmt>, Expr, Box<Stmt>, Vec<Stmt>),
-    /// `switch (scrutinee) { case K: body … }` — recovered from a compare-chain
-    /// (`cmp ax,K; je case`)*. No explicit `default`: the no-match path is the
-    /// code that follows the switch.
-    Switch(Expr, Vec<(i32, Vec<Stmt>)>),
+    /// `switch (scrutinee) { case K: body … [default: body] }` — recovered from a
+    /// compare-chain (`cmp ax,K; je case`)* or a jump table. The third field is
+    /// the `default:` body when the no-match block ends in a `break` (otherwise
+    /// empty — a `default:` that returns, or no default, is the post-switch code).
+    Switch(Expr, Vec<(i32, Vec<Stmt>)>, Vec<Stmt>),
     /// `break;` — a `switch` case body ending in a jump to the post-switch code.
     Break,
 }
@@ -225,9 +226,11 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
         Stmt::While(c, b) => Stmt::While(c, fold_for_loops(b)),
         Stmt::Do(c, b) => Stmt::Do(c, fold_for_loops(b)),
         Stmt::For(i, c, st, b) => Stmt::For(i, c, st, fold_for_loops(b)),
-        Stmt::Switch(s, arms) => {
-            Stmt::Switch(s, arms.into_iter().map(|(k, b)| (k, fold_for_loops(b))).collect())
-        }
+        Stmt::Switch(s, arms, def) => Stmt::Switch(
+            s,
+            arms.into_iter().map(|(k, b)| (k, fold_for_loops(b))).collect(),
+            fold_for_loops(def),
+        ),
         other => other,
     });
 
@@ -1631,25 +1634,83 @@ impl Ctx {
         Some((value, ti))
     }
 
+    /// Assemble a recovered `switch`: resolve its `default`/continuation, build
+    /// the case arms (breaking to the continuation), push the `Stmt::Switch`, and
+    /// return the index to resume structuring at (the post-switch code).
+    fn emit_switch(
+        &mut self,
+        stmts: &mut Vec<Stmt>,
+        scrutinee: Expr,
+        cases: &[(i32, usize)],
+        def_idx: usize,
+        hi: usize,
+    ) -> usize {
+        let (default_body, cont_idx) = self.switch_default(def_idx, hi);
+        let cont_off = self.insns[cont_idx].span.start;
+        let arms = self.build_switch_arms(cases, def_idx, cont_off);
+        stmts.push(Stmt::Switch(scrutinee, arms, default_body));
+        cont_idx
+    }
+
     /// Build the arms of a recovered `switch` from `(case value, body start
-    /// index)` pairs. A case body running to a trailing jump at the no-match
-    /// block (`def_idx`) ends in `break`; one ending at the epilogue is a
-    /// `return` (folded). Each body spans from its start to the next case's.
-    fn build_switch_arms(&mut self, cases: &[(i32, usize)], def_idx: usize) -> Vec<(i32, Vec<Stmt>)> {
-        let cont_off = self.insns[def_idx].span.start;
+    /// index)` pairs. The case bodies span `[start, end_idx)` (each running to
+    /// the next case's start, the last to `end_idx`); a body ending in a jump to
+    /// `cont_off` (the post-switch continuation) ends in `break`, one ending at
+    /// the epilogue is a `return`.
+    fn build_switch_arms(
+        &mut self,
+        cases: &[(i32, usize)],
+        end_idx: usize,
+        cont_off: usize,
+    ) -> Vec<(i32, Vec<Stmt>)> {
         let mut arms = Vec::new();
         for (j, &(value, start)) in cases.iter().enumerate() {
-            let end = cases.get(j + 1).map_or(def_idx, |&(_, s)| s);
-            let breaks = end > start
-                && matches!(self.insns[end - 1].op, LoOp::Jump { target } if target == cont_off);
-            let body_end = if breaks { end - 1 } else { end };
-            let mut body = self.structure(start, body_end);
-            if breaks {
-                body.push(Stmt::Break);
-            }
-            arms.push((value, body));
+            let end = cases.get(j + 1).map_or(end_idx, |&(_, s)| s);
+            arms.push((value, self.switch_body(start, end, cont_off)));
         }
         arms
+    }
+
+    /// Structure one `switch` case (or `default`) body in `[start, end)`,
+    /// turning a trailing jump to the continuation `cont_off` into a `break`.
+    fn switch_body(&mut self, start: usize, end: usize, cont_off: usize) -> Vec<Stmt> {
+        let breaks = end > start
+            && matches!(self.insns[end - 1].op, LoOp::Jump { target } if target == cont_off);
+        let body_end = if breaks { end - 1 } else { end };
+        let mut body = self.structure(start, body_end);
+        if breaks {
+            body.push(Stmt::Break);
+        }
+        body
+    }
+
+    /// Resolve a `switch`'s no-match block. If it's a `default:` that ends in a
+    /// `break` (a jump to a *further* continuation, not the epilogue), return the
+    /// recovered `default` body and the continuation index. Otherwise (no default,
+    /// or a `default` that returns) the no-match block *is* the post-switch code:
+    /// an empty body and `def_idx` itself.
+    fn switch_default(&mut self, def_idx: usize, hi: usize) -> (Vec<Stmt>, usize) {
+        let def_off = self.insns[def_idx].span.start;
+        // The default block's terminator: the first jump in it.
+        for j in def_idx..hi {
+            match self.insns[j].op {
+                LoOp::Jump { target }
+                    if target > def_off && !self.is_epilogue(target) =>
+                {
+                    if let Some(cont_idx) = self.idx_of(target) {
+                        // A `default:` that breaks to `target`.
+                        let body = self.switch_body(def_idx, j + 1, target);
+                        return (body, cont_idx);
+                    }
+                    break;
+                }
+                // A return-jump (to the epilogue) or the epilogue itself: the
+                // no-match block is the post-switch code, not a `break`ing default.
+                LoOp::Jump { .. } | LoOp::Leave | LoOp::Ret { .. } => break,
+                _ => {}
+            }
+        }
+        (Vec::new(), def_idx)
     }
 
     /// Recognize a jump-table `switch` dispatch whose range-check branch (`ja
@@ -1805,32 +1866,32 @@ impl Ctx {
                     // scrutinee is the value loaded into `bx`, read from the
                     // embedded offset table.
                     if let Some((cases, def_idx)) = self.detect_switch(cmp_idx) {
-                        match self.fold_linear(linear_start, cmp_idx, &mut stmts) {
-                            Some(scrutinee) => {
-                                let arms = self.build_switch_arms(&cases, def_idx);
-                                stmts.push(Stmt::Switch(scrutinee, arms));
-                            }
-                            None => self.complete = false,
-                        }
-                        i = def_idx;
-                        linear_start = def_idx;
+                        let resume = if let Some(scrutinee) =
+                            self.fold_linear(linear_start, cmp_idx, &mut stmts)
+                        {
+                            self.emit_switch(&mut stmts, scrutinee, &cases, def_idx, hi)
+                        } else {
+                            self.complete = false;
+                            def_idx
+                        };
+                        i = resume;
+                        linear_start = resume;
                         continue;
                     }
                     if let Some(jt) = self.detect_jump_table(i) {
                         if let Some((cases, def_idx)) = self.jump_table_cases(&jt) {
                             self.fold_linear(linear_start, jt.load_idx, &mut stmts);
-                            match self.operand(jt.scrut) {
-                                Some(scrutinee) => {
-                                    let arms = self.build_switch_arms(&cases, def_idx);
-                                    stmts.push(Stmt::Switch(scrutinee, arms));
-                                }
-                                None => self.complete = false,
-                            }
-                            i = def_idx;
-                            linear_start = def_idx;
+                            let resume = if let Some(scrutinee) = self.operand(jt.scrut) {
+                                self.emit_switch(&mut stmts, scrutinee, &cases, def_idx, hi)
+                            } else {
+                                self.complete = false;
+                                def_idx
+                            };
+                            i = resume;
+                            linear_start = resume;
                             continue;
                         }
-                        // A jump table we can't fully read (gaps / fall-through).
+                        // A jump table we can't fully read (out-of-order layout).
                         self.complete = false;
                         i += 1;
                         continue;
@@ -2447,7 +2508,7 @@ mod tests {
             recover_c("int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n");
         assert!(f.complete, "a compare-chain switch is recovered");
         assert!(
-            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms) if arms.len() == 3)),
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _) if arms.len() == 3)),
             "recovers a 3-arm switch",
         );
     }
@@ -2461,7 +2522,7 @@ mod tests {
         );
         assert!(f.complete, "a distinct jump-table switch is recovered");
         assert!(
-            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms) if arms.len() == 4)),
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _) if arms.len() == 4)),
             "recovers a 4-arm switch",
         );
     }
@@ -2475,8 +2536,22 @@ mod tests {
         );
         assert!(f.complete, "a fall-through jump table is recovered");
         assert!(
-            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms) if arms.len() == 4)),
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _) if arms.len() == 4)),
             "four case labels (two of them sharing one body)",
+        );
+    }
+
+    #[test]
+    fn a_switch_default_with_break_recovers() {
+        // A `default:` body ending in `break` becomes a real default arm (the
+        // third `Switch` field), not post-switch code.
+        let f = recover_stack(
+            "int f(int a) { int r; r = 0; switch (a) { case 1: r = 1; break; case 2: r = 2; break; default: r = 9; break; } return r; }\n",
+        );
+        assert!(f.complete);
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, def) if arms.len() == 2 && !def.is_empty())),
+            "two cases and a non-empty default arm",
         );
     }
 

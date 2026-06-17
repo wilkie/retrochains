@@ -238,8 +238,10 @@ index has no case — `case 5` after a missing `4`); consecutive equal entries a
 entries must be non-decreasing — an out-of-value-order source switch lays them
 out non-monotonically and declines (sound, not mis-shaped). A sparse switch
 (`case 1,2,4`) BCC emits as a compare-chain, not a table, so it's recovered
-there; a `default:` block recovers as the post-switch code (equivalent when it
-returns).
+there; a `default:` block recovers as the post-switch code when it
+returns, and as a real `default` arm (the third `Stmt::Switch` field) when it
+ends in `break` — the no-match block then jumps to a *further* continuation, so
+the cases break there too, not to the no-match target.
 
 **Early returns / multi-exit are recovered.** Every `return <expr>` is `mov
 ax,val; jmp epilogue` — a jump to the shared epilogue (which begins at the
