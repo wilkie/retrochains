@@ -239,8 +239,18 @@ Recovery is driven by the idioms, not guessed:
   slots `(lo, lo+2)`; if the high-word slot is *also* recovered as a separate
   variable (the deferred `long`-local store-pairing, which aliases a two-`int`
   layout), the recovery bails rather than emit a double-counted frame. `long`
-  arithmetic — the `add`/`adc` low/high pair — is deferred (the `adc` idiom
-  isn't recognized yet).)* *(Built: a `char` var is one accessed at
+  arithmetic is built: `a + b` is `add ax,[b.lo]; adc dx,[b.hi]` and `a - b` is
+  `sub`/`sbb`, so a `dx` tracker pairs the low-word add with the `adc` that
+  completes it (the operand is a `long` variable `[lo]`/`[lo+2]` or a constant
+  `(hi<<16)|lo`). Two subtleties: (1) the **long-parameter layout** — a `long`
+  param occupies two slots, so the signature walks param offsets by width (4 for
+  `long`, 2 otherwise), filling unread gaps with `int`; this also fixed the
+  earlier offset-coincidence hack. (2) a **negative `long` constant** is emitted
+  as a *subtraction* (`x - K`, an `Expr::LongConst` with an `L` suffix) — BCC
+  mis-folds `x + (negative long literal)` (the literal reads as `unsigned int`
+  and loses its high word), but compiles `x - <positive>` correctly. The `adc`
+  (`13`) / `sbb` (`1b`) memory/register forms were the needed recognizer
+  additions.)* *(Built: a `char` var is one accessed at
   byte width — `8a`/`88`/`a0`/`a2`, `StoreImmByte`, the `80` byte group-1 compare
   — recorded in `Function::char_vars` and declared `char` instead of `int`; `cbw`
   is the implicit `char`→`int` promotion, folded as a no-op since emitting the

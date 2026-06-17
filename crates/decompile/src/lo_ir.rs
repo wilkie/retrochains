@@ -257,6 +257,8 @@ fn alu_op(opcode: u8) -> BinOp {
         0x0b => BinOp::Or,
         0x23 => BinOp::And,
         0x33 => BinOp::Xor,
+        0x13 => BinOp::Adc, // long high-word add
+        0x1b => BinOp::Sbb,
         _ => BinOp::Cmp, // 0x3b
     }
 }

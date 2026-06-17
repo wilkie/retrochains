@@ -26,18 +26,36 @@ struct Names {
     longs: Vec<Var>,
     /// Variables compared/shifted as unsigned — declared `unsigned`.
     unsigneds: Vec<Var>,
-    /// The number of parameters to declare — the highest parameter slot used
-    /// decides it, since intermediate parameters must be declared to push the
-    /// later ones to the right offset even when they're unread.
-    param_count: usize,
+    /// The function's parameter list, pre-rendered (`int p1, long p2`).
+    signature: String,
     /// The number of file-scope globals to declare — likewise sized by the
     /// highest global offset used, so each access lands at the right offset.
     global_count: usize,
 }
 
-/// The 1-based parameter index of a `[bp+off]` slot (small model: `[bp+4]` = 1).
-fn param_index(off: i16) -> usize {
-    usize::try_from((off - 4) / 2 + 1).unwrap_or(0)
+/// `<type> <name>` for a variable — `int *p` (pointer), `unsigned long l`,
+/// `unsigned char c`, `unsigned u`, `long l`, `char c`, else `int x`.
+fn decl_str(
+    var: Var,
+    name: &str,
+    chars: &[Var],
+    ptrs: &[Var],
+    longs: &[Var],
+    unsigneds: &[Var],
+) -> String {
+    if ptrs.contains(&var) {
+        return format!("int *{name}");
+    }
+    let u = if unsigneds.contains(&var) { "unsigned " } else { "" };
+    if longs.contains(&var) {
+        format!("{u}long {name}")
+    } else if chars.contains(&var) {
+        format!("{u}char {name}")
+    } else if u.is_empty() {
+        format!("int {name}")
+    } else {
+        format!("unsigned {name}")
+    }
 }
 
 /// The 1-based index of a word global at data-segment offset `off`.
@@ -59,21 +77,37 @@ impl Names {
     ) -> Names {
         let mut bindings = Vec::new();
 
-        let mut param_count = 0;
         let mut global_count = 0;
         for &v in vars {
-            match v {
-                Var::Param(off) => {
-                    let idx = param_index(off);
-                    param_count = param_count.max(idx);
-                    bindings.push((v, format!("p{idx}")));
+            if let Var::Global(off) = v {
+                let idx = global_index(off);
+                global_count = global_count.max(idx);
+                bindings.push((v, format!("gv{idx}")));
+            }
+        }
+
+        // Parameters: walk offsets from `[bp+4]`, sizing a `long` parameter at 4
+        // bytes (it occupies two slots) and filling unread gaps with `int`, so
+        // the positional names in the body and the signature agree.
+        let max_param =
+            vars.iter().filter_map(|v| if let Var::Param(o) = v { Some(*o) } else { None }).max();
+        let mut sig_parts = Vec::new();
+        if let Some(max) = max_param {
+            let mut off = 4i16;
+            let mut pidx = 1usize;
+            while off <= max {
+                let var = Var::Param(off);
+                let name = format!("p{pidx}");
+                if vars.contains(&var) {
+                    sig_parts
+                        .push(decl_str(var, &name, char_vars, ptr_vars, long_vars, unsigned_vars));
+                    bindings.push((var, name));
+                    off += if long_vars.contains(&var) { 4 } else { 2 };
+                } else {
+                    sig_parts.push(format!("int {name}"));
+                    off += 2;
                 }
-                Var::Global(off) => {
-                    let idx = global_index(off);
-                    global_count = global_count.max(idx);
-                    bindings.push((v, format!("gv{idx}")));
-                }
-                Var::Slot(_) | Var::Reg(_) | Var::ByteReg(_) => {}
+                pidx += 1;
             }
         }
 
@@ -95,7 +129,7 @@ impl Names {
             ptrs: ptr_vars.to_vec(),
             longs: long_vars.to_vec(),
             unsigneds: unsigned_vars.to_vec(),
-            param_count,
+            signature: sig_parts.join(", "),
             global_count,
         }
     }
@@ -104,34 +138,14 @@ impl Names {
         self.bindings.iter().find(|(v, _)| *v == var).map_or("v?", |(_, n)| n.as_str())
     }
 
-    /// A full typed declaration `<type> <name>` — `int *p` for a pointer (the
-    /// `*` binds to the name), `long l`, `char c`, `unsigned u`, else `int x`.
+    /// A full typed declaration `<type> <name>`.
     fn decl(&self, var: Var, name: &str) -> String {
-        if self.ptrs.contains(&var) {
-            return format!("int *{name}");
-        }
-        let unsigned = if self.unsigneds.contains(&var) { "unsigned " } else { "" };
-        if self.longs.contains(&var) {
-            format!("{unsigned}long {name}")
-        } else if self.chars.contains(&var) {
-            format!("{unsigned}char {name}")
-        } else if unsigned.is_empty() {
-            format!("int {name}")
-        } else {
-            // `unsigned` on its own is `unsigned int`.
-            format!("unsigned {name}")
-        }
+        decl_str(var, name, &self.chars, &self.ptrs, &self.longs, &self.unsigneds)
     }
 
-    /// The parameter list for the signature — `int p1, char *p2` (or empty).
-    fn signature(&self) -> String {
-        (1..=self.param_count)
-            .map(|i| {
-                let off = i16::try_from(i).unwrap_or(0) * 2 + 2; // [bp+4] is param 1
-                self.decl(Var::Param(off), &format!("p{i}"))
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+    /// The pre-rendered parameter list (`int p1, long p2`).
+    fn signature(&self) -> &str {
+        &self.signature
     }
 
     /// The file-scope global declarations — `gv1, gv2, …` in offset order, so
@@ -217,7 +231,7 @@ fn expr_has_call(e: &Expr) -> bool {
         Expr::Call(_) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
         Expr::Not(a) | Expr::Deref(a) => expr_has_call(a),
-        Expr::Const(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
 
@@ -307,6 +321,7 @@ fn lvalue_str(lv: &LValue, names: &Names) -> String {
 fn expr_str(e: &Expr, names: &Names) -> String {
     match e {
         Expr::Const(v) => v.to_string(),
+        Expr::LongConst(v) => format!("{v}L"),
         Expr::Var(v) => names.of(*v).to_string(),
         // Fully parenthesized so the printed tree matches the recovered one.
         Expr::Binary(op, l, r) => {
@@ -499,6 +514,12 @@ mod tests {
         assert_roundtrips_stack("long f() { return 0; }\n");
         assert_roundtrips_stack("long f() { return 100000; }\n");
         assert_roundtrips_stack("long f(long a) { return a; }\n");
+        // long arithmetic: add/adc and sub/sbb (low/high), with a negative long
+        // constant normalized to a subtraction, and multiple long params.
+        assert_roundtrips_stack("long f(long a, long b) { return a + b; }\n");
+        assert_roundtrips_stack("long f(long a, long b) { return a - b; }\n");
+        assert_roundtrips_stack("long f(long a) { return a + 1; }\n");
+        assert_roundtrips_stack("long f(long a) { return a - 100000; }\n");
     }
 
     #[test]
@@ -620,10 +641,14 @@ mod tests {
 
     #[test]
     fn incomplete_function_emits_nothing() {
-        // Long arithmetic (add/adc) isn't modelled yet — the recovery declines
+        // A multi-case switch isn't structured yet — the recovery declines
         // rather than emit a wrong body.
         let opts = CompileOpts::default();
-        let code = recompile_text("long f(long a, long b) { return a + b; }\n", &opts).expect("compiles");
+        let code = recompile_text(
+            "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n",
+            &opts,
+        )
+        .expect("compiles");
         assert!(decompile(&code).is_none(), "an incomplete recovery emits no C");
     }
 }

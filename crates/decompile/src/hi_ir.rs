@@ -88,6 +88,9 @@ fn cond_to_relop(cond: Cond) -> Option<RelOp> {
 pub enum Expr {
     /// An integer constant.
     Const(i32),
+    /// A 32-bit `long` constant (emitted with an `L` suffix so a value outside
+    /// `int` range isn't read as `unsigned int` and truncated).
+    LongConst(i32),
     /// A local variable — a stack slot, parameter, or register variable.
     Var(Var),
     /// `lhs op rhs` (left-associative, as the accumulator chain produces).
@@ -113,7 +116,7 @@ fn contains_call(e: &Expr) -> bool {
         Expr::Call(_) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
         Expr::Not(a) | Expr::Deref(a) => contains_call(a),
-        Expr::Const(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
 
@@ -198,7 +201,7 @@ fn expr_mentions(expr: &Expr, var: Var) -> bool {
         }
         Expr::Not(a) | Expr::Deref(a) => expr_mentions(a, var),
         Expr::Call(args) => args.iter().any(|a| expr_mentions(a, var)),
-        Expr::Const(_) => false,
+        Expr::Const(_) | Expr::LongConst(_) => false,
     }
 }
 
@@ -285,6 +288,14 @@ pub struct Function {
     /// `false` if any op couldn't be modelled — the function is only partially
     /// recovered and must not be presented as done.
     pub complete: bool,
+}
+
+/// Swap `Add`↔`Sub` (for normalizing `x + (-K)` to `x - K`).
+fn flip_addsub(op: BinOp) -> BinOp {
+    match op {
+        BinOp::Add => BinOp::Sub,
+        _ => BinOp::Add,
+    }
 }
 
 /// Build `lhs op rhs`, collapsing a constant shift applied to an existing
@@ -384,7 +395,7 @@ impl Ctx {
                 self.mark_unsigned(b);
             }
             Expr::Not(a) | Expr::Deref(a) => self.mark_unsigned(a),
-            Expr::Const(_) | Expr::AddrOf(_) | Expr::Call(_) => {}
+            Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(_) => {}
         }
     }
 
@@ -392,6 +403,21 @@ impl Ctx {
     fn mark_char(&mut self, expr: &Expr) {
         if let Expr::Var(v) = expr {
             self.note_char(*v);
+        }
+    }
+
+    /// The `long` operand of an `add ax,lo`/`adc dx,hi` pair — a `long` variable
+    /// (low at `lo`, high at `lo+2`) or a constant `(hi<<16)|lo`.
+    fn long_operand(&mut self, lo: Place, hi: Place) -> Option<Expr> {
+        match (lo, hi) {
+            (Place::Local(l), Place::Local(h)) if h == l + 2 => {
+                let v = Self::var_of(Place::Local(l))?;
+                self.note(v);
+                self.note_long(v);
+                Some(Expr::Var(v))
+            }
+            (Place::Imm(lo), Place::Imm(hi)) => Some(Expr::LongConst((hi << 16) | (lo & 0xFFFF))),
+            _ => None,
         }
     }
 
@@ -482,6 +508,9 @@ impl Ctx {
         // After an `idiv`/`div`, `dx` holds the remainder of `(dividend, divisor)`
         // — a `mov ax,dx` that reads it recovers the `%` operator.
         let mut dx_rem: Option<(Expr, Expr)> = None;
+        // A `long` add/sub in progress: the `add ax,lo` (op, low operand) waiting
+        // for the `adc dx,hi` that completes it.
+        let mut pending_long: Option<(BinOp, Place)> = None;
         // Arguments pushed for the call currently being assembled (push order).
         let mut pending_args: Vec<Expr> = Vec::new();
         // Each `return <expr>` is `mov ax,val; jmp epilogue`, so a jump to the
@@ -718,6 +747,42 @@ impl Ctx {
                         acc = Some(Expr::Binary(op, Box::new(l), Box::new(Expr::Deref(Box::new(ptr)))));
                     }
                     _ => self.complete = false,
+                },
+
+                // `add ax,lo` / `sub ax,lo` where the accumulator is a `long` is
+                // the low-word half; the `adc dx,hi` / `sbb dx,hi` below completes
+                // it. Defer until then.
+                LoOp::Bin { dst: Place::Reg(Reg::Ax), op, lhs: Place::Reg(Reg::Ax), rhs }
+                    if acc_long && matches!(op, BinOp::Add | BinOp::Sub) =>
+                {
+                    pending_long = Some((op, rhs));
+                }
+
+                // `adc dx,hi` / `sbb dx,hi` — the high-word half of a `long`
+                // add/sub. The operand is a `long` variable (`[lo]`/`[lo+2]`) or a
+                // constant (`(hi<<16)|lo`).
+                LoOp::Bin {
+                    dst: Place::Reg(Reg::Dx),
+                    op: BinOp::Adc | BinOp::Sbb,
+                    lhs: Place::Reg(Reg::Dx),
+                    rhs: rhs_hi,
+                } => match pending_long.take() {
+                    Some((op_lo, rhs_lo)) => match (acc.take(), self.long_operand(rhs_lo, rhs_hi)) {
+                        (Some(l), Some(r)) => {
+                            // BCC mis-folds `x + (negative long literal)` (it loses
+                            // the high word), but compiles `x - <positive>` right.
+                            // So flip a negative `long` constant to a subtraction.
+                            let (op, r) = match r {
+                                Expr::LongConst(v) if v < 0 && v != i32::MIN => {
+                                    (flip_addsub(op_lo), Expr::LongConst(-v))
+                                }
+                                other => (op_lo, other),
+                            };
+                            acc = Some(Expr::Binary(op, Box::new(l), Box::new(r)));
+                        }
+                        _ => self.complete = false,
+                    },
+                    None => self.complete = false,
                 },
 
                 LoOp::Bin { dst: Place::Reg(Reg::Ax), op, lhs: Place::Reg(Reg::Ax), rhs }
@@ -1446,11 +1511,22 @@ mod tests {
     }
 
     #[test]
-    fn long_arithmetic_marks_the_function_incomplete() {
-        // `a + b` for longs is add/adc (low/high), and the `adc` idiom isn't
-        // recognized yet — so the function isn't recovered.
-        let f = recover_c("long f(long a, long b) { return a + b; }\n");
-        assert!(!f.complete, "long arithmetic leaves the function incomplete");
+    fn long_arithmetic_recovers() {
+        // `a + b` for longs is `add ax,[b.lo]; adc dx,[b.hi]`; a negative long
+        // constant normalizes to a subtraction.
+        let f = recover_stack("long f(long a, long b) { return a + b; }\n");
+        assert!(f.complete, "long add is recovered");
+        assert_eq!(f.ret, Type::Long);
+        assert!(f.long_vars.contains(&Var::Param(4)) && f.long_vars.contains(&Var::Param(8)));
+    }
+
+    #[test]
+    fn a_multi_case_switch_marks_the_function_incomplete() {
+        // A multi-case switch (compare chain / jump table) isn't structured yet
+        // (a single-case switch is just an `if`, which does recover).
+        let f =
+            recover_c("int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n");
+        assert!(!f.complete, "a multi-case switch leaves the function incomplete");
     }
 
     #[test]

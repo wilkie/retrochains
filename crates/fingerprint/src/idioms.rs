@@ -387,6 +387,12 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluReg, pat: &[L(0x23), REG] },
     Def { idiom: Idiom::AluReg, pat: &[L(0x33), REG] },
     Def { idiom: Idiom::AluReg, pat: &[L(0x3b), REG] },
+    Def { idiom: Idiom::AluReg, pat: &[L(0x13), REG] }, // adc (long high word)
+    Def { idiom: Idiom::AluReg, pat: &[L(0x1b), REG] }, // sbb
+    Def { idiom: Idiom::AluLocal, pat: &[L(0x13), BP_DISP8, A] },
+    Def { idiom: Idiom::AluLocal, pat: &[L(0x1b), BP_DISP8, A] },
+    Def { idiom: Idiom::AluGlobal, pat: &[L(0x13), DISP16, A, A] },
+    Def { idiom: Idiom::AluGlobal, pat: &[L(0x1b), DISP16, A, A] },
     Def { idiom: Idiom::AluLocal, pat: &[L(0x03), BP_DISP8, A] },
     Def { idiom: Idiom::AluLocal, pat: &[L(0x2b), BP_DISP8, A] },
     Def { idiom: Idiom::AluLocal, pat: &[L(0x0b), BP_DISP8, A] },
