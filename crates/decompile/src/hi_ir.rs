@@ -634,6 +634,11 @@ struct Ctx {
     /// front so the store side can tell a `long` store *pair* (`[hi]=…;[lo]=…`)
     /// from two adjacent `int` stores, which are byte-identical at the store.
     long_slots: std::collections::HashSet<i16>,
+    /// Word-accessed slot offsets and global addresses — an `int` (or wider). A
+    /// byte load of such a place is reading the low byte of an `int`, so it must
+    /// not be (mis-)typed `char`. Used to type the rhs of a `char op= int`.
+    word_slots: std::collections::HashSet<i16>,
+    word_globals: std::collections::HashSet<u16>,
     /// Local-array bases (`lea` offsets) dereferenced at byte width — `char`
     /// arrays. The element type of a purely variable-indexed array isn't in any
     /// slot, only in the byte-vs-word deref, so this carries that signal to the
@@ -664,6 +669,27 @@ impl Ctx {
         if !self.char_vars.contains(&var) {
             self.char_vars.push(var);
         }
+    }
+
+    /// Re-type any word-accessed variable in `e` back to `int`: a byte load of an
+    /// `int`'s low byte (the rhs of a `char op= int`) char-marks the slot, but
+    /// the slot's word stores prove it's an `int`. Undoes that local mis-marking.
+    fn untype_word_chars(&mut self, e: &Expr) {
+        let mut drop = Vec::new();
+        let mut probe = |v: &mut Var| {
+            let word = match v {
+                Var::Slot(o) | Var::Param(o) => self.word_slots.contains(o),
+                Var::Global(a) => self.word_globals.contains(a),
+                _ => false,
+            };
+            if word {
+                drop.push(*v);
+            }
+        };
+        // `walk_vars_expr` needs `&mut Expr`; this is a read-only probe, so clone.
+        let mut tmp = e.clone();
+        walk_vars_expr(&mut tmp, &mut probe);
+        self.char_vars.retain(|v| !drop.contains(v));
     }
 
     /// Note a variable that's dereferenced — it's a pointer (`int *`).
@@ -1458,6 +1484,46 @@ impl Ctx {
                     match self.char_dest(Place::Byte(r)) {
                         Some(lv) => out.push(Stmt::Compound(lv, step, Expr::Const(1))),
                         None => self.complete = false,
+                    }
+                }
+
+                // In-place byte compound on a `char` register variable: `add
+                // dl, al` (rhs computed into `al`), `or dl, 7` (immediate), or
+                // `add dl, bl` (another `char` variable). The byte analog of the
+                // word in-place compound — `a op= b` for chars, applied in place.
+                // The rhs reached through `al` can be an `int`'s low byte
+                // (`c |= n`, n int): that's a valid `char op= int`, kept correct
+                // by typing the rhs from its own (word) accesses, not forcing it
+                // `char` — see the word-slot pass in `recover_window`.
+                LoOp::Bin { dst: Place::Byte(r), op, lhs: Place::Byte(l), rhs }
+                    if r == l && is_byte_reg_var(r) && Self::is_compound_op(op) =>
+                {
+                    let rhs_expr = match rhs {
+                        // A simple value in `al` (`c op= b` / `c op= n`). A
+                        // *complex* `al` (e.g. `a*b` applied through a `dl` temp,
+                        // `mov dl,bl; add dl,al; mov bl,dl`) isn't a direct compound
+                        // on this register — decline rather than mis-attribute it.
+                        Place::Byte(ByteReg::Al) => match acc.take() {
+                            Some(e @ (Expr::Var(_) | Expr::Const(_))) => Some(e),
+                            _ => None,
+                        },
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
+                    };
+                    match (self.char_dest(Place::Byte(r)), rhs_expr) {
+                        (Some(lv), Some(e)) => {
+                            // The rhs may be an `int` whose low byte was read into
+                            // `al` (`c |= n`) — keep it `int`, not `char`.
+                            self.untype_word_chars(&e);
+                            out.push(Stmt::Compound(lv, op, e));
+                        }
+                        _ => self.complete = false,
                     }
                 }
 
@@ -2306,6 +2372,26 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
             long_slots.insert(*lo);
         }
     }
+    // Pre-scan for word-accessed slots/globals — an `int` (or wider). A byte load
+    // of such a slot (`mov al,[n]`) is reading the low byte of an `int`, not a
+    // `char`, so the char-marking that load does must be undone afterward. (Byte
+    // accesses use `Byte(_)`/`StoreImmByte`; a full-register or word-immediate
+    // store/load is what marks an `int`.)
+    let mut word_slots: std::collections::HashSet<i16> = std::collections::HashSet::new();
+    let mut word_globals: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for insn in &insns {
+        match &insn.op {
+            LoOp::Store { dst: Place::Local(o), src: Place::Reg(_) | Place::Imm(_) }
+            | LoOp::Load { dst: Place::Reg(_), src: Place::Local(o) } => {
+                word_slots.insert(*o);
+            }
+            LoOp::Store { dst: Place::Global(a), src: Place::Reg(_) | Place::Imm(_) }
+            | LoOp::Load { dst: Place::Reg(_), src: Place::Global(a) } => {
+                word_globals.insert(*a);
+            }
+            _ => {}
+        }
+    }
     let mut ctx = Ctx {
         insns,
         code: code.to_vec(),
@@ -2316,6 +2402,8 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         long_vars: Vec::new(),
         unsigned_vars: Vec::new(),
         long_slots,
+        word_slots,
+        word_globals,
         char_array_bases: Vec::new(),
         long_array_bases: Vec::new(),
         complete: true,

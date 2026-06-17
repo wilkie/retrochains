@@ -1182,6 +1182,20 @@ mod tests {
     }
 
     #[test]
+    fn char_in_place_compound_roundtrips() {
+        // `a op= b` on a `char` register variable is an in-place byte op
+        // (`add dl,al`) — the byte analog of the word compound.
+        assert_roundtrips("int f(){ char a; char b; a=10; b=3; a+=b; return a; }\n");
+        assert_roundtrips("int f(){ char a; char b; a=20; b=5; a-=b; return a; }\n");
+        assert_roundtrips("int f(){ char a; char b; a=1; b=4; a|=b; return a; }\n");
+        assert_roundtrips("int f(){ char a; char b; a=7; b=3; a&=b; return a; }\n");
+        assert_roundtrips("int f(char c, char d){ c += d; return c; }\n");
+        // `char op= int`: the rhs is an `int` whose low byte is read into `al`;
+        // its word stores keep it typed `int` (not mis-typed `char`).
+        assert_roundtrips("int f(){ char c; int n; c=5; n=240; c|=n; return c; }\n");
+    }
+
+    #[test]
     fn parameter_promotion_recovers_direct_mutation() {
         // A mutated parameter is copied into a register variable at entry; the
         // register *is* the parameter, so the recovery rewrites it back to direct

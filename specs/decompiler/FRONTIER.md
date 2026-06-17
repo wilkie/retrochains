@@ -20,14 +20,14 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | multi-fn | in-place | var-shift | param-promo | meaning |
-|-------------|--------:|---------:|---------:|----------:|------------:|---------|
-| **MATCH**   |  1433 (34.7%) | 1580 (38.2%) | 1761 (42.6%) | 1817 (44.0%) | **1826 (44.2%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | 2129 | 2000 | 1940 | 1940 (47.0%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | 389 | 336 | 340 | 331 (8.0%) | recovered C recompiles to *different* bytes |
-| cerr        |     2 |   2 |  2 |  2 |  2 | recovered C didn't compile |
-| notext      |     5 |   5 |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 |  27 | 27 | 26 | 26 | recover/verify crashed |
+| bucket      | initial | multi-fn | in-place | var-shift | param-promo | char-compound | meaning |
+|-------------|--------:|---------:|---------:|----------:|------------:|--------------:|---------|
+| **MATCH**   |  1433 (34.7%) | 1580 (38.2%) | 1761 (42.6%) | 1817 (44.0%) | 1826 (44.2%) | **1846 (44.7%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | 2129 | 2000 | 1940 | 1940 | 1920 (46.5%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | 389 | 336 | 340 | 331 | 331 (8.0%) | recovered C recompiles to *different* bytes |
+| cerr        |     2 |   2 |  2 |  2 |  2 |  2 | recovered C didn't compile |
+| notext      |     5 |   5 |  5 |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
+| PANIC       |    27 |  27 | 27 | 26 | 26 | 26 | recover/verify crashed |
 
 (The +4 mismatch at the var-shift step is cast/bitfield-adjacent: folding the
 shift exposes a missing narrowing — `(char)(v>>4)` drops the cast, a signed
@@ -118,9 +118,16 @@ clears most of them.
    `char` in-place `inc dl`/`dec dl` a `Compound` (it was a load-op-store
    `Assign`). Decisive for `char` param mutation (the spurious local cost a 2-byte
    frame); `int` was already matching but is now cleaner (`x++`, not `v1=p1;v1++`).
-5. **`char` in-place compound** — `a += b` on a `char` reg var is `add dl,al`
-   (byte in-place). *Still blocked:* the rhs through `al` can be an int's low
-   byte (`c |= n`, n int → mis-typed `char`); needs an int-vs-char slot prescan
-   (a slot word-accessed ⇒ int). The param half is now unblocked by #4.
+5. ~~**`char` in-place compound**~~ — **DONE** (MATCH 44.2% → 44.7%, MISMATCH
+   unchanged — zero regressions). `a op= b` on a `char` reg var is an in-place
+   `add dl,al`. The rhs through `al` can be an `int`'s low byte (`c |= n`); a
+   word-slot prescan (a slot/global with a full-register or word-immediate
+   store/load is an `int`) re-types it back from the char-marking the byte load
+   does, *locally* in the compound arm (a global pass exposed unrelated cast
+   narrowings). A complex `al` rhs (`c += a*b`, applied through a `dl` temp)
+   declines rather than mis-attribute the temp.
 6. **Panic → sound-incomplete** (26), **shared globals across functions**, then
-   casts/bitfields (the var-shift mismatch tail), arrays/struct/pointer-deref.
+   casts/bitfields/narrowing (the var-shift + char-narrow mismatch tail),
+   arrays/struct/pointer-deref. The `int→char` cast/assign (`char c = (char)x`)
+   is now the most common *incomplete* near this cluster — a cast/narrowing
+   recovery would unlock it.
