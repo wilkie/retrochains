@@ -262,8 +262,13 @@ Recovery is driven by the idioms, not guessed:
   pointer reloaded into bx — both needed recognizer additions (`c7 07` store-imm
   and `03/2b/… 07` ALU through `[bx]`) and were *also* gated by two `bcc` panics
   on stack-resident pointers, since closed fixture-driven (fixtures 4271/4272).
-  Deref inside a condition is still incomplete (the `cmp`-operand resolver
-  doesn't yet reconstruct a `[bx]` load).)*
+  A dereference inside a condition is recovered too: `fold_linear` returns the
+  value it leaves in the accumulator, so the condition reads `*p` (or any
+  computed test value) from the test region's fold — `if (*p > 0)` is
+  `mov ax,[bx]; or ax,ax; jle`, where `or ax,ax` is the accumulator truthiness
+  test and `ax` holds `*p`. This subsumed the old one-instruction-back operand
+  resolver: a `cmp`/`or` register operand now resolves to whatever the test run
+  computed, however many instructions it took.)*
 - **Promotions** — `Cbw`/`Cwd` become explicit `Cast` nodes, so the emitted C's
   implicit promotions recompile to the same `cbw`/`cwd`.
 - **Aggregates** — a `Lea base` then indexed access ⇒ array; a constant field

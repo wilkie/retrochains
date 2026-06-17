@@ -382,8 +382,10 @@ impl Ctx {
     /// Fold a straight-line instruction range `[lo, hi)` into statements,
     /// symbolically tracking the accumulator. Any op it can't model marks the
     /// function incomplete.
+    /// Returns the value left in the accumulator at the end of the run (e.g. the
+    /// `*p` set up just before a `cmp` that reads `ax`) — `None` if nothing live.
     #[allow(clippy::too_many_lines)] // a flat per-op match reads better unsplit
-    fn fold_linear(&mut self, lo: usize, hi: usize, out: &mut Vec<Stmt>) {
+    fn fold_linear(&mut self, lo: usize, hi: usize, out: &mut Vec<Stmt>) -> Option<Expr> {
         let mut acc: Option<Expr> = None;
         // The pointer value loaded into `bx` (for a `mov bx,p; mov ax,[bx]`
         // dereference).
@@ -692,6 +694,7 @@ impl Ctx {
         if !pending_args.is_empty() {
             self.complete = false; // args pushed with no call to consume them
         }
+        acc
     }
 
     /// Recover the condition of an `if`/`while` from the test at `cmp_idx` and
@@ -703,7 +706,13 @@ impl Ctx {
     /// sets flags without changing `r`) recovers as the *bare* variable (`if (x)`
     /// / `if (!x)`). Modelling the latter as `x != 0` would recompile to a `cmp`,
     /// not the original `or`.
-    fn condition(&mut self, cmp_idx: usize, branch_idx: usize, negate: bool) -> Expr {
+    fn condition(
+        &mut self,
+        cmp_idx: usize,
+        branch_idx: usize,
+        negate: bool,
+        acc: Option<&Expr>,
+    ) -> Expr {
         let bad = |s: &mut Self| {
             s.complete = false;
             Expr::Const(0)
@@ -718,63 +727,62 @@ impl Ctx {
             rel = rel.negate();
         }
 
-        // A register-variable `or r,r` truthiness test (`int` si/di or `char` dl).
-        let or_test = match self.insns[cmp_idx].op.clone() {
+        // A truthiness test `or r,r` — a register variable (`si`/`di`/`dl`) or
+        // the accumulator holding a computed value (`mov ax,[bx]; or ax,ax` for
+        // `*p`). `or r,r` sets the flags from `r` without changing it.
+        let truthy: Option<Expr> = match self.insns[cmp_idx].op.clone() {
             LoOp::Bin { dst: Place::Reg(r), op: BinOp::Or, lhs: Place::Reg(a), rhs: Place::Reg(b) }
-                if is_reg_var(r) && a == r && b == r =>
+                if a == r && b == r =>
             {
-                Some(Place::Reg(r))
+                if is_reg_var(r) {
+                    self.operand(Place::Reg(r))
+                } else if r == Reg::Ax {
+                    acc.cloned()
+                } else {
+                    None
+                }
             }
             LoOp::Bin { dst: Place::Byte(r), op: BinOp::Or, lhs: Place::Byte(a), rhs: Place::Byte(b) }
                 if is_byte_reg_var(r) && a == r && b == r =>
             {
-                Some(Place::Byte(r))
+                self.operand(Place::Byte(r))
             }
             _ => None,
         };
-        if let Some(place) = or_test {
-            let Some(e) = self.operand(place) else { return bad(self) };
-            // `or r,r` sets the flags from `r`, so the branch tests `r <rel> 0`.
-            // Equality renders as the bare/negated variable (so it recompiles to
-            // `or`, not `cmp`); the signed relations render as `r <rel> 0`.
+        if let Some(e) = truthy {
+            // The branch tests `e <rel> 0`. Equality renders as the bare/negated
+            // value (so a register-variable test recompiles to `or`, not `cmp`);
+            // the signed relations render as `e <rel> 0`.
             return match rel {
-                RelOp::Ne => e,                                                       // if (x)
-                RelOp::Eq => Expr::Not(Box::new(e)),                                  // if (!x)
+                RelOp::Ne => e,                                          // if (x)
+                RelOp::Eq => Expr::Not(Box::new(e)),                     // if (!x)
                 RelOp::Lt | RelOp::Le | RelOp::Gt | RelOp::Ge => {
-                    Expr::Rel(rel, Box::new(e), Box::new(Expr::Const(0)))             // if (x <rel> 0)
+                    Expr::Rel(rel, Box::new(e), Box::new(Expr::Const(0))) // if (x <rel> 0)
                 }
             };
         }
 
         // Otherwise an explicit comparison. An operand may be the accumulator
-        // (`cmp ax,n` when comparing two memory operands — one is loaded first),
-        // so resolve it from the load that precedes the `cmp`.
+        // (`cmp ax,n` comparing two memory operands, or `cmp ax,5` on a computed
+        // value like `*p`), resolved to the value the run left in the accumulator.
         let LoOp::Bin { dst: Place::Flags, op: BinOp::Cmp, lhs, rhs } = self.insns[cmp_idx].op.clone()
         else {
             return bad(self);
         };
-        match (self.resolve_operand(lhs, cmp_idx), self.resolve_operand(rhs, cmp_idx)) {
+        match (self.cmp_operand(lhs, acc), self.cmp_operand(rhs, acc)) {
             (Some(l), Some(r)) => Expr::Rel(rel, Box::new(l), Box::new(r)),
             _ => bad(self),
         }
     }
 
-    /// Resolve an operand to an [`Expr`]. A direct operand goes through
-    /// [`operand`](Self::operand); the accumulator (`ax`/`al`) is resolved from
-    /// the `Load` into it immediately before `at` (e.g. `mov ax,i; cmp ax,n`).
-    fn resolve_operand(&mut self, place: Place, at: usize) -> Option<Expr> {
+    /// A `cmp` operand: a direct operand via [`operand`](Self::operand), or the
+    /// accumulator (`ax`/`al`) resolved to the value the test run computed.
+    fn cmp_operand(&mut self, place: Place, acc: Option<&Expr>) -> Option<Expr> {
         if matches!(place, Place::Reg(Reg::Ax) | Place::Byte(ByteReg::Al)) {
-            if at == 0 {
-                return None;
-            }
-            if let LoOp::Load { dst, src } = self.insns[at - 1].op.clone()
-                && matches!(dst, Place::Reg(Reg::Ax) | Place::Byte(ByteReg::Al))
-            {
-                return self.operand(src);
-            }
-            return None;
+            acc.cloned()
+        } else {
+            self.operand(place)
         }
-        self.operand(place)
     }
 
     /// If the then-block ending at the branch-target index `tb` is followed by
@@ -855,13 +863,16 @@ impl Ctx {
                         continue;
                     }
                     let cmp_idx = i - 1;
-                    self.fold_linear(linear_start, cmp_idx, &mut stmts);
+                    // The fold returns the value left in the accumulator (e.g.
+                    // `*p` set up before an `or ax,ax` / `cmp ax,K`), which the
+                    // condition needs to read a register operand.
+                    let cond_acc = self.fold_linear(linear_start, cmp_idx, &mut stmts);
                     let Some(tb) = self.idx_of(target) else {
                         self.complete = false;
                         i += 1;
                         continue;
                     };
-                    let cond = self.condition(cmp_idx, i, true);
+                    let cond = self.condition(cmp_idx, i, true, cond_acc.as_ref());
                     // `if/else` when the then-block ends in a jump past the
                     // else-block; otherwise a plain `if`.
                     let resume = if let Some(e_idx) = self.else_end(tb, target) {
@@ -881,7 +892,12 @@ impl Ctx {
                     // An unconditional jump: a `while` header, or the exit jump.
                     if let Some((b_lo, b_hi, cmp_idx, br_idx, cont)) = self.detect_loop(i, hi) {
                         self.fold_linear(linear_start, i, &mut stmts);
-                        let cond = self.condition(cmp_idx, br_idx, false);
+                        // Fold the test region `[b_hi, cmp_idx)` (the `cmp`'s
+                        // register setup, e.g. `mov ax,i`) into a throwaway buffer
+                        // to recover the accumulator the condition reads.
+                        let mut test_setup = Vec::new();
+                        let cond_acc = self.fold_linear(b_hi, cmp_idx, &mut test_setup);
+                        let cond = self.condition(cmp_idx, br_idx, false, cond_acc.as_ref());
                         let body = self.structure(b_lo, b_hi);
                         stmts.push(Stmt::While(cond, body));
                         i = cont;

@@ -421,6 +421,14 @@ mod tests {
         assert_roundtrips_stack("void f(int *p) { *p = 5; }\n");
         assert_roundtrips_stack("int f(int *p, int *q) { return *p + *q; }\n");
         assert_roundtrips_stack("int f(int *p) { *p = 7; return *p; }\n");
+        // A dereference in a condition — the test value (`*p`) is the accumulator
+        // at the `cmp`/`or`, recovered from the test region's fold.
+        assert_roundtrips_stack("int f(int *p) { if (*p > 0) { return 1; } return 0; }\n");
+        assert_roundtrips_stack("int f(int *p) { if (*p == 5) { return 1; } return 0; }\n");
+        assert_roundtrips_stack("int f(int *p) { if (*p) { return 1; } return 0; }\n");
+        assert_roundtrips_stack(
+            "int f(int *p) { int s; s = 0; while (*p > s) { s = s + 1; } return s; }\n",
+        );
     }
 
     #[test]
