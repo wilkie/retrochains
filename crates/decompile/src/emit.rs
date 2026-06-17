@@ -14,38 +14,67 @@ use std::fmt::Write as _;
 use crate::hi_ir::{recover, Expr, Function, LValue, RelOp, Stmt, Type, Var};
 use crate::lo_ir::Reg;
 
-/// The declaration order → name binding for a function's variables. Lookups are
-/// by identity (stack slot or register), so emitted references stay consistent.
-struct Names(Vec<(Var, String)>);
+/// The name binding for a function's variables. Lookups are by identity (stack
+/// slot, parameter, or register), so emitted references stay consistent.
+struct Names {
+    bindings: Vec<(Var, String)>,
+    /// The number of parameters to declare — the highest parameter slot used
+    /// decides it, since intermediate parameters must be declared to push the
+    /// later ones to the right offset even when they're unread.
+    param_count: usize,
+}
+
+/// The 1-based parameter index of a `[bp+off]` slot (small model: `[bp+4]` = 1).
+fn param_index(off: i16) -> usize {
+    usize::try_from((off - 4) / 2 + 1).unwrap_or(0)
+}
 
 impl Names {
-    /// Build names in declaration order: register variables first (`si` before
-    /// `di`, the order BCC allocates them), then stack slots closest-to-bp
-    /// first (BCC assigns slots from bp downward in declaration order). Naming
-    /// every variable `v1`, `v2`, … in that order makes recompilation reproduce
-    /// the same storage assignment.
+    /// Build names. Parameters are `p1, p2, …` by stack offset. Locals are
+    /// `v1, v2, …` in BCC's allocation order — register variables first (`si`
+    /// before `di`), then stack slots closest-to-bp first — so recompiling a
+    /// plain `int` reproduces the same storage assignment.
     fn build(vars: &[Var]) -> Names {
-        let mut order: Vec<Var> = vars.iter().filter(|v| matches!(v, Var::Reg(_))).copied().collect();
-        order.sort_by_key(|v| match v {
-            Var::Reg(Reg::Si) => 0,
-            Var::Reg(_) => 1,
-            Var::Slot(_) => 2,
-        });
+        let mut bindings = Vec::new();
+
+        let mut param_count = 0;
+        for &v in vars {
+            if let Var::Param(off) = v {
+                let idx = param_index(off);
+                param_count = param_count.max(idx);
+                bindings.push((v, format!("p{idx}")));
+            }
+        }
+
+        let mut regs: Vec<Var> = vars.iter().filter(|v| matches!(v, Var::Reg(_))).copied().collect();
+        regs.sort_by_key(|v| usize::from(matches!(v, Var::Reg(Reg::Di))));
         let mut slots: Vec<Var> = vars.iter().filter(|v| matches!(v, Var::Slot(_))).copied().collect();
         slots.sort_by(|a, b| match (a, b) {
             (Var::Slot(x), Var::Slot(y)) => y.cmp(x), // descending disp (closest to bp first)
             _ => std::cmp::Ordering::Equal,
         });
-        order.extend(slots);
-        Names(order.into_iter().enumerate().map(|(i, v)| (v, format!("v{}", i + 1))).collect())
+        for (i, v) in regs.into_iter().chain(slots).enumerate() {
+            bindings.push((v, format!("v{}", i + 1)));
+        }
+
+        Names { bindings, param_count }
     }
 
     fn of(&self, var: Var) -> &str {
-        self.0.iter().find(|(v, _)| *v == var).map_or("v?", |(_, n)| n.as_str())
+        self.bindings.iter().find(|(v, _)| *v == var).map_or("v?", |(_, n)| n.as_str())
     }
 
-    fn decls(&self) -> impl Iterator<Item = &str> {
-        self.0.iter().map(|(_, n)| n.as_str())
+    /// The parameter list for the signature — `int p1, int p2` (or empty).
+    fn signature(&self) -> String {
+        (1..=self.param_count).map(|i| format!("int p{i}")).collect::<Vec<_>>().join(", ")
+    }
+
+    /// The names of the local variables to declare (parameters excluded).
+    fn local_decls(&self) -> impl Iterator<Item = &str> {
+        self.bindings
+            .iter()
+            .filter(|(v, _)| !matches!(v, Var::Param(_)))
+            .map(|(_, n)| n.as_str())
     }
 }
 
@@ -69,16 +98,40 @@ pub fn to_c(f: &Function) -> Option<String> {
         Type::Int => "int",
         Type::Void => "void",
     };
-    let mut s = format!("{ret} f() {{\n");
-
     let names = Names::build(&f.vars);
-    for decl in names.decls() {
+
+    let mut s = String::new();
+    // The callee of every recovered call is an opaque external (its identity
+    // isn't in `_TEXT`); one K&R prototype lets us call it with any arguments.
+    if body_has_call(&f.body) {
+        s.push_str("extern int g0();\n");
+    }
+    let _ = writeln!(s, "{ret} f({}) {{", names.signature());
+    for decl in names.local_decls() {
         let _ = writeln!(s, "  int {decl};");
     }
 
     emit_block(&f.body, 1, true, &names, &mut s);
     s.push_str("}\n");
     Some(s)
+}
+
+/// Does the recovered body contain a call anywhere (so it needs the extern)?
+fn body_has_call(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Assign(_, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => expr_has_call(e),
+        Stmt::Return(None) => false,
+        Stmt::If(c, t, e) => expr_has_call(c) || body_has_call(t) || body_has_call(e),
+        Stmt::While(c, b) => expr_has_call(c) || body_has_call(b),
+    })
+}
+
+fn expr_has_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call(_) => true,
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
+        Expr::Const(_) | Expr::Var(_) => false,
+    }
 }
 
 /// Emit a statement list at indent depth `depth`. `top` marks the function's
@@ -109,6 +162,9 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
         Stmt::Return(None) => out.push_str("return;\n"),
         Stmt::Return(Some(e)) => {
             let _ = writeln!(out, "return {};", expr_str(e, names));
+        }
+        Stmt::ExprStmt(e) => {
+            let _ = writeln!(out, "{};", expr_str(e, names));
         }
         Stmt::If(cond, then, els) => {
             let _ = writeln!(out, "if ({}) {{", expr_str(cond, names));
@@ -149,6 +205,10 @@ fn expr_str(e: &Expr, names: &Names) -> String {
         }
         Expr::Rel(op, l, r) => {
             format!("({} {} {})", expr_str(l, names), relop_token(*op), expr_str(r, names))
+        }
+        Expr::Call(args) => {
+            let list = args.iter().map(|a| expr_str(a, names)).collect::<Vec<_>>().join(", ");
+            format!("g0({list})")
         }
     }
 }
@@ -297,9 +357,23 @@ mod tests {
     }
 
     #[test]
+    fn parameters_and_calls_roundtrip() {
+        // Parameters (`[bp+4]`, `[bp+6]`), a call returning into the result, a
+        // parameter passed as an argument, and discarded calls as statements.
+        assert_roundtrips("int f(int a) { return a; }\n");
+        assert_roundtrips("int f(int a, int b) { return a + b; }\n");
+        assert_roundtrips("extern int g(); int f() { return g(5); }\n");
+        assert_roundtrips("extern int g(); int f(int a) { return g(a); }\n");
+        assert_roundtrips("extern int g(); int f() { return g(3, 4); }\n");
+        assert_roundtrips("extern void g(); void f() { g(3); g(4); }\n");
+    }
+
+    #[test]
     fn incomplete_function_emits_nothing() {
+        // A global isn't modelled yet, so the recovery declines rather than
+        // emit a body that references an undeclared variable.
         let opts = CompileOpts::default();
-        let code = recompile_text("int g(); int f() { return g(); }\n", &opts).expect("compiles");
+        let code = recompile_text("int gv; int f() { return gv; }\n", &opts).expect("compiles");
         assert!(decompile(&code).is_none(), "an incomplete recovery emits no C");
     }
 }

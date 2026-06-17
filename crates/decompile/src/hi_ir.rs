@@ -68,12 +68,26 @@ fn cond_to_relop(cond: Cond) -> Option<RelOp> {
 pub enum Expr {
     /// An integer constant.
     Const(i32),
-    /// A local variable — a stack slot or a register variable.
+    /// A local variable — a stack slot, parameter, or register variable.
     Var(Var),
     /// `lhs op rhs` (left-associative, as the accumulator chain produces).
     Binary(BinOp, Box<Expr>, Box<Expr>),
     /// `lhs rel rhs` — a comparison (the condition of an `if`/`while`).
     Rel(RelOp, Box<Expr>, Box<Expr>),
+    /// A call with its argument list (source order). The callee is an opaque
+    /// external: a `call` is a placeholder `e8 00 00` patched by a relocation,
+    /// so the target's identity isn't in `_TEXT` and any declared extern
+    /// reproduces the bytes — only the argument count/types matter.
+    Call(Vec<Expr>),
+}
+
+/// Does an expression contain a (side-effecting) call anywhere?
+fn contains_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call(_) => true,
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
+        Expr::Const(_) | Expr::Var(_) => false,
+    }
 }
 
 /// A recovered local variable. BCC keeps `int` locals either on the stack frame
@@ -87,6 +101,9 @@ pub enum Var {
     Slot(i16),
     /// A register variable (`si` or `di`).
     Reg(Reg),
+    /// A parameter at `[bp+disp]` (`disp ≥ 4`, past the saved bp and return
+    /// address). In the small model the first parameter is `[bp+4]`.
+    Param(i16),
 }
 
 /// An assignable location.
@@ -108,6 +125,8 @@ pub enum Stmt {
     Assign(LValue, Expr),
     /// `return expr;` (or `return;` when the accumulator holds no value).
     Return(Option<Expr>),
+    /// `expr;` — an expression evaluated for its side effect (a discarded call).
+    ExprStmt(Expr),
     /// `if (cond) { then } else { otherwise }` — `otherwise` empty if no `else`.
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     /// `while (cond) { body }`.
@@ -148,6 +167,19 @@ fn is_foldable(op: BinOp) -> bool {
     )
 }
 
+/// Flush a discarded side-effecting call from the accumulator as a statement,
+/// leaving a non-call (pure) value in place untouched. Called at the points that
+/// *discard* the accumulator — a fresh load, a new statement, a new argument
+/// push, the run's end — but not at the transparent ops (`Cleanup`, the exit
+/// `Jump`, `Leave`) that sit between a call and the use of its result.
+fn flush_call(acc: &mut Option<Expr>, out: &mut Vec<Stmt>) {
+    if acc.as_ref().is_some_and(contains_call)
+        && let Some(e) = acc.take()
+    {
+        out.push(Stmt::ExprStmt(e));
+    }
+}
+
 /// The structuring/folding context over one function's Lo-IR.
 struct Ctx {
     insns: Vec<LoInsn>,
@@ -170,6 +202,7 @@ impl Ctx {
     fn var_of(place: Place) -> Option<Var> {
         match place {
             Place::Local(d) if d < 0 => Some(Var::Slot(d)),
+            Place::Local(d) if d >= 4 => Some(Var::Param(d)),
             Place::Reg(r) if is_reg_var(r) => Some(Var::Reg(r)),
             _ => None,
         }
@@ -201,27 +234,72 @@ impl Ctx {
     /// Fold a straight-line instruction range `[lo, hi)` into statements,
     /// symbolically tracking the accumulator. Any op it can't model marks the
     /// function incomplete.
+    #[allow(clippy::too_many_lines)] // a flat per-op match reads better unsplit
     fn fold_linear(&mut self, lo: usize, hi: usize, out: &mut Vec<Stmt>) {
         let mut acc: Option<Expr> = None;
+        // Arguments pushed for the call currently being assembled (push order).
+        let mut pending_args: Vec<Expr> = Vec::new();
+        // BCC emits its redundant exit jump (`eb 00`) for an explicit `return`
+        // but not when a void function falls off the end — so a `Jump` before
+        // the epilogue distinguishes "return the accumulator" from "the trailing
+        // value is a discarded call".
+        let mut saw_exit_jump = false;
+        let mut emitted_ret = false;
         for i in lo..hi {
             match self.insns[i].op.clone() {
-                // Frame setup/teardown and unconditional jumps carry no value
-                // (a straight-line run's only jump is the stereotyped exit).
+                // Frame setup/teardown carry no value.
                 LoOp::Enter { .. }
                 | LoOp::Leave
-                | LoOp::Jump { .. }
                 | LoOp::SaveReg { .. }
-                | LoOp::RestoreReg { .. } => {}
+                | LoOp::RestoreReg { .. }
+                | LoOp::Cleanup { .. } => {}
 
-                LoOp::Ret { .. } => {
-                    let v = acc.take();
-                    if v.is_some() {
-                        self.returns_value = true;
+                LoOp::Jump { .. } => saw_exit_jump = true,
+
+                // `push ax` — the accumulator is the argument; `push [bp+d]` or a
+                // register push supplies a variable directly.
+                LoOp::Arg { src: Place::Reg(Reg::Ax) } => match acc.take() {
+                    Some(e) => pending_args.push(e),
+                    None => self.complete = false,
+                },
+                LoOp::Arg { src } => {
+                    flush_call(&mut acc, out);
+                    match self.operand(src) {
+                        Some(e) => pending_args.push(e),
+                        None => self.complete = false,
                     }
-                    out.push(Stmt::Return(v));
                 }
 
+                // A call consumes the pending arguments (cdecl pushes them
+                // right-to-left, so reverse to source order) and leaves its
+                // result in the accumulator.
+                LoOp::Call { .. } => {
+                    let mut args = std::mem::take(&mut pending_args);
+                    args.reverse();
+                    acc = Some(Expr::Call(args));
+                }
+
+                LoOp::Ret { .. } => {
+                    emitted_ret = true;
+                    if saw_exit_jump {
+                        // An explicit `return <expr>` — the accumulator is the value.
+                        let v = acc.take();
+                        if v.is_some() {
+                            self.returns_value = true;
+                        }
+                        out.push(Stmt::Return(v));
+                    } else {
+                        // Fell off the end — any call in the accumulator was a
+                        // discarded statement, and there's no return value.
+                        flush_call(&mut acc, out);
+                        out.push(Stmt::Return(None));
+                    }
+                }
+
+                // `mov ax, …` starts a fresh accumulator value, discarding any
+                // call result the previous statement left unused.
                 LoOp::Load { dst: Place::Reg(Reg::Ax), src } => {
+                    flush_call(&mut acc, out);
                     acc = self.operand(src);
                     if acc.is_none() {
                         self.complete = false;
@@ -232,13 +310,18 @@ impl Ctx {
                 // is an immediate, the accumulator (`mov si,ax` stores the
                 // current expression), or another register variable.
                 LoOp::Load { dst: Place::Reg(r), src } if is_reg_var(r) => {
-                    let lv = self.dest(Place::Reg(r));
                     let val = match src {
-                        Place::Imm(v) => Some(Expr::Const(v)),
-                        Place::Reg(Reg::Ax) => acc.take(),
-                        other => self.operand(other),
+                        Place::Reg(Reg::Ax) => acc.take(), // consumes the accumulator
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
                     };
-                    match (lv, val) {
+                    match (self.dest(Place::Reg(r)), val) {
                         (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
                         _ => self.complete = false,
                     }
@@ -295,13 +378,27 @@ impl Ctx {
                     }
                 }
 
-                LoOp::Store { dst, src: Place::Imm(v) } => match self.dest(dst) {
-                    Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(v))),
-                    None => self.complete = false,
-                },
+                LoOp::Store { dst, src: Place::Imm(v) } => {
+                    flush_call(&mut acc, out);
+                    match self.dest(dst) {
+                        Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(v))),
+                        None => self.complete = false,
+                    }
+                }
 
                 _ => self.complete = false,
             }
+        }
+        // A discarded call at the run's end (a trailing `g(x);`) still happened.
+        flush_call(&mut acc, out);
+        if !pending_args.is_empty() {
+            self.complete = false; // args pushed with no call to consume them
+        }
+        // A jump to the epilogue with no `return` in this run is an early return
+        // inside a branch/loop — a multi-exit shape this increment doesn't
+        // structure. Bail rather than silently drop the returned value.
+        if saw_exit_jump && !emitted_ret {
+            self.complete = false;
         }
     }
 
@@ -597,8 +694,43 @@ mod tests {
     }
 
     #[test]
-    fn a_call_marks_the_function_incomplete() {
-        let f = recover_c("int g(); int f() { return g(); }\n");
-        assert!(!f.complete, "an unfolded call leaves the function incomplete");
+    fn call_recovers_with_arguments_and_a_parameter() {
+        // `g(a)` — a parameter passed to a call. The parameter is `[bp+4]`, the
+        // call result is returned.
+        let f = recover_c("extern int g(); int f(int a) { return g(a); }\n");
+        assert!(f.complete, "a call with a parameter argument is recovered");
+        assert!(f.vars.contains(&Var::Param(4)), "the parameter is [bp+4]");
+        let Some(Stmt::Return(Some(Expr::Call(args)))) = f.body.last() else {
+            panic!("expected `return g(a)`");
+        };
+        assert_eq!(args.len(), 1, "one argument");
+        assert_eq!(args[0], Expr::Var(Var::Param(4)), "the argument is the parameter");
+    }
+
+    #[test]
+    fn discarded_call_recovers_as_a_statement() {
+        // `g(3); g(4);` — the first call's result is discarded, so it must
+        // surface as its own statement, not be dropped.
+        let f = recover_c("extern void g(); void f() { g(3); g(4); }\n");
+        assert!(f.complete);
+        assert!(
+            matches!(f.body.first(), Some(Stmt::ExprStmt(Expr::Call(_)))),
+            "the discarded first call is an expression statement",
+        );
+    }
+
+    #[test]
+    fn a_global_marks_the_function_incomplete() {
+        // Globals aren't modelled yet, so a function reading one isn't recovered.
+        let f = recover_c("int gv; int f() { return gv; }\n");
+        assert!(!f.complete, "an unmodelled global leaves the function incomplete");
+    }
+
+    #[test]
+    fn an_early_return_marks_the_function_incomplete() {
+        // `if (a > 0) { return a; }` is a multi-exit shape this increment doesn't
+        // structure — it must bail rather than silently drop the early return.
+        let f = recover_c("int f(int a) { if (a > 0) { return a; } return 0; }\n");
+        assert!(!f.complete, "an early return inside a branch leaves the function incomplete");
     }
 }

@@ -230,6 +230,21 @@ out of `ax`/`dx:ax`. (MSC differs only in cleanup style — `add sp,k` always �
 the chkstk prologue; the same window works, which is why the recognizer is
 multi-toolchain.)
 
+Parameters and calls are built (`hi_ir.rs`). Parameters are `Var::Param`
+(`[bp+disp]`, `disp ≥ 4`) and emit into the signature (`int p1, int p2, …`),
+sized by the highest slot used. The fold assembles `Arg`s into a pending list,
+reverses it at the `Call` (push order is RTL), and leaves the result in the
+accumulator — so `x = g(3)` and `g(a, b)` recover directly, and a discarded
+result (`g(3);`) surfaces as an `ExprStmt` (flushed when the next op would
+overwrite the accumulator). **Two facts make the callee's identity irrelevant to
+the bytes:** a `call` is a placeholder `e8 00 00` patched by a relocation, so one
+declared K&R extern (`extern int g0();`) recompiles any call site; and an
+explicit `return <expr>` carries BCC's redundant exit jump (`eb 00`) while a void
+fall-off doesn't — that jump is the signal distinguishing "return the
+accumulator" from "the trailing value was a discarded call". A return *inside* a
+branch (a multi-exit shape) isn't structured yet, so it's detected (an exit jump
+in a sub-block with no `Ret`) and marked incomplete rather than mis-recovered.
+
 ## 8. Provenance and the verify/repair loop
 
 Every Lo-IR and Hi-IR node carries the **byte range it lifted from**. This is what
