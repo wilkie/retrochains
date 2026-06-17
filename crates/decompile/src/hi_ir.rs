@@ -278,6 +278,140 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
     out
 }
 
+/// Apply `f` to every [`Var`] referenced in an expression (reads and `&v`).
+fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
+    match e {
+        Expr::Var(v) | Expr::AddrOf(v) => f(v),
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            walk_vars_expr(a, f);
+            walk_vars_expr(b, f);
+        }
+        Expr::Not(a) | Expr::Deref(a) => walk_vars_expr(a, f),
+        Expr::Call(_, args) => args.iter_mut().for_each(|a| walk_vars_expr(a, f)),
+        Expr::Const(_) | Expr::LongConst(_) => {}
+    }
+}
+
+/// Apply `f` to every [`Var`] in an lvalue.
+fn walk_vars_lvalue(lv: &mut LValue, f: &mut dyn FnMut(&mut Var)) {
+    match lv {
+        LValue::Var(v) => f(v),
+        LValue::Deref(e) => walk_vars_expr(e, f),
+    }
+}
+
+/// Apply `f` to every [`Var`] in a statement list (recursing into blocks).
+fn walk_vars(stmts: &mut [Stmt], f: &mut dyn FnMut(&mut Var)) {
+    for s in stmts {
+        match s {
+            Stmt::Assign(lv, e) | Stmt::Compound(lv, _, e) => {
+                walk_vars_lvalue(lv, f);
+                walk_vars_expr(e, f);
+            }
+            Stmt::Return(Some(e)) | Stmt::ExprStmt(e) => walk_vars_expr(e, f),
+            Stmt::Return(None) | Stmt::Break => {}
+            Stmt::If(c, t, el) => {
+                walk_vars_expr(c, f);
+                walk_vars(t, f);
+                walk_vars(el, f);
+            }
+            Stmt::While(c, b) | Stmt::Do(c, b) => {
+                walk_vars_expr(c, f);
+                walk_vars(b, f);
+            }
+            Stmt::For(init, c, step, b) => {
+                walk_vars(std::slice::from_mut(init), f);
+                walk_vars_expr(c, f);
+                walk_vars(std::slice::from_mut(step), f);
+                walk_vars(b, f);
+            }
+            Stmt::Switch(sc, arms, def) => {
+                walk_vars_expr(sc, f);
+                for (_, b) in arms.iter_mut() {
+                    walk_vars(b, f);
+                }
+                walk_vars(def, f);
+            }
+        }
+    }
+}
+
+/// Count references to `target` across a statement list.
+fn count_var(stmts: &mut [Stmt], target: Var) -> usize {
+    let mut n = 0;
+    walk_vars(stmts, &mut |v| {
+        if *v == target {
+            n += 1;
+        }
+    });
+    n
+}
+
+/// Recover BCC's promotion of a parameter into a register variable. When a
+/// parameter is mutated (or heavily used), BCC copies it into a register
+/// variable at entry (`mov si,[bp+4]`) and works on that register — so the
+/// recovery sees a leading `reg = param` and a fresh local. But the register
+/// variable *is* the parameter: the slot is never re-read, so they can't
+/// diverge. Rewrite the register back to the parameter and drop the copy, which
+/// reproduces the same bytes (BCC re-promotes the mutated parameter) without the
+/// spurious local — decisive for `char`, where the extra local would cost a
+/// 2-byte frame, and cleaner for `int`.
+///
+/// Guard: only when the parameter appears *exactly once* (its copy), so the
+/// substitution can't collide with an independent read of the same parameter.
+fn promote_params(ctx: &mut Ctx, body: &mut Vec<Stmt>) {
+    // Collect the leading `reg = param` copies (immutable scan).
+    let mut candidates: Vec<(Var, Var)> = Vec::new();
+    for s in body.iter() {
+        match s {
+            Stmt::Assign(LValue::Var(reg), Expr::Var(param))
+                if matches!(reg, Var::Reg(_) | Var::ByteReg(_))
+                    && matches!(param, Var::Param(_))
+                    && !candidates.iter().any(|(r, _)| r == reg) =>
+            {
+                candidates.push((*reg, *param));
+            }
+            _ => break, // leading copies only
+        }
+    }
+    // Keep the front-run whose parameter is read *only* in its copy, so the
+    // rewrite can't collide with an independent read of the same parameter.
+    let mut aliases: Vec<(Var, Var)> = Vec::new();
+    for (reg, param) in candidates {
+        if count_var(body, param) == 1 {
+            aliases.push((reg, param));
+        } else {
+            break;
+        }
+    }
+    if aliases.is_empty() {
+        return;
+    }
+    body.drain(0..aliases.len());
+    for (reg, param) in &aliases {
+        walk_vars(body, &mut |v| {
+            if *v == *reg {
+                *v = *param;
+            }
+        });
+        // Move the register variable's inferred type to the parameter, then drop
+        // the register from the variable set (it's no longer a distinct local).
+        for set in [
+            &mut ctx.char_vars,
+            &mut ctx.unsigned_vars,
+            &mut ctx.long_vars,
+            &mut ctx.ptr_vars,
+            &mut ctx.char_ptr_vars,
+        ] {
+            if set.contains(reg) && !set.contains(param) {
+                set.push(*param);
+            }
+            set.retain(|v| v != reg);
+        }
+        ctx.vars.retain(|v| v != reg);
+    }
+}
+
 /// A recovered value type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
@@ -1312,16 +1446,17 @@ impl Ctx {
                     }
                 }
 
-                // `inc`/`dec dl` — `c = c ± 1` directly on a char register variable.
+                // `inc`/`dec dl` — an in-place `c++`/`c--` on a char register
+                // variable. BCC codes this in one instruction when the result is
+                // used right after; the discarded form is a load-op-store (`mov
+                // al,dl; inc al; mov dl,al`) that folds to a plain `Assign` via the
+                // accumulator. So the single `inc dl` recovers as a `Compound`.
                 LoOp::Un { dst: Place::Byte(r), op, operand: Place::Byte(o) }
                     if is_byte_reg_var(r) && o == r && matches!(op, UnOp::Inc | UnOp::Dec) =>
                 {
                     let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
                     match self.char_dest(Place::Byte(r)) {
-                        Some(lv) => out.push(Stmt::Assign(
-                            lv,
-                            Expr::Binary(step, Box::new(Expr::Var(Var::ByteReg(r))), Box::new(Expr::Const(1))),
-                        )),
+                        Some(lv) => out.push(Stmt::Compound(lv, step, Expr::Const(1))),
                         None => self.complete = false,
                     }
                 }
@@ -2195,7 +2330,8 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         .iter()
         .rposition(|n| matches!(n.op, LoOp::Ret { .. }))
         .map_or(ctx.insns.len(), |r| r + 1);
-    let body = fold_for_loops(ctx.structure(0, len));
+    let mut body = fold_for_loops(ctx.structure(0, len));
+    promote_params(&mut ctx, &mut body);
     // A `long` occupies two slots (lo, lo+2). If the high-word slot was also
     // recovered as a separate variable (e.g. a `long` local's paired stores read
     // as two `int` stores), the layout is double-counted — bail rather than emit

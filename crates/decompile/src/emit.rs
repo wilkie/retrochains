@@ -1182,6 +1182,23 @@ mod tests {
     }
 
     #[test]
+    fn parameter_promotion_recovers_direct_mutation() {
+        // A mutated parameter is copied into a register variable at entry; the
+        // register *is* the parameter, so the recovery rewrites it back to direct
+        // parameter mutation rather than a spurious local + copy. Decisive for
+        // `char` (the extra local would cost a 2-byte frame), clean for `int`.
+        assert_roundtrips("int f(char c){ c++; return c; }\n");
+        assert_roundtrips("int f(char c){ c--; return c; }\n");
+        assert_roundtrips("int f(int x){ x++; return x; }\n");
+        assert_roundtrips("int f(int x){ x += 5; return x; }\n");
+        // The recovered `char` parameter mutation has no spurious local.
+        let f = crate::hi_ir::recover(
+            &recompile_text("int f(char c){ c++; return c; }\n", &CompileOpts::default()).unwrap(),
+        );
+        assert!(f.vars.iter().all(|v| matches!(v, Var::Param(_))), "no local — just the param");
+    }
+
+    #[test]
     fn a_program_touching_a_global_declines() {
         // File-scope globals are shared across functions; their one data-segment
         // layout isn't reconciled across per-function recovery yet, so a

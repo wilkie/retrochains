@@ -20,14 +20,14 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | multi-fn | in-place | var-shift | meaning |
-|-------------|--------:|---------:|---------:|----------:|---------|
-| **MATCH**   |  1433 (34.7%) | 1580 (38.2%) | 1761 (42.6%) | **1817 (44.0%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | 2129 | 2000 | 1940 (47.0%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | 389 | 336 | 340 (8.2%) | recovered C recompiles to *different* bytes |
-| cerr        |     2 |   2 |  2 |  2 | recovered C didn't compile |
-| notext      |     5 |   5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 |  27 | 27 | 26 | recover/verify crashed |
+| bucket      | initial | multi-fn | in-place | var-shift | param-promo | meaning |
+|-------------|--------:|---------:|---------:|----------:|------------:|---------|
+| **MATCH**   |  1433 (34.7%) | 1580 (38.2%) | 1761 (42.6%) | 1817 (44.0%) | **1826 (44.2%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | 2129 | 2000 | 1940 | 1940 (47.0%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | 389 | 336 | 340 | 331 (8.0%) | recovered C recompiles to *different* bytes |
+| cerr        |     2 |   2 |  2 |  2 |  2 | recovered C didn't compile |
+| notext      |     5 |   5 |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
+| PANIC       |    27 |  27 | 27 | 26 | 26 | recover/verify crashed |
 
 (The +4 mismatch at the var-shift step is cast/bitfield-adjacent: folding the
 shift exposes a missing narrowing — `(char)(v>>4)` drops the cast, a signed
@@ -110,14 +110,17 @@ clears most of them.
    (`d3 /r` idiom `ShiftCl`); the count loads into `cl` (tracked as the shift
    register, intercepted before the char-reg-var arm since `cl ∈ is_byte_reg_var`).
    Constant shifts were already handled (BCC unrolls them into `d1` shift-by-1s).
-4. **`char` in-place compound** — `a += b` on a `char` reg var is `add dl,al`
-   (byte in-place). *Blocked:* the rhs through `al` can be an int's low byte
-   (`c |= n`, n int → mis-typed `char`), and `char` params promote differently;
-   needs the int-vs-char slot prescan and the param-promotion fix first (an
-   attempt regressed 5 incomplete→mismatch and was reverted).
-5. **Param promotion** — a param copied to a reg var and mutated (`x++` on a
-   param) recovers as a fresh local + copy; works for `int` by luck but adds 2
-   bytes for `char`. Recovering it as direct param mutation would also clean up
-   the remaining `functions/*` mismatches.
+4. ~~**Param promotion**~~ — **DONE** (MATCH 44.0% → 44.2%, MISMATCH 340 → 331,
+   −9 with no regressions). A mutated parameter is copied into a register
+   variable at entry; the register *is* the parameter (the slot is never
+   re-read), so `promote_params` rewrites the register back to the parameter and
+   drops the copy. Guarded on the parameter appearing exactly once. Also made the
+   `char` in-place `inc dl`/`dec dl` a `Compound` (it was a load-op-store
+   `Assign`). Decisive for `char` param mutation (the spurious local cost a 2-byte
+   frame); `int` was already matching but is now cleaner (`x++`, not `v1=p1;v1++`).
+5. **`char` in-place compound** — `a += b` on a `char` reg var is `add dl,al`
+   (byte in-place). *Still blocked:* the rhs through `al` can be an int's low
+   byte (`c |= n`, n int → mis-typed `char`); needs an int-vs-char slot prescan
+   (a slot word-accessed ⇒ int). The param half is now unblocked by #4.
 6. **Panic → sound-incomplete** (26), **shared globals across functions**, then
    casts/bitfields (the var-shift mismatch tail), arrays/struct/pointer-deref.
