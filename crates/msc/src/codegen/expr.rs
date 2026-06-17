@@ -1136,6 +1136,24 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
                     out.extend_from_slice(&[0x8B, 0x07]);               // mov ax,[bx]
                 }
+                // `*++p` — advance the pointer in place, then load it straight
+                // into BX and deref (`add [p],stride; mov bx,[p]; mov ax,[bx]`),
+                // avoiding the AX round-trip the generic path would add. Fixture
+                // 4282.
+                Expr::PreMutateLocal { local_idx, step } => {
+                    let disp = locals.disp(*local_idx);
+                    emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+                    out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+                    out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
+                }
+                Expr::PreMutateParam { param_idx, step } => {
+                    let disp = param_disp(*param_idx);
+                    let pointee = locals.param_pointee_size(*param_idx);
+                    let eff_step = if pointee > 0 { *step * pointee as i32 } else { *step };
+                    emit_postmutate_local(eff_step, 2, disp, out);
+                    out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+                    out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
+                }
                 Expr::Param(i) => {
                     let disp = (4 + (*i * 2)) as i16;
                     { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }

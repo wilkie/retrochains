@@ -16,6 +16,16 @@ impl<'a> super::FunctionEmitter<'a> {
     ///   and index can be either register- or stack-resident; only
     ///   the all-stack form is captured today.
     pub(crate) fn emit_deref_to_ax(&mut self, ptr: &Expr) {
+        // `*++p` / `*--p` — pre-increment/decrement the pointer (a side effect
+        // on the pointer variable, scaled by the pointee stride), then
+        // dereference the *updated* value. (Postfix `*p++` derefs the old value
+        // and is handled in the update-expression path.) Fixture 4282.
+        if let ExprKind::Update { target, op, position: UpdatePosition::Pre } = &ptr.kind {
+            self.emit_update_in_place(target, *op, UpdatePosition::Pre);
+            let updated = Expr { kind: ExprKind::Ident(target.clone()), span: ptr.span };
+            self.emit_deref_to_ax(&updated);
+            return;
+        }
         // `*p` where p is a seg-qualified pointer (`int _ss/_es/_cs/_ds *`).
         // The qualifier becomes a TASM `<seg>:` operand prefix on the
         // load. DS is the default segment and is elided. Fixtures
