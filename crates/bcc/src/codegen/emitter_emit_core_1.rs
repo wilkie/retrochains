@@ -882,6 +882,7 @@ impl<'a> super::FunctionEmitter<'a> {
             // 2191 (`l + i` long-left + int-right, stack dest).
             if let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(left)
                 && !self.expr_is_long_like(right)
+                && try_const_eval(right).is_none()
                 && matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
             {
                 let unsigned = self.expr_int_is_unsigned(right);

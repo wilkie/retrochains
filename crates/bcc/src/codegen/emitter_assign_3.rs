@@ -535,6 +535,14 @@ impl<'a> super::FunctionEmitter<'a> {
                             return;
                         }
                     }
+                    // A general `long` arithmetic source (`x = a + 1`, `a - b`,
+                    // `-a`, …) — evaluate the long value into the AX:DX (high:low)
+                    // pair and store both halves. The same helper the long-array
+                    // and long-global element stores use. Fixture 4275 (`long x; x
+                    // = a + 1;`).
+                    if self.try_emit_long_value_to_dest(value, &bp_addr(off + 2), &bp_addr(off)) {
+                        return;
+                    }
                     panic!("non-constant long local assign not yet supported (no fixture)");
                 }
                 // Char-local store: byte-width immediate. Same byte
