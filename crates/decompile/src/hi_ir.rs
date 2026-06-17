@@ -131,6 +131,11 @@ pub enum Expr {
     /// `test; jcc else; <t→ax>; jmp end; else: <f→ax>; end:` where both arms
     /// reduce to a single accumulator value (no statements).
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `*p++` / `*p--` — dereference a pointer, then post-increment/decrement it.
+    /// Recovered from the BCC idiom `mov bx,p; inc/dec p (×stride); mov ax,[bx]`
+    /// (the old pointer saved in `bx`, advanced in place, then deref'd). `true`
+    /// is the decrement form.
+    PostIncDeref(Var, bool),
 }
 
 /// Does an expression contain a (side-effecting) call anywhere?
@@ -140,7 +145,7 @@ fn contains_call(e: &Expr) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
         Expr::Ternary(a, b, c) => contains_call(a) || contains_call(b) || contains_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => contains_call(a),
-        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) | Expr::PostIncDeref(..) => false,
     }
 }
 
@@ -236,7 +241,7 @@ pub enum Stmt {
 /// Does `expr` mention variable `var`? Used to confirm a `for` loop variable.
 fn expr_mentions(expr: &Expr, var: Var) -> bool {
     match expr {
-        Expr::Var(v) | Expr::AddrOf(v) => *v == var,
+        Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => *v == var,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_mentions(a, var) || expr_mentions(b, var)
         }
@@ -306,7 +311,7 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
 /// Apply `f` to every [`Var`] referenced in an expression (reads and `&v`).
 fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
     match e {
-        Expr::Var(v) | Expr::AddrOf(v) => f(v),
+        Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => f(v),
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             walk_vars_expr(a, f);
             walk_vars_expr(b, f);
@@ -761,6 +766,35 @@ impl Ctx {
         }
     }
 
+    /// The `*p++` / `*p--` idiom following a `mov bx, r` at index `i`: a run of
+    /// in-place `inc`/`dec r` (the pointer advance, all one direction) then a word
+    /// `mov ax,[bx]` dereferencing the saved old pointer. Returns `(deref index,
+    /// is_decrement)`, or `None`. (The `char *` form defers the increment with no
+    /// `bx` snapshot, so it doesn't match — and is recovered elsewhere.)
+    fn post_inc_deref(&self, i: usize, r: Reg) -> Option<(usize, bool)> {
+        let mut j = i + 1;
+        let mut dec: Option<bool> = None;
+        while let Some(LoOp::Un { dst: Place::Reg(d), op, operand: Place::Reg(o) }) =
+            self.insns.get(j).map(|n| &n.op)
+        {
+            if *d != r || *o != r || !matches!(op, UnOp::Inc | UnOp::Dec) {
+                break;
+            }
+            let this_dec = matches!(op, UnOp::Dec);
+            if dec.is_some_and(|d| d != this_dec) {
+                return None; // mixed inc/dec
+            }
+            dec = Some(this_dec);
+            j += 1;
+        }
+        let dec = dec?; // need at least one advance
+        matches!(
+            self.insns.get(j).map(|n| &n.op),
+            Some(LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Deref(Reg::Bx) })
+        )
+        .then_some((j, dec))
+    }
+
     /// Is register `r` dereferenced anywhere in the function (`[r]` / `[r+disp]`,
     /// load or store)? A reg var that is means it holds a pointer — so an
     /// immediate loaded into it is `&global`, not a literal.
@@ -898,7 +932,7 @@ impl Ctx {
                 self.mark_unsigned(c);
             }
             Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => self.mark_unsigned(a),
-            Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..) => {}
+            Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..) | Expr::PostIncDeref(..) => {}
         }
     }
 
@@ -1313,6 +1347,21 @@ impl Ctx {
                     self.note(v);
                     self.note_char_ptr(v);
                     acc = Some(Self::deref_at(Expr::Var(v), disp));
+                }
+
+                // `*p++` / `*p--` — `mov bx,si` snapshots the pointer, then `inc/dec
+                // si` (×stride) advances it, and `mov ax,[bx]` derefs the OLD value.
+                // Recover the whole idiom as one post-increment deref.
+                LoOp::Load { dst: Place::Reg(Reg::Bx), src: Place::Reg(r) }
+                    if is_reg_var(r) && self.post_inc_deref(i, r).is_some() =>
+                {
+                    flush_call(&mut acc, out);
+                    let (deref_idx, dec) = self.post_inc_deref(i, r).expect("checked");
+                    let v = Var::Reg(r);
+                    self.note(v);
+                    self.note_ptr(v);
+                    acc = Some(Expr::PostIncDeref(v, dec));
+                    skip = deref_idx - i; // consume the incs and the deref
                 }
 
                 // `mov bx, …` loads a pointer for a following `[bx]` dereference.

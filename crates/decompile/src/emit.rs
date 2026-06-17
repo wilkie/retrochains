@@ -468,7 +468,7 @@ fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
                 || expr_has_external_call(c, callees)
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_external_call(a, callees),
-        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) | Expr::PostIncDeref(..) => false,
     }
 }
 
@@ -501,7 +501,7 @@ fn expr_has_call(e: &Expr) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
         Expr::Ternary(a, b, c) => expr_has_call(a) || expr_has_call(b) || expr_has_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_call(a),
-        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) | Expr::PostIncDeref(..) => false,
     }
 }
 
@@ -700,6 +700,9 @@ fn expr_str(e: &Expr, names: &Names) -> String {
             expr_str(t, names),
             expr_str(f, names)
         ),
+        Expr::PostIncDeref(v, dec) => {
+            format!("*{}{}", names.var_str(*v), if *dec { "--" } else { "++" })
+        }
     }
 }
 
@@ -1250,6 +1253,19 @@ mod tests {
         assert_roundtrips_stack("long f(long a){ long r; r = a + 1; return r; }\n");
         // The dx-high return form still works.
         assert_roundtrips_stack("long f(long a, long b){ return a + b; }\n");
+    }
+
+    #[test]
+    fn post_increment_deref_recovers() {
+        // `*p++` is `mov bx,p; inc p (×stride); mov ax,[bx]` — the old pointer
+        // saved in BX, advanced in place, then deref'd. Recovered as `*p++`
+        // (`Expr::PostIncDeref`). Read, decrement, and assigned-into all work; a
+        // `char *p++` (which defers the increment, no BX snapshot) recovers
+        // elsewhere and is left untouched.
+        assert_roundtrips("int f(int *p){ return *p++; }\n");
+        assert_roundtrips("int f(int *p){ return *p--; }\n");
+        assert_roundtrips("int f(int *p){ int x; x = *p++; return x; }\n");
+        assert_roundtrips("int f(char *p){ return *p++; }\n");
     }
 
     #[test]
