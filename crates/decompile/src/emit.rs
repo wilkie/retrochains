@@ -1240,6 +1240,20 @@ mod tests {
     }
 
     #[test]
+    fn register_variable_pointer_deref_roundtrips() {
+        // BCC keeps a pointer parameter/local in a register variable (si/di), so
+        // `*p` is `mov ax,[si]` — not the `mov bx,p; mov ax,[bx]` stack form. The
+        // deref, store, and the char-width variants all recover (default opts, so
+        // the pointer is a reg var). `p->x` (offset 0) is the same as `*p`.
+        assert_roundtrips("int f(int *p){ return *p; }\n");
+        assert_roundtrips("int f(int *p){ return *p + 1; }\n");
+        assert_roundtrips("void f(int *p, int v){ *p = v; }\n");
+        assert_roundtrips("int f(char *p){ return *p; }\n");
+        assert_roundtrips("void f(char *p, char v){ *p = v; }\n");
+        assert_roundtrips("struct S { int x; int y; }; int f(struct S *p){ return p->x; }\n");
+    }
+
+    #[test]
     fn ternary_expressions_roundtrip() {
         // `cond ? t : f` is a diamond whose both arms leave a value in `ax` and
         // converge; recovered as `Expr::Ternary` and seeded into the consumer

@@ -1163,6 +1163,30 @@ impl Ctx {
                     }
                 }
 
+                // `mov ax, [si]` / `mov ax, [di]` — dereference a pointer held in a
+                // register variable (`*p`). Unlike the bx form, the pointer *is*
+                // the register variable, not a value loaded into a scratch.
+                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Deref(r) }
+                    if is_reg_var(r) =>
+                {
+                    flush_call(&mut acc, out);
+                    let v = Var::Reg(r);
+                    self.note(v);
+                    self.note_ptr(v);
+                    acc = Some(Expr::Deref(Box::new(Expr::Var(v))));
+                }
+
+                // `mov al, [si]` / `mov al, [di]` — deref a `char *` reg-var pointer.
+                LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::Deref(r) }
+                    if is_reg_var(r) =>
+                {
+                    flush_call(&mut acc, out);
+                    let v = Var::Reg(r);
+                    self.note(v);
+                    self.note_char_ptr(v);
+                    acc = Some(Expr::Deref(Box::new(Expr::Var(v))));
+                }
+
                 // `mov ax, [bx+disp]` — deref an `int *` at a constant byte
                 // offset: `*(p + K)` where K = disp/2 (the `int` stride). An odd
                 // displacement isn't a clean `int` index — bail.
@@ -1786,6 +1810,47 @@ impl Ctx {
                             out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), e));
                         }
                         _ => self.complete = false,
+                    }
+                }
+
+                // `mov [si], al` / `mov [di], al` — store a `char` through a
+                // reg-var `char *` pointer (`*p = v`).
+                LoOp::Store { dst: Place::Deref(r), src: Place::Byte(ByteReg::Al) }
+                    if is_reg_var(r) =>
+                {
+                    let v = Var::Reg(r);
+                    match acc.take() {
+                        Some(e) => {
+                            self.note(v);
+                            self.note_char_ptr(v);
+                            out.push(Stmt::Assign(LValue::Deref(Box::new(Expr::Var(v))), e));
+                        }
+                        None => self.complete = false,
+                    }
+                }
+
+                // `mov [si], ax` / `mov [si], imm` — store through a reg-var
+                // pointer (`*p = v` / `*p = const`).
+                LoOp::Store { dst: Place::Deref(r), src } if is_reg_var(r) => {
+                    let value = match src {
+                        Place::Reg(Reg::Ax) => acc.take(),
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
+                    };
+                    match value {
+                        Some(e) => {
+                            let v = Var::Reg(r);
+                            self.note(v);
+                            self.note_ptr(v);
+                            out.push(Stmt::Assign(LValue::Deref(Box::new(Expr::Var(v))), e));
+                        }
+                        None => self.complete = false,
                     }
                 }
 

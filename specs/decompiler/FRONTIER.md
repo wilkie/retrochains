@@ -20,14 +20,19 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | widening | long-store | rev-long-add | meaning |
-|-------------|--------:|---|---------:|-----------:|-------------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 2009 (48.6%) | 2013 (48.7%) | **2016 (48.8%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1842 | 1838 | 1830 (44.3%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 254 | 254 | 254 (6.1%) | recovered C recompiles to *different* bytes |
+| bucket      | initial | … | long-store | rev-long-add | regvar-ptr | meaning |
+|-------------|--------:|---|-----------:|-------------:|-----------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 2013 (48.7%) | 2016 (48.8%) | **2074 (50.2%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1838 | 1830 | 1746 (42.3%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 254 | 254 | 273 (6.6%) | recovered C recompiles to *different* bytes |
 | cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 | … | 19 | 19 | 19 | recover/verify crashed |
+| PANIC       |    27 | … | 19 | 19 | 26 | recover/verify crashed |
+
+(The reg-var-pointer step crossed 50%: +58 match. The +19 mismatch / +7 panic
+are adjacent gaps it unblocked — `&global` mis-recovered as `0`, char-pointer
+arithmetic (`p++`) that crashes our `bcc`, bitfield-via-ptr, arrow-compound,
+string-via-ptr — all production-gated by `render_idiomatic`.)
 
 (The ternary step is the biggest yet: +93 match **and −66 mismatch** — most of
 those mismatches were ternaries (and the unary-step's abs cases) being
@@ -174,8 +179,15 @@ clears most of them.
     the reversed load (`mov ax,[hi]; mov dx,[lo]`, dropping the stray high-slot
     `int`) and the add/`adc` arms generalized to either register order. `long r =
     a + b` recovers.
-12. **Full `long` support** is the dominant remaining theme — ≈150 of the long
-    incompletes are `long` *struct/array* elements. Sub-levers: long shift/mul/div
-    helpers (`__alshl` etc.) recovered as operators; long struct-field and
-    array-element access (needs long ⨯ aggregate). Then **panic →
-    sound-incomplete** (19), **shared globals**, bitfields, pointer-deref.
+12. ~~**Register-variable pointer deref**~~ — **DONE** (MATCH 48.8% → 50.2%, +58).
+    BCC keeps a pointer in a reg var (si/di), so `*p` is `mov ax,[si]`, not the
+    `mov bx,p; mov ax,[bx]` stack form. Added reg-var deref load/store, int and
+    char width. This was the gate on `p->x` (offset-0 struct field = `*p`), and
+    unblocked reg-var pointers broadly. **Next struct step:** the offset-K reg-var
+    deref (`mov ax,[si+K]`) — needs a `mov r,[si/di+disp]` idiom — recovers
+    `p->y` / `*(p+K)`; that's the real struct-field-at-offset signal.
+13. **Adjacent pointer gaps** the reg-var work surfaced: `&global` (recovered as
+    `0`), char/int pointer arithmetic (`p++`, `p += 1`, `*p++`) — our `bcc` even
+    panics on some — string-via-pointer, bitfield-via-ptr.
+14. **Long ⨯ aggregate** (≈150 incompletes), **panic → sound-incomplete**,
+    **shared globals**, bitfields, broad struct/array.
