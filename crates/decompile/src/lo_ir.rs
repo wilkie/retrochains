@@ -509,6 +509,20 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             };
             vec![LoOp::Bin { dst: rm, op, lhs: rm, rhs: Imm(1) }]
         }
+        // `d3 /r` — shift/rotate a register by `cl` (a variable count).
+        Idiom::ShiftCl => {
+            let rm = R(rm_of(1));
+            let op = match modrm(1) >> 3 & 7 {
+                0 => BinOp::Rol,
+                1 => BinOp::Ror,
+                2 => BinOp::Rcl,
+                3 => BinOp::Rcr,
+                4 => BinOp::Shl,
+                5 => BinOp::Shr,
+                _ => BinOp::Sar, // 7 (6 is undefined)
+            };
+            vec![LoOp::Bin { dst: rm, op, lhs: rm, rhs: Byte(ByteReg::Cl) }]
+        }
 
         // ---- group 5 on a local (inc/dec/push) -----------------------------
         Idiom::Grp5Local => {

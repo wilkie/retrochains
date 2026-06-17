@@ -743,6 +743,9 @@ impl Ctx {
         // The pointer value loaded into `bx` (for a `mov bx,p; mov ax,[bx]`
         // dereference).
         let mut bx: Option<Expr> = None;
+        // The variable shift count loaded into `cl` (`mov cl,[y]; shl ax,cl`).
+        // `cl` is the 8086 shift-count register, not a user variable here.
+        let mut cl: Option<Expr> = None;
         // The high word of a `long` being assembled in `dx`, and whether the
         // current accumulator value is a `long` (its high word in `dx`).
         let mut dx: Option<DxState> = None;
@@ -1098,6 +1101,20 @@ impl Ctx {
                     }
                 }
 
+                // `mov cl, <y>` — load a variable shift count. `cl` is the 8086
+                // shift register; the following `shl/shr ax,cl` consumes it. (This
+                // precedes the char-reg-var arm, which would otherwise read `cl`
+                // as a `char` variable.)
+                LoOp::Load { dst: Place::Byte(ByteReg::Cl), src } => {
+                    cl = match src {
+                        Place::Imm(v) => Some(Expr::Const(v)),
+                        other => self.operand(other),
+                    };
+                    if cl.is_none() {
+                        self.complete = false;
+                    }
+                }
+
                 // `mov dl, …` — assign to a `char` register variable. The source
                 // is the accumulator (`mov dl,al`), an immediate, or another
                 // `char` variable.
@@ -1209,7 +1226,14 @@ impl Ctx {
                 LoOp::Bin { dst: Place::Reg(Reg::Ax), op, lhs: Place::Reg(Reg::Ax), rhs }
                     if is_foldable(op) =>
                 {
-                    match (acc.take(), self.operand(rhs)) {
+                    // A variable shift count arrives in `cl` (`shl ax,cl`); every
+                    // other operand reads directly.
+                    let rhs_val = if rhs == Place::Byte(ByteReg::Cl) {
+                        cl.take()
+                    } else {
+                        self.operand(rhs)
+                    };
+                    match (acc.take(), rhs_val) {
                         (Some(l), Some(r)) => {
                             // A logical right shift (`shr`, not `sar`) means the
                             // shifted value is `unsigned`.

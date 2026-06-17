@@ -132,6 +132,8 @@ pub enum Idiom {
     Grp3,
     /// `d1 /r` with mod=11 — shift/rotate a register by 1.
     Shift1,
+    /// `d3 /r` with mod=11 — shift/rotate a register by `cl` (a variable count).
+    ShiftCl,
     /// `ff /r [bp±N]` — group 5 on a local (`inc/dec/push`).
     Grp5Local,
     /// `ff /r [disp16]` — group 5 on a global (`inc/dec word [mem]`).
@@ -277,6 +279,7 @@ impl Idiom {
             Idiom::Cbw => "cbw (sign-extend al→ax)",
             Idiom::Grp3 => "grp3 (imul/idiv/neg/not)",
             Idiom::Shift1 => "shift/rotate by 1",
+            Idiom::ShiftCl => "shift/rotate by cl",
             Idiom::Grp5Local => "grp5 on local (inc/dec/push)",
             Idiom::Grp5Global => "grp5 on global (inc/dec word [mem])",
             Idiom::Jcc => "conditional jump (jcc rel8)",
@@ -455,6 +458,7 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::Grp3, pat: &[L(0xf7), BP_DISP8, A] },   // imul/idiv [bp±N]
     Def { idiom: Idiom::Grp3, pat: &[L(0xf7), DISP16, A, A] },  // imul/idiv [disp16]
     Def { idiom: Idiom::Shift1, pat: &[L(0xd1), REG] },
+    Def { idiom: Idiom::ShiftCl, pat: &[L(0xd3), REG] }, // shift r16 by cl (variable count)
     Def { idiom: Idiom::NearCall, pat: &[L(0xe8), A, A] },
     Def { idiom: Idiom::LoadImmAx, pat: &[L(0xb8), A, A] }, // ax-specific; before LoadImmReg
     Def { idiom: Idiom::LoadImmReg, pat: &[M(0xf8, 0xb8), A, A] },

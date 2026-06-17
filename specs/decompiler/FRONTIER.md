@@ -20,14 +20,20 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | after multi-fn | after in-place | meaning |
-|-------------|--------:|---------------:|---------------:|---------|
-| **MATCH**   |  1433 (34.7%) | 1580 (38.2%) | **1761 (42.6%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | 2129 (51.5%) | 2000 (48.4%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | 389 (9.4%) | 336 (8.1%) | recovered C recompiles to *different* bytes |
-| cerr        |     2 |   2 |  2 | recovered C didn't compile |
-| notext      |     5 |   5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 |  27 | 27 | recover/verify crashed |
+| bucket      | initial | multi-fn | in-place | var-shift | meaning |
+|-------------|--------:|---------:|---------:|----------:|---------|
+| **MATCH**   |  1433 (34.7%) | 1580 (38.2%) | 1761 (42.6%) | **1817 (44.0%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | 2129 | 2000 | 1940 (47.0%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | 389 | 336 | 340 (8.2%) | recovered C recompiles to *different* bytes |
+| cerr        |     2 |   2 |  2 |  2 | recovered C didn't compile |
+| notext      |     5 |   5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
+| PANIC       |    27 |  27 | 27 | 26 | recover/verify crashed |
+
+(The +4 mismatch at the var-shift step is cast/bitfield-adjacent: folding the
+shift exposes a missing narrowing — `(char)(v>>4)` drops the cast, a signed
+bitfield's sign-extend shift pair surfaces. `render_idiomatic` gates these on
+verify, so production still declines them; only the raw-`decompile()` sweep
+counts them.)
 
 (70 skipped = link invocations or unparseable args — no single-function
 `_TEXT` target.)
@@ -99,10 +105,19 @@ clears most of them.
    `add si,5`, `inc word [g]`, `di += si`) codes as one instruction, distinct
    from the load-op-store `x = x op y`. Recovered as `Stmt::Compound` (`x op= y`
    / `++` / `--`); added the `ff 06/0e` global inc/dec idiom (`Grp5Global`); the
-   `for`-loop step/init detection and emit now accept compounds. *Still open in
-   this cluster:* `char` in-place (`++c` is load-op-store on a byte reg var —
-   subtler), stack-local non-reg-var compounds, and shift compounds (`<<=`).
-3. **Panic → sound-incomplete hardening** — 27 crashes downgraded to declines.
-4. **Shared globals across functions** — lift the multi-function global decline
-   (one data-segment layout reconciled across the program).
-5. Then re-sweep and re-rank; arrays/struct/pointer-deref are the next tier.
+   `for`-loop step/init detection and emit now accept compounds.
+3. ~~**Variable shifts**~~ — **DONE** (MATCH 42.6% → 44.0%). `shl/shr/sar r,cl`
+   (`d3 /r` idiom `ShiftCl`); the count loads into `cl` (tracked as the shift
+   register, intercepted before the char-reg-var arm since `cl ∈ is_byte_reg_var`).
+   Constant shifts were already handled (BCC unrolls them into `d1` shift-by-1s).
+4. **`char` in-place compound** — `a += b` on a `char` reg var is `add dl,al`
+   (byte in-place). *Blocked:* the rhs through `al` can be an int's low byte
+   (`c |= n`, n int → mis-typed `char`), and `char` params promote differently;
+   needs the int-vs-char slot prescan and the param-promotion fix first (an
+   attempt regressed 5 incomplete→mismatch and was reverted).
+5. **Param promotion** — a param copied to a reg var and mutated (`x++` on a
+   param) recovers as a fresh local + copy; works for `int` by luck but adds 2
+   bytes for `char`. Recovering it as direct param mutation would also clean up
+   the remaining `functions/*` mismatches.
+6. **Panic → sound-incomplete** (26), **shared globals across functions**, then
+   casts/bitfields (the var-shift mismatch tail), arrays/struct/pointer-deref.

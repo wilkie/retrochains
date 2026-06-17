@@ -997,6 +997,12 @@ mod tests {
         assert_roundtrips_stack("int f(unsigned a) { if (a < 5) { return 1; } return 0; }\n");
         assert_roundtrips_stack("int f(unsigned a, unsigned b) { if (a < b) { return 1; } return 0; }\n");
         assert_roundtrips_stack("unsigned f(unsigned a) { return a >> 2; }\n");
+        // Variable shift counts (`shl ax,cl` / `shr ax,cl`) — the count loaded
+        // into `cl` from another variable, distinct from the constant-unrolled
+        // shift-by-1s. `cl` here is the shift register, not a `char` variable.
+        assert_roundtrips_stack("int f(int x, int y) { return x << y; }\n");
+        assert_roundtrips_stack("int f(int x, int y) { return x >> y; }\n");
+        assert_roundtrips_stack("unsigned f(unsigned x, int n) { return x >> n; }\n");
         // unsigned char zero-extends with `mov ah,0`; a char only ever compared
         // (a byte `cmp`) is recovered as `char`, signed or unsigned.
         assert_roundtrips_stack("int f(unsigned char c) { return c; }\n");
