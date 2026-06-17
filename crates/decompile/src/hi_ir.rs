@@ -197,6 +197,8 @@ pub enum Stmt {
     /// (`cmp ax,K; je case`)*. No explicit `default`: the no-match path is the
     /// code that follows the switch.
     Switch(Expr, Vec<(i32, Vec<Stmt>)>),
+    /// `break;` — a `switch` case body ending in a jump to the post-switch code.
+    Break,
 }
 
 /// Does `expr` mention variable `var`? Used to confirm a `for` loop variable.
@@ -1645,6 +1647,7 @@ impl Ctx {
     /// Structure the instruction range `[lo, hi)` into statements, recovering
     /// nested `if`/`while`. Assumes the accumulator is empty at the boundaries
     /// (BCC flushes to memory before any branch).
+    #[allow(clippy::too_many_lines)] // a flat per-shape match reads better unsplit
     fn structure(&mut self, lo: usize, hi: usize) -> Vec<Stmt> {
         let mut stmts = Vec::new();
         let mut i = lo;
@@ -1679,10 +1682,23 @@ impl Ctx {
                         let scrut = self.fold_linear(linear_start, cmp_idx, &mut stmts);
                         match scrut {
                             Some(scrutinee) => {
+                                // The post-switch block is the `break` target.
+                                let cont_off = self.insns[def_idx].span.start;
                                 let mut arms = Vec::new();
                                 for (j, &(value, start)) in cases.iter().enumerate() {
                                     let end = cases.get(j + 1).map_or(def_idx, |&(_, s)| s);
-                                    arms.push((value, self.structure(start, end)));
+                                    // A trailing jump to the continuation is a
+                                    // `break`; otherwise the body returns (or
+                                    // falls through to the next case).
+                                    let breaks = end > start
+                                        && matches!(self.insns[end - 1].op,
+                                            LoOp::Jump { target } if target == cont_off);
+                                    let body_end = if breaks { end - 1 } else { end };
+                                    let mut body = self.structure(start, body_end);
+                                    if breaks {
+                                        body.push(Stmt::Break);
+                                    }
+                                    arms.push((value, body));
                                 }
                                 stmts.push(Stmt::Switch(scrutinee, arms));
                             }

@@ -324,7 +324,7 @@ pub fn to_c_with_form(f: &Function, form: AccessForm) -> Option<String> {
 fn body_has_call(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match s {
         Stmt::Assign(_, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => expr_has_call(e),
-        Stmt::Return(None) => false,
+        Stmt::Return(None) | Stmt::Break => false,
         Stmt::If(c, t, e) => expr_has_call(c) || body_has_call(t) || body_has_call(e),
         Stmt::While(c, b) | Stmt::Do(c, b) => expr_has_call(c) || body_has_call(b),
         Stmt::For(init, c, step, b) => {
@@ -427,6 +427,9 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
             }
             indent(depth, out);
             out.push_str("}\n");
+        }
+        Stmt::Break => {
+            out.push_str("break;\n");
         }
     }
 }
@@ -616,6 +619,14 @@ mod tests {
         );
         assert_roundtrips_stack(
             "int f(int a) { switch (a) { case 5: return 1; case 9: return 2; } return 0; }\n",
+        );
+        // `break` cases: a body ending in a jump to the post-switch code is a
+        // `break`. All-break, and break mixed with an early `return`.
+        assert_roundtrips_stack(
+            "int f(int a) { int r; r = 0; switch (a) { case 1: r = 10; break; case 2: r = 20; break; } return r; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int a) { int r; r = 0; switch (a) { case 1: r = 1; break; case 2: return 99; case 3: r = 3; break; } return r; }\n",
         );
     }
 

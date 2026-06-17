@@ -219,7 +219,10 @@ recovered from the run's accumulator) ending in an unconditional jump; each case
 body runs from its target to the next case's (or the no-match block); the
 no-match block is the **post-switch code** (so an absent `default` is the code
 that follows, matching C's fall-through). It emits `Stmt::Switch(scrutinee,
-[(value, body)…])`. A *dense* switch (≥ 4 contiguous cases) BCC lowers to a
+[(value, body)…])`. A case body ending in a jump to that post-switch block is a
+**`break`** (`Stmt::Break`); one ending in a jump to the epilogue is a `return`.
+So `case 1: r = 10; break;` and `case 2: return 99;` both recover, in the same
+switch. A *dense* switch (≥ 4 contiguous cases) BCC lowers to a
 **jump table** (`dec bx; cmp bx,N; ja default; shl bx,1; jmp cs:[bx+table]` plus
 the table data) — a distinct shape not yet structured, so it stays incomplete.
 
