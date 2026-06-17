@@ -1227,6 +1227,19 @@ mod tests {
     }
 
     #[test]
+    fn long_arithmetic_stored_to_a_local_roundtrips() {
+        // A returned `long` keeps its high word in `dx` (calling convention); a
+        // `long` arithmetic result *stored to a local* keeps it in `ax` instead.
+        // The reversed load (`mov ax,[hi]; mov dx,[lo]`) and add (`add dx,lo;
+        // adc ax,hi`) recover the same way as the dx-high return form.
+        assert_roundtrips_stack("long f(long a, long b){ long r; r = a + b; return r; }\n");
+        assert_roundtrips_stack("long f(long a, long b){ long r; r = a - b; return r; }\n");
+        assert_roundtrips_stack("long f(long a){ long r; r = a + 1; return r; }\n");
+        // The dx-high return form still works.
+        assert_roundtrips_stack("long f(long a, long b){ return a + b; }\n");
+    }
+
+    #[test]
     fn ternary_expressions_roundtrip() {
         // `cond ? t : f` is a diamond whose both arms leave a value in `ax` and
         // converge; recovered as `Expr::Ternary` and seeded into the consumer

@@ -20,11 +20,11 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | ternary | widening | long-store | meaning |
-|-------------|--------:|---|--------:|---------:|-----------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 2001 (48.4%) | 2009 (48.6%) | **2013 (48.7%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1844 | 1842 | 1838 (44.5%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 260 | 254 | 254 (6.1%) | recovered C recompiles to *different* bytes |
+| bucket      | initial | … | widening | long-store | rev-long-add | meaning |
+|-------------|--------:|---|---------:|-----------:|-------------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 2009 (48.6%) | 2013 (48.7%) | **2016 (48.8%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1842 | 1838 | 1830 (44.3%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 254 | 254 | 254 (6.1%) | recovered C recompiles to *different* bytes |
 | cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
 | PANIC       |    27 | … | 19 | 19 | 19 | recover/verify crashed |
@@ -169,9 +169,13 @@ clears most of them.
     in `dx:ax` too) declines instead of folding a stale value. **Still open:** the
     *reversed* long add/load (`ax` high, used when a `long` arithmetic result is
     stored to a local rather than returned) — `long r = a + b` still declines.
-11. **Full `long` support** is now the dominant remaining theme — it recurs
-    across compound-assign, arrays, struct fields, and pointers (≈150 of the long
-    incompletes are `long` *struct/array* elements). Sub-levers: reversed long
-    add/load ordering; long shift/mul/div helpers (`__alshl` etc.) recovered as
-    operators; long struct-field and array-element access. Then **panic →
+11. ~~**Reversed long add/load ordering**~~ — **DONE** (MATCH 48.7% → 48.8%). The
+    `ax`-high layout BCC uses for a `long` arithmetic result stored to a local:
+    the reversed load (`mov ax,[hi]; mov dx,[lo]`, dropping the stray high-slot
+    `int`) and the add/`adc` arms generalized to either register order. `long r =
+    a + b` recovers.
+12. **Full `long` support** is the dominant remaining theme — ≈150 of the long
+    incompletes are `long` *struct/array* elements. Sub-levers: long shift/mul/div
+    helpers (`__alshl` etc.) recovered as operators; long struct-field and
+    array-element access (needs long ⨯ aggregate). Then **panic →
     sound-incomplete** (19), **shared globals**, bitfields, pointer-deref.

@@ -1277,6 +1277,32 @@ impl Ctx {
                     dx = Some(DxState::Const(h));
                 }
 
+                // Reversed `long` load: `mov ax,[hi]; mov dx,[lo]` (ax = high
+                // word), the layout BCC uses when a `long` result is stored to a
+                // local rather than returned. The preceding `mov ax,[lo+2]` set the
+                // accumulator to the high slot as an `int`; redo it as the `long`
+                // variable at `lo`, dropping that stray high-slot `int`.
+                LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Local(lo) }
+                    if matches!(
+                        self.insns.get(i.wrapping_sub(1)).map(|n| &n.op),
+                        Some(LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Local(hi) })
+                            if *hi == lo + 2
+                    ) =>
+                {
+                    match Self::var_of(Place::Local(lo)) {
+                        Some(v) => {
+                            if let Some(high) = Self::var_of(Place::Local(lo + 2)) {
+                                self.vars.retain(|x| *x != high);
+                            }
+                            self.note(v);
+                            self.note_long(v);
+                            acc = Some(Expr::Var(v));
+                            acc_long = true;
+                        }
+                        None => self.complete = false,
+                    }
+                }
+
                 // `mov dx, [slot]` — load the high word of a `long` variable.
                 LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Local(hi) } => {
                     dx = Some(DxState::High(hi));
@@ -1440,24 +1466,29 @@ impl Ctx {
                     }
                 }
 
-                // `add ax,lo` / `sub ax,lo` where the accumulator is a `long` is
-                // the low-word half; the `adc dx,hi` / `sbb dx,hi` below completes
-                // it. Defer until then.
-                LoOp::Bin { dst: Place::Reg(Reg::Ax), op, lhs: Place::Reg(Reg::Ax), rhs }
-                    if acc_long && matches!(op, BinOp::Add | BinOp::Sub) =>
+                // The low-word half of a `long` add/sub — `add ax,lo` / `sub ax,lo`
+                // (dx-high layout) or `add dx,lo` / `sub dx,lo` (the reversed
+                // ax-high layout used for a store-to-local). The high-word
+                // `adc`/`sbb` below completes it; defer until then.
+                LoOp::Bin { dst: Place::Reg(d), op, lhs: Place::Reg(l), rhs }
+                    if acc_long
+                        && l == d
+                        && matches!(d, Reg::Ax | Reg::Dx)
+                        && matches!(op, BinOp::Add | BinOp::Sub) =>
                 {
                     pending_long = Some((op, rhs));
                 }
 
-                // `adc dx,hi` / `sbb dx,hi` — the high-word half of a `long`
+                // `adc dx,hi` / `sbb dx,hi` (dx-high) or `adc ax,hi` / `sbb ax,hi`
+                // (the reversed ax-high layout) — the high-word half of a `long`
                 // add/sub. The operand is a `long` variable (`[lo]`/`[lo+2]`) or a
                 // constant (`(hi<<16)|lo`).
                 LoOp::Bin {
-                    dst: Place::Reg(Reg::Dx),
+                    dst: Place::Reg(d),
                     op: BinOp::Adc | BinOp::Sbb,
-                    lhs: Place::Reg(Reg::Dx),
+                    lhs: Place::Reg(l),
                     rhs: rhs_hi,
-                } => match pending_long.take() {
+                } if l == d && matches!(d, Reg::Ax | Reg::Dx) => match pending_long.take() {
                     Some((op_lo, rhs_lo)) => match (acc.take(), self.long_operand(rhs_lo, rhs_hi)) {
                         (Some(l), Some(r)) => {
                             // BCC mis-folds `x + (negative long literal)` (it loses
