@@ -377,6 +377,51 @@ fn count_var(stmts: &mut [Stmt], target: Var) -> usize {
     n
 }
 
+/// An `int *` pointer's `p++` is `inc reg; inc reg` (stride 2), which the fold
+/// recovers as two `Compound(p, +, 1)` — but one recovered `p++` already
+/// recompiles to the two incs (pointer arithmetic scales by the pointee), so the
+/// pair must collapse to one. Merge adjacent identical `±1` compounds on an
+/// `int`-pointer register variable. (A `char *` is stride 1 — one inc per `++` —
+/// so it's untouched.)
+fn coalesce_int_pointer_increments(ctx: &Ctx, body: &mut Vec<Stmt>) {
+    let is_int_ptr = |v: &Var| ctx.ptr_vars.contains(v) && !ctx.char_ptr_vars.contains(v);
+    coalesce_inc_pairs(body, &is_int_ptr);
+}
+
+/// Walk `stmts` (and nested blocks), merging each adjacent pair of identical
+/// `Compound(v, op, 1)` where `pred(v)` holds into a single statement.
+fn coalesce_inc_pairs(stmts: &mut Vec<Stmt>, pred: &impl Fn(&Var) -> bool) {
+    for s in stmts.iter_mut() {
+        match s {
+            Stmt::If(_, t, e) => {
+                coalesce_inc_pairs(t, pred);
+                coalesce_inc_pairs(e, pred);
+            }
+            Stmt::While(_, b) | Stmt::Do(_, b) | Stmt::For(_, _, _, b) => {
+                coalesce_inc_pairs(b, pred);
+            }
+            Stmt::Switch(_, arms, def) => {
+                for (_, b) in arms.iter_mut() {
+                    coalesce_inc_pairs(b, pred);
+                }
+                coalesce_inc_pairs(def, pred);
+            }
+            _ => {}
+        }
+    }
+    let is_unit_compound = |s: &Stmt| {
+        matches!(s, Stmt::Compound(LValue::Var(v), op, Expr::Const(1))
+            if matches!(op, BinOp::Add | BinOp::Sub) && pred(v))
+    };
+    let mut i = 0;
+    while i + 1 < stmts.len() {
+        if is_unit_compound(&stmts[i]) && stmts[i] == stmts[i + 1] {
+            stmts.remove(i + 1);
+        }
+        i += 1;
+    }
+}
+
 /// Recover BCC's promotion of a parameter into a register variable. When a
 /// parameter is mutated (or heavily used), BCC copies it into a register
 /// variable at entry (`mov si,[bp+4]`) and works on that register — so the
@@ -2807,6 +2852,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         .map_or(ctx.insns.len(), |r| r + 1);
     let mut body = fold_for_loops(ctx.structure(0, len));
     promote_params(&mut ctx, &mut body);
+    coalesce_int_pointer_increments(&ctx, &mut body);
     // A `long` occupies two slots (lo, lo+2). If the high-word slot was also
     // recovered as a separate variable (e.g. a `long` local's paired stores read
     // as two `int` stores), the layout is double-counted — bail rather than emit

@@ -1253,6 +1253,18 @@ mod tests {
     }
 
     #[test]
+    fn int_pointer_increment_coalesces() {
+        // An `int *` `p++` is `inc si; inc si` (stride 2). One recovered `p++`
+        // recompiles back to the two incs, so the two `Compound`s the fold
+        // produces must collapse to one — two `p++` would emit four incs. A char
+        // pointer is stride 1 (one inc per `++`), untouched.
+        assert_roundtrips("int f(int *p){ p++; return *p; }\n");
+        assert_roundtrips("int f(int *p){ p++; p++; return *p; }\n");
+        assert_roundtrips("int f(int *p){ p--; return *p; }\n");
+        assert_roundtrips("int f(char *p){ p++; return *p; }\n");
+    }
+
+    #[test]
     fn array_decay_to_pointer_recovers_the_array_name() {
         // `p = arr` (array decays to a pointer) is `lea ax,[arr]; mov si,ax`. The
         // `&` of the array's base slot must render as the array name `a1` (which
