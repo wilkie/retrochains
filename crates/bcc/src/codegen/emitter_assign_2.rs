@@ -478,17 +478,23 @@ impl<'a> super::FunctionEmitter<'a> {
         let stride = u32::from(pointee.size_bytes());
         let load_byte = pointee.is_char_like();
         if let Some(k) = try_const_eval(offset) {
-            // Constant offset — fold to indexed addressing on the
-            // pointer register. Stack-resident pointers with a
-            // constant offset aren't observed yet; assume reg only.
-            let LocalLocation::Reg(reg) = self.locals.location_of(ptr_name) else {
-                panic!("stack-resident pointer in `*(p+K)` not yet supported (no fixture)");
+            // Constant offset — fold to indexed addressing on the pointer
+            // register. A stack-resident pointer (`-r-`, or one BCC couldn't
+            // promote) is loaded into `bx` first, then indexed through it —
+            // identical codegen to the `p[K]` subscript path. Fixture 4276
+            // (`return *(p + 2);`).
+            let reg_name = match self.locals.location_of(ptr_name) {
+                LocalLocation::Reg(reg) => reg.name(),
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    "bx"
+                }
             };
             let byte_off = k * stride;
             let addr = if byte_off == 0 {
-                format!("[{}]", reg.name())
+                format!("[{reg_name}]")
             } else {
-                format!("[{}+{byte_off}]", reg.name())
+                format!("[{reg_name}+{byte_off}]")
             };
             if load_byte {
                 let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
