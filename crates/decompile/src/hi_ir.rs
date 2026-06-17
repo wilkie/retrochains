@@ -261,6 +261,9 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int,
+    /// A `char` return — the value is left in `al` (a byte) at the return, with
+    /// no `cbw` widening it to `int`.
+    Char,
     /// 32-bit `long` — held in `dx:ax` (high:low), two adjacent slots on the
     /// stack.
     Long,
@@ -344,6 +347,7 @@ fn flush_call(acc: &mut Option<Expr>, out: &mut Vec<Stmt>) {
 }
 
 /// The structuring/folding context over one function's Lo-IR.
+#[allow(clippy::struct_excessive_bools)] // independent recovery flags, not a state enum
 struct Ctx {
     insns: Vec<LoInsn>,
     vars: Vec<Var>,
@@ -355,6 +359,7 @@ struct Ctx {
     complete: bool,
     returns_value: bool,
     returns_long: bool,
+    returns_char: bool,
 }
 
 impl Ctx {
@@ -470,6 +475,17 @@ impl Ctx {
         }
     }
 
+    /// Does `op` leave its result in `al` (a byte)? A `return` reached right
+    /// after such an op — with no `cbw` between — is a `char` return, not `int`.
+    fn writes_byte(op: &LoOp) -> bool {
+        matches!(
+            op,
+            LoOp::Load { dst: Place::Byte(ByteReg::Al), .. }
+                | LoOp::Un { dst: Place::Byte(ByteReg::Al), .. }
+                | LoOp::Bin { dst: Place::Byte(ByteReg::Al), .. }
+        )
+    }
+
     /// The instruction index whose byte offset is `off` (first match), if any.
     fn idx_of(&self, off: usize) -> Option<usize> {
         self.insns.iter().position(|i| i.span.start == off)
@@ -546,13 +562,19 @@ impl Ctx {
                 | LoOp::Cleanup { .. }
                 | LoOp::Promote { kind: crate::lo_ir::Promote::Cbw | crate::lo_ir::Promote::Cwd } => {}
 
-                // A jump to the epilogue is a `return <accumulator>`.
+                // A jump to the epilogue is a `return <accumulator>`. The return
+                // *type* is `char` when the value is left in `al` (a byte) with no
+                // `cbw` widening it — detectable locally as a byte-register write
+                // immediately before the jump (a `cbw`, for an `int` return, would
+                // be that instruction instead).
                 LoOp::Jump { target } if self.is_epilogue(target) => {
                     let v = acc.take();
                     if v.is_some() {
                         self.returns_value = true;
                         if acc_long {
                             self.returns_long = true;
+                        } else if i > lo && Self::writes_byte(&self.insns[i - 1].op) {
+                            self.returns_char = true;
                         }
                     }
                     out.push(Stmt::Return(v));
@@ -704,10 +726,14 @@ impl Ctx {
                 }
 
                 // `mov al, …` loads a `char` into the accumulator (a following
-                // `cbw` promotes it to `int`, handled above as a no-op).
+                // `cbw` promotes it to `int`, handled above as a no-op). The
+                // source is a `char` variable or a byte immediate (`mov al,5`).
                 LoOp::Load { dst: Place::Byte(ByteReg::Al), src } => {
                     flush_call(&mut acc, out);
-                    acc = self.char_operand(src);
+                    acc = match src {
+                        Place::Imm(v) => Some(Expr::Const(v)),
+                        other => self.char_operand(other),
+                    };
                     if acc.is_none() {
                         self.complete = false;
                     }
@@ -1306,6 +1332,7 @@ pub fn recover(code: &[u8]) -> Function {
         complete: true,
         returns_value: false,
         returns_long: false,
+        returns_char: false,
     };
     let len = ctx.insns.len();
     let body = fold_for_loops(ctx.structure(0, len));
@@ -1325,6 +1352,8 @@ pub fn recover(code: &[u8]) -> Function {
     }
     let ret = if ctx.returns_long {
         Type::Long
+    } else if ctx.returns_char {
+        Type::Char
     } else if ctx.returns_value {
         Type::Int
     } else {

@@ -275,7 +275,15 @@ Recovery is driven by the idioms, not guessed:
   `x != 0` — `!= 0` would recompile to a `cmp`, not the original `or`. Recognizer
   additions across the `char` work: `80 /r … imm8` byte group-1, `c6 06` global
   byte-store, and the byte register idioms `b0+r`, `8a/88` mod=11, `02/0a/…`
-  mod=11.)*
+  mod=11. The **`char` return type** is built too: a `char`-returning function
+  leaves its value in `al` (a byte) with no widening, so the discriminator is
+  local — a byte-register write (`mov al,…`) *immediately before* the
+  return-jump means `char`, where an `int` return would have a `cbw` as that
+  last instruction. (Returning an `int` value from a `char` function is *not*
+  distinguishable — `mov ax,[a]` is identical to an `int` return and the low
+  byte is the result — so it recovers as `int` and recompiles byte-exact
+  anyway.) The byte-load fold also learned the `mov al,imm8` immediate form, so
+  `char f() { return 5; }` recovers.)*
 - **Signedness** — `Cbw`/`Cwd`/`sar`/`idiv` ⇒ signed; zero-extend / `shr`
   / `div` ⇒ unsigned. *(Multiply/divide built: `imul`/`idiv` produce `dx:ax`,
   but an `int` result is the low word, so `a * b` (`imul [b]` or `mov dx,K;
@@ -331,9 +339,9 @@ Recovery is driven by the idioms, not guessed:
   no-op `cbw`. The write side mirrors it: `mov [bx],al` (`*p = v` storing a
   `char`) and `mov byte ptr [bx],imm8` (`*p = const`) — the latter the one
   recognizer addition (`c6 07 ib`, `StoreImmByteDeref`, the byte analogue of the
-  `c7 07` word store-imm). The `char` *return* type these often want is a
-  separate deferred concern, so the round-trips use `int`/`void`-returning
-  forms.)*
+  `c7 07` word store-imm). The `char` *return* type these often want is built
+  separately (see the Width note above), so `char f(char *p) { return *p; }`
+  now round-trips too.)*
 - **Promotions** — `Cbw`/`Cwd` become explicit `Cast` nodes, so the emitted C's
   implicit promotions recompile to the same `cbw`/`cwd`.
 - **Aggregates** — a `Lea base` then indexed access ⇒ array; a constant field

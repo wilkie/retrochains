@@ -200,6 +200,7 @@ pub fn to_c(f: &Function) -> Option<String> {
 
     let ret = match f.ret {
         Type::Int => "int",
+        Type::Char => "char",
         Type::Long => "long",
         Type::Void => "void",
     };
@@ -516,6 +517,22 @@ mod tests {
         assert_roundtrips_stack("void f(char *p, char v) { *p = v; }\n");
         assert_roundtrips_stack("void f(char *p) { *p = 5; }\n");
         assert_roundtrips_stack("int f(char *p) { *p = 7; return *p; }\n");
+    }
+
+    #[test]
+    fn char_return_roundtrips() {
+        // A `char`-returning function leaves the value in `al` (a byte) with no
+        // `cbw` — detectable as a byte write right before the return-jump. A
+        // `char` parameter, a `char *` deref, a byte constant, and a `char`
+        // local all recover with a `char` return type.
+        assert_roundtrips_stack("char f(char c) { return c; }\n");
+        assert_roundtrips_stack("char f(char *p) { return *p; }\n");
+        assert_roundtrips_stack("char f() { return 5; }\n");
+        assert_roundtrips_stack("char f() { char c; c = 3; return c; }\n");
+        // Returning an `int` value from a `char` function truncates in `al`, but
+        // the codegen (`mov ax,[a]`) is identical to an `int` return, so it
+        // recovers as `int` — and recompiles byte-exact either way.
+        assert_roundtrips_stack("int f(int a) { return a; }\n");
     }
 
     #[test]
