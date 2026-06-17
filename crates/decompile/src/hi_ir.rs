@@ -293,11 +293,44 @@ pub struct Function {
     /// The subset of `vars` that are `unsigned` (compared with `jb`/`ja` or
     /// shifted logically with `shr`).
     pub unsigned_vars: Vec<Var>,
+    /// Local arrays reconstructed from the frame. A constant array index folds
+    /// to a direct `[bp+disp]` slot access, so an `int a[M]` looks like scalar
+    /// slots; when those slots can't be the whole top-packed scalar layout the
+    /// frame is modelled as an array instead (see [`recover`]).
+    pub arrays: Vec<ArraySpec>,
     /// The recovered statements.
     pub body: Vec<Stmt>,
     /// `false` if any op couldn't be modelled — the function is only partially
     /// recovered and must not be presented as done.
     pub complete: bool,
+}
+
+/// A local array reconstructed from the stack frame. Element 0 sits at `base`
+/// (the most-negative offset — BCC lays an array bottom-up), ascending by the
+/// element stride toward `bp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArraySpec {
+    /// The `[bp+disp]` offset of element 0 (the array's lowest address).
+    pub base: i16,
+    /// The element count.
+    pub len: u16,
+}
+
+impl ArraySpec {
+    /// The `bp` offset just past the last element (exclusive upper bound).
+    fn end(self) -> i16 {
+        self.base + 2 * self.len.cast_signed()
+    }
+
+    /// The element index a slot offset maps to, if it lies on this array.
+    #[must_use]
+    pub fn index_of(self, off: i16) -> Option<u16> {
+        if off >= self.base && off < self.end() && (off - self.base) % 2 == 0 {
+            u16::try_from((off - self.base) / 2).ok()
+        } else {
+            None
+        }
+    }
 }
 
 /// Swap `Add`↔`Sub` (for normalizing `x + (-K)` to `x - K`).
@@ -1528,6 +1561,7 @@ pub fn recover(code: &[u8]) -> Function {
     } else {
         Type::Void
     };
+    let arrays = detect_local_array(&ctx);
     Function {
         ret,
         vars: ctx.vars,
@@ -1536,9 +1570,60 @@ pub fn recover(code: &[u8]) -> Function {
         char_ptr_vars: ctx.char_ptr_vars,
         long_vars: ctx.long_vars,
         unsigned_vars: ctx.unsigned_vars,
+        arrays,
         body,
         complete: ctx.complete,
     }
+}
+
+/// Reconstruct a sole local `int` array from the frame, or `[]` for a plain
+/// scalar layout. A constant array index folds to a direct `[bp+disp]` slot, so
+/// `int a[M]` surfaces as scalar slots — but only the *accessed* ones, which
+/// under-allocates the frame. When the recovered `int` slots *are* the whole
+/// top-packed scalar layout (offsets `-2,-4,…,-2k` reaching the `Enter` frame),
+/// they're genuine scalars and stay so. Otherwise the frame is modelled as one
+/// `int` array spanning it: a slot at `off` becomes `a[(off+N)/2]`, which
+/// reproduces the very same `[bp+disp]` access, so the array always round-trips.
+///
+/// Scoped to all-`int` frames (no `char`/`long`/pointer slot, whose widths make
+/// the layout subtler) — those keep today's scalar recovery.
+fn detect_local_array(ctx: &Ctx) -> Vec<ArraySpec> {
+    let frame = ctx.insns.iter().find_map(|i| match i.op {
+        LoOp::Enter { frame } => Some(i16::try_from(frame).unwrap_or(0)),
+        _ => None,
+    });
+    let Some(frame) = frame else { return Vec::new() };
+    if frame < 2 || frame % 2 != 0 {
+        return Vec::new();
+    }
+    // Only plain-`int` stack slots; any typed slot (char/long/pointer) opts out.
+    let typed = |v: &Var| {
+        ctx.char_vars.contains(v)
+            || ctx.long_vars.contains(v)
+            || ctx.ptr_vars.contains(v)
+            || ctx.char_ptr_vars.contains(v)
+    };
+    let mut slots: Vec<i16> = Vec::new();
+    for v in &ctx.vars {
+        if let Var::Slot(off) = v {
+            if typed(v) || *off >= 0 || *off % 2 != 0 || *off < -frame {
+                return Vec::new();
+            }
+            slots.push(*off);
+        }
+    }
+    if slots.is_empty() {
+        return Vec::new();
+    }
+    // Genuine top-packed scalars: offsets are exactly {-2,-4,…,-2k} and fill the
+    // frame. Keep them as scalars.
+    slots.sort_unstable_by(|a, b| b.cmp(a)); // descending: -2, -4, …
+    let top_packed = slots.iter().enumerate().all(|(k, &o)| o == -2 * (i16::try_from(k).unwrap_or(0) + 1));
+    if top_packed && 2 * i16::try_from(slots.len()).unwrap_or(0) == frame {
+        return Vec::new();
+    }
+    // The slots can't be the whole scalar layout — model the frame as one array.
+    vec![ArraySpec { base: -frame, len: u16::try_from(frame / 2).unwrap_or(0) }]
 }
 
 #[cfg(test)]
@@ -1568,6 +1653,25 @@ mod tests {
         assert!(f.complete);
         assert_eq!(f.ret, Type::Int);
         assert_eq!(f.body, vec![Stmt::Return(Some(Expr::Const(42)))]);
+    }
+
+    #[test]
+    fn a_sparse_int_array_is_modelled_as_an_array() {
+        // `int a[4]` accessed only at a[0] and a[2]: frame 8, but the two
+        // accessed slots can't be the whole top-packed scalar layout (which would
+        // be a frame-4 pair at -2/-4), so the frame is one `int a[4]`.
+        let f = recover_stack("int f() { int a[4]; a[0] = 1; return a[2]; }\n");
+        assert!(f.complete);
+        assert_eq!(f.arrays.len(), 1, "one reconstructed array");
+        assert_eq!(f.arrays[0], ArraySpec { base: -8, len: 4 });
+    }
+
+    #[test]
+    fn genuine_scalars_are_not_arrayed() {
+        // Two `int` locals are a tight top-packed layout (-2, -4, frame 4) — they
+        // stay scalars, not a 2-element array.
+        let f = recover_stack("int f() { int x; int y; x = 3; y = 4; return x + y; }\n");
+        assert!(f.complete && f.arrays.is_empty());
     }
 
     #[test]

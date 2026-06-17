@@ -396,7 +396,24 @@ Recovery is driven by the idioms, not guessed:
   implicit promotions recompile to the same `cbw`/`cwd`.
 - **Aggregates** — a `Lea base` then indexed access ⇒ array; a constant field
   offset added before a deref ⇒ struct field. Layout is checked the only way that
-  matters: recompiling and diffing.
+  matters: recompiling and diffing. *(Local `int` arrays are built. A constant
+  array index folds to a direct `[bp+disp]` slot, so `int a[M]` surfaces as
+  scalar slots — and only the *accessed* ones, which under-allocates the frame
+  (the old recovery silently MISMATCHED: its scalars produced the wrong frame).
+  BCC's frame layout is the key: locals are allocated in declaration order
+  top-down from `bp`, and an array is one block with element 0 at its lowest
+  address. So a post-pass reads the `Enter` frame `N` and asks whether the
+  recovered `int` slots *are* the whole top-packed scalar layout — offsets
+  exactly `-2,-4,…,-2k` filling `N`. If so they're genuine scalars and stay so;
+  otherwise the frame is modelled as one `int a[N/2]` and each slot at `off`
+  becomes `a[(off+N)/2]`, which reproduces the identical `[bp+disp]` access, so
+  the array always round-trips. The array-vs-scalar call is principled but
+  inherently partial: a *fully*-accessed `a[M]` is byte-identical to `M` scalars
+  and recovers as scalars — only the unused space of a sparse array reveals it.
+  A stronger, unambiguous signal — a `lea` of a frame slot, or a variable index
+  — is the next lever (it also fixes the size for the non-sole-array case);
+  scoped to all-`int` frames for now, since `char`/`long`/pointer slot widths
+  make the layout subtler.)*
 
 Near globals are built (`hi_ir.rs`). A global is a `Var::Global(offset)` — and
 crucially the offset is *not* a placeholder like a call target: it's the real

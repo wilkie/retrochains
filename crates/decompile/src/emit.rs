@@ -11,7 +11,7 @@
 
 use std::fmt::Write as _;
 
-use crate::hi_ir::{recover, Expr, Function, LValue, RelOp, Stmt, Type, Var};
+use crate::hi_ir::{recover, ArraySpec, Expr, Function, LValue, RelOp, Stmt, Type, Var};
 use crate::lo_ir::{BinOp, Reg};
 
 /// How an offset pointer access — a `Deref` of `base + k` — is *spelled*. Both
@@ -41,6 +41,9 @@ pub enum AccessForm {
 /// slot, parameter, or register), so emitted references stay consistent.
 struct Names {
     bindings: Vec<(Var, String)>,
+    /// Local arrays reconstructed from the frame; a `Slot` on one renders `aN[k]`
+    /// and the slot is *not* declared as a scalar.
+    arrays: Vec<ArraySpec>,
     /// Variables accessed at byte width — declared `char` rather than `int`.
     chars: Vec<Var>,
     /// Variables that are pointers — declared `int *`.
@@ -106,6 +109,7 @@ impl Names {
         char_ptr_vars: &[Var],
         long_vars: &[Var],
         unsigned_vars: &[Var],
+        arrays: &[ArraySpec],
     ) -> Names {
         let mut bindings = Vec::new();
 
@@ -171,8 +175,15 @@ impl Names {
             unsigneds: unsigned_vars.to_vec(),
             signature: sig_parts.join(", "),
             global_count,
+            arrays: arrays.to_vec(),
             form: AccessForm::Subscript,
         }
+    }
+
+    /// The 1-based array number and element index a stack slot maps to, if it
+    /// lies on a reconstructed local array.
+    fn array_index(&self, off: i16) -> Option<(usize, u16)> {
+        self.arrays.iter().enumerate().find_map(|(i, a)| a.index_of(off).map(|k| (i + 1, k)))
     }
 
     fn of(&self, var: Var) -> &str {
@@ -199,12 +210,39 @@ impl Names {
     }
 
     /// The local-variable declarations (parameters and globals excluded — those
-    /// are the signature and file scope respectively), each typed.
-    fn local_decls(&self) -> impl Iterator<Item = String> + '_ {
-        self.bindings
+    /// are the signature and file scope respectively), each typed. Reconstructed
+    /// arrays come first (`int aN[len]`), then scalars — a slot that lands on an
+    /// array is an element, not a scalar, so it isn't declared again.
+    fn local_decls(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .arrays
             .iter()
-            .filter(|(v, _)| matches!(v, Var::Slot(_) | Var::Reg(_) | Var::ByteReg(_)))
-            .map(|(v, n)| self.decl(*v, n))
+            .enumerate()
+            .map(|(i, a)| format!("int a{}[{}]", i + 1, a.len))
+            .collect();
+        for (v, n) in &self.bindings {
+            // A slot that lands on an array is an element, declared via the array.
+            if let Var::Slot(off) = v
+                && self.array_index(*off).is_some()
+            {
+                continue;
+            }
+            if matches!(v, Var::Slot(_) | Var::Reg(_) | Var::ByteReg(_)) {
+                out.push(self.decl(*v, n));
+            }
+        }
+        out
+    }
+
+    /// Render a variable reference — a reconstructed array element spells `aN[k]`,
+    /// everything else its bound name.
+    fn var_str(&self, v: Var) -> String {
+        if let Var::Slot(off) = v
+            && let Some((i, k)) = self.array_index(off)
+        {
+            return format!("a{i}[{k}]");
+        }
+        self.of(v).to_string()
     }
 }
 
@@ -248,6 +286,7 @@ pub fn to_c_with_form(f: &Function, form: AccessForm) -> Option<String> {
         &f.char_ptr_vars,
         &f.long_vars,
         &f.unsigned_vars,
+        &f.arrays,
     );
     names.form = form;
 
@@ -380,7 +419,7 @@ fn assign_inline(stmt: &Stmt, names: &Names) -> String {
 
 fn lvalue_str(lv: &LValue, names: &Names) -> String {
     match lv {
-        LValue::Var(v) => names.of(*v).to_string(),
+        LValue::Var(v) => names.var_str(*v),
         LValue::Deref(e) => deref_str(e, names),
     }
 }
@@ -404,7 +443,7 @@ fn expr_str(e: &Expr, names: &Names) -> String {
     match e {
         Expr::Const(v) => v.to_string(),
         Expr::LongConst(v) => format!("{v}L"),
-        Expr::Var(v) => names.of(*v).to_string(),
+        Expr::Var(v) => names.var_str(*v),
         // Fully parenthesized so the printed tree matches the recovered one.
         Expr::Binary(op, l, r) => {
             format!("({} {} {})", expr_str(l, names), binop_token(*op), expr_str(r, names))
@@ -531,6 +570,18 @@ mod tests {
     #[test]
     fn while_roundtrips() {
         assert_roundtrips_stack("int f() { int x; x = 0; while (x < 10) { x = x + 1; } return x; }\n");
+    }
+
+    #[test]
+    fn local_int_array_roundtrips() {
+        // A constant array index folds to a direct `[bp+disp]` slot, so the
+        // `int a[M]` surfaces as scalar slots — but only the accessed ones, which
+        // under-allocates the frame. The frame is modelled as one array spanning
+        // it, which reproduces the same accesses byte-exact. (Before this it was
+        // a silent MISMATCH: the recovered scalars produced the wrong frame.)
+        assert_roundtrips_stack("int f() { int a[4]; a[0] = 1; return a[2]; }\n");
+        assert_roundtrips_stack("int f() { int a[4]; a[0] = 10; a[1] = 20; return a[0] + a[1]; }\n");
+        assert_roundtrips_stack("int f() { int a[8]; a[3] = 7; return a[3]; }\n");
     }
 
     #[test]
