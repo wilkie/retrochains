@@ -2168,6 +2168,19 @@ impl Ctx {
                     }
                 }
 
+                // `mov byte ptr [si]/[di], imm` — a `char` immediate stored
+                // through a reg-var `char *` (`*p = const`, e.g. `*p++ = K`).
+                LoOp::StoreImmByte { dst: Place::Deref(r), imm } if is_reg_var(r) => {
+                    flush_call(&mut acc, out);
+                    let v = Var::Reg(r);
+                    self.note(v);
+                    self.note_char_ptr(v);
+                    out.push(Stmt::Assign(
+                        LValue::Deref(Box::new(Expr::Var(v))),
+                        Expr::Const(imm),
+                    ));
+                }
+
                 // `mov byte ptr [dst], imm` — a `char` immediate store.
                 LoOp::StoreImmByte { dst, imm } => {
                     flush_call(&mut acc, out);

@@ -20,14 +20,14 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | regvar-ptr | addr-of-global | ptr-arith+deref | meaning |
-|-------------|--------:|---|-----------:|---------------:|----------------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 2074 (50.2%) | 2103 (50.9%) | **2130 (51.5%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1746 | 1722 (41.7%) | 1710 (41.3%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 273 | 264 (6.4%) | 275 (6.6%) | recovered C recompiles to *different* bytes |
-| cerr        |     2 | … |  2 |  2 |  7 | recovered C didn't compile |
-| notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 | … | 26 | 30 |  9 | recover/verify crashed |
+| bucket      | initial | … | regvar-ptr | addr-of-global | ptr-arith+deref | store-imm-deref | meaning |
+|-------------|--------:|---|-----------:|---------------:|----------------:|----------------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 2074 (50.2%) | 2103 (50.9%) | 2130 (51.5%) | **2159 (52.2%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1746 | 1722 (41.7%) | 1710 (41.3%) | 1673 (40.4%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 273 | 264 (6.4%) | 275 (6.6%) | 283 (6.8%) | recovered C recompiles to *different* bytes |
+| cerr        |     2 | … |  2 |  2 |  7 |  7 | recovered C didn't compile |
+| notext      |     5 | … |  5 |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
+| PANIC       |    27 | … | 26 | 30 |  9 |  9 | recover/verify crashed |
 
 (The pointer-arithmetic + deref step: array-decay-to-pointer recovery dissolved
 most of the panics (30→9) by giving `bcc` a valid array name instead of a stray
@@ -35,6 +35,14 @@ most of the panics (30→9) by giving `bcc` a valid array name instead of a stra
 deref-in-comparison (`cmp [si],n` / `cmp byte [si],n`, both previously
 mis-decoded as raw `Asm`) added the +27 match. The cerr creep is new long-fold
 fixtures from the gap loop, not a regression here.)
+
+(The store-imm-deref step closes the write side of pointer arithmetic: `*p = K`
+through a reg-var pointer is `mov word [si],imm16` / `mov byte [si],imm8`
+(modrm mod=00, rm=si/di) — previously mis-decoded as `Asm`, so `*p++ = K` and
+`*p = K` all left functions incomplete. +29 match; the +8 mismatch are newly
+*surfaced* (incomplete→mismatch in adjacent shapes), production-gated by
+`render_idiomatic` — no previously-matching fixture could have hit these
+previously-unliftable bytes, so no true regression.)
 
 (`&global` was a clean conversion: +17 match **and −17 mismatch**, zero new —
 every `&g`-recovered-as-`0` mismatch fixed.)

@@ -1269,6 +1269,18 @@ mod tests {
     }
 
     #[test]
+    fn immediate_store_through_reg_var_pointer_recovers() {
+        // `*p = K` (and `*p++ = K`) stores a literal through a reg-var pointer:
+        // `mov word [si],imm16` / `mov byte [si],imm8` (modrm mod=00, rm=si/di),
+        // previously mis-decoded as `Asm`. The post-increment lifts as a separate
+        // `p++` and recompiles identically.
+        assert_roundtrips("int f(int *p){ *p = 5; return 0; }\n");
+        assert_roundtrips("int f(char *p){ *p = 65; return 0; }\n");
+        assert_roundtrips("int f(int *p){ *p++ = 5; return 0; }\n");
+        assert_roundtrips("int f(char *p){ *p++ = 65; return 0; }\n");
+    }
+
+    #[test]
     fn deref_in_comparison_recovers() {
         // `*p` compared directly in a condition is `cmp [si],n` (word) or
         // `cmp byte [si],n` (char) — mod=00, rm=si/di. Previously mis-decoded as

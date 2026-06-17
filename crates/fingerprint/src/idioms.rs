@@ -361,6 +361,9 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::StoreImmLocalByte, pat: &[L(0xc6), L(0x46), A, A] },
     Def { idiom: Idiom::StoreImmGlobalByte, pat: &[L(0xc6), L(0x06), A, A, A] },
     Def { idiom: Idiom::StoreImmByteDeref, pat: &[L(0xc6), M(0xc7, 0x07), A] }, // mov [bx], imm8
+    // `mov byte [si]/[di], imm8` (mod=00, rm=si/di) — `*cp++ = K` and friends.
+    Def { idiom: Idiom::StoreImmByteDeref, pat: &[L(0xc6), M(0xc7, 0x04), A] },
+    Def { idiom: Idiom::StoreImmByteDeref, pat: &[L(0xc6), M(0xc7, 0x05), A] },
     // bp-relative loads/stores (word and byte), and lea of a local.
     Def { idiom: Idiom::LoadLocal, pat: &[L(0x8b), BP_DISP8, A] },
     Def { idiom: Idiom::StoreLocal, pat: &[L(0x89), BP_DISP8, A] },
@@ -397,6 +400,9 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::PointerStore, pat: &[L(0x89), M(0xc7, 0x07)] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x88), M(0xc7, 0x07)] },
     Def { idiom: Idiom::StoreImmDeref, pat: &[L(0xc7), M(0xc7, 0x07), A, A] }, // mov [bx], imm16
+    // `mov word [si]/[di], imm16` (mod=00, rm=si/di) — `*p++ = K` and friends.
+    Def { idiom: Idiom::StoreImmDeref, pat: &[L(0xc7), M(0xc7, 0x04), A, A] },
+    Def { idiom: Idiom::StoreImmDeref, pat: &[L(0xc7), M(0xc7, 0x05), A, A] },
     // ALU with a `[bx]` deref operand (add/sub/or/and/xor/cmp reg, [bx]).
     Def { idiom: Idiom::AluDeref, pat: &[L(0x03), M(0xc7, 0x07)] },
     Def { idiom: Idiom::AluDeref, pat: &[L(0x2b), M(0xc7, 0x07)] },
