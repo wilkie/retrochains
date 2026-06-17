@@ -246,9 +246,15 @@ Recovery is driven by the idioms, not guessed:
   following `mov ax,…` forms the `long`: `(high<<16)|low` for a constant, or the
   variable at `lo` (which is recorded in `long_vars` and declared `long`). The
   return type is `long` when the returned accumulator is. A `long` occupies two
-  slots `(lo, lo+2)`; if the high-word slot is *also* recovered as a separate
-  variable (the deferred `long`-local store-pairing, which aliases a two-`int`
-  layout), the recovery bails rather than emit a double-counted frame. `long`
+  slots `(lo, lo+2)`. A **`long`-local constant assignment** is a store *pair*
+  (high word first, then low: `mov [hi],imm_hi; mov [lo],imm_lo`), folded into a
+  single `long` assignment. The catch is that two adjacent `int` stores are
+  *byte-identical* at the store site, so the disambiguation comes from the
+  read-back: a pre-pass collects the slots read as a `dx:ax` pair (`mov
+  dx,[lo+2]; mov ax,[lo]`) — the genuine `long` locals — and only those slots
+  fold their store pair (otherwise the high slot would double as a separate
+  `int` variable and the frame would be double-counted, which a guard in
+  `recover` still rejects for the cases not yet folded). `long`
   arithmetic is built: `a + b` is `add ax,[b.lo]; adc dx,[b.hi]` and `a - b` is
   `sub`/`sbb`, so a `dx` tracker pairs the low-word add with the `adc` that
   completes it (the operand is a `long` variable `[lo]`/`[lo+2]` or a constant

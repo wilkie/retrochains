@@ -596,6 +596,12 @@ mod tests {
         assert_roundtrips_stack("long f(long a, long b) { return a - b; }\n");
         assert_roundtrips_stack("long f(long a) { return a + 1; }\n");
         assert_roundtrips_stack("long f(long a) { return a - 100000; }\n");
+        // A `long` *local* constant assignment is a store pair (high word, then
+        // low); it folds to one `long` assignment. The disambiguation from two
+        // adjacent `int` locals (identical store shape) is the `dx:ax` read-back.
+        assert_roundtrips_stack("long f() { long x; x = 5; return x; }\n");
+        assert_roundtrips_stack("long f() { long x; x = 100000; return x; }\n");
+        assert_roundtrips_stack("int f() { int x; int y; x = 3; y = 4; return x + y; }\n");
     }
 
     #[test]

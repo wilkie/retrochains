@@ -356,6 +356,11 @@ struct Ctx {
     char_ptr_vars: Vec<Var>,
     long_vars: Vec<Var>,
     unsigned_vars: Vec<Var>,
+    /// The low-word offsets of stack slots read back as a `dx:ax` pair
+    /// (`mov dx,[lo+2]; mov ax,[lo]`) — i.e. genuine `long` locals. Computed up
+    /// front so the store side can tell a `long` store *pair* (`[hi]=…;[lo]=…`)
+    /// from two adjacent `int` stores, which are byte-identical at the store.
+    long_slots: std::collections::HashSet<i16>,
     complete: bool,
     returns_value: bool,
     returns_long: bool,
@@ -549,7 +554,14 @@ impl Ctx {
         // already returned that way, so the physical `Ret` it lands on isn't
         // double-counted (and a void fall-off — no such jump — returns nothing).
         let mut returned = false;
+        // Set when an arm consumed the *following* instruction too (a two-store
+        // `long` assignment), so the loop skips it.
+        let mut skip_next = false;
         for i in lo..hi {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
             match self.insns[i].op.clone() {
                 // Frame setup/teardown carry no value. `cbw`/`cwd` are sign
                 // promotions the accumulator already reflects — `cbw` is the
@@ -1007,6 +1019,39 @@ impl Ctx {
                     }
                 }
 
+                // A `long` local constant assignment is a store *pair*: the high
+                // word first (`mov [hi],imm_hi`), then the low (`mov [lo],imm_lo`,
+                // `lo == hi-2`). Fold both into one `long` assignment so the high
+                // slot never becomes a separate `int` variable (which the
+                // double-count guard in `recover` would reject). A lone immediate
+                // store (no matching low half) is a plain `int`/`char` store.
+                LoOp::Store { dst: Place::Local(hi), src: Place::Imm(imm_hi) } => {
+                    flush_call(&mut acc, out);
+                    let low_half = match self.insns.get(i + 1).map(|n| &n.op) {
+                        Some(LoOp::Store { dst: Place::Local(lo), src: Place::Imm(imm_lo) })
+                            if *lo == hi - 2 && self.long_slots.contains(lo) =>
+                        {
+                            Some(*imm_lo)
+                        }
+                        _ => None,
+                    };
+                    match low_half.and_then(|imm_lo| {
+                        Self::var_of(Place::Local(hi - 2)).map(|var| (var, imm_lo))
+                    }) {
+                        Some((var, imm_lo)) => {
+                            self.note(var);
+                            self.note_long(var);
+                            let value = (imm_hi << 16) | (imm_lo & 0xFFFF);
+                            out.push(Stmt::Assign(LValue::Var(var), Expr::LongConst(value)));
+                            skip_next = true;
+                        }
+                        None => match self.dest(Place::Local(hi)) {
+                            Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(imm_hi))),
+                            None => self.complete = false,
+                        },
+                    }
+                }
+
                 LoOp::Store { dst, src: Place::Imm(v) } => {
                     flush_call(&mut acc, out);
                     match self.dest(dst) {
@@ -1321,6 +1366,20 @@ impl Ctx {
 #[must_use]
 pub fn recover(code: &[u8]) -> Function {
     let insns: Vec<LoInsn> = lift(code);
+    // Pre-scan for `long` locals: a slot read back as a `dx:ax` pair
+    // (`mov dx,[lo+2]; mov ax,[lo]`). This lets the store side fold a `long`
+    // constant store pair without mistaking two adjacent `int` stores for one.
+    let mut long_slots = std::collections::HashSet::new();
+    for pair in insns.windows(2) {
+        if let (
+            LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Local(hi) },
+            LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Local(lo) },
+        ) = (&pair[0].op, &pair[1].op)
+            && *hi == lo + 2
+        {
+            long_slots.insert(*lo);
+        }
+    }
     let mut ctx = Ctx {
         insns,
         vars: Vec::new(),
@@ -1329,6 +1388,7 @@ pub fn recover(code: &[u8]) -> Function {
         char_ptr_vars: Vec::new(),
         long_vars: Vec::new(),
         unsigned_vars: Vec::new(),
+        long_slots,
         complete: true,
         returns_value: false,
         returns_long: false,
@@ -1681,12 +1741,22 @@ mod tests {
     }
 
     #[test]
-    fn a_long_local_assignment_is_incomplete() {
-        // The two-store `long` local (`x = 7;` → store high, store low) aliases a
-        // two-int layout; the high-word slot doubles as a variable, so the
-        // recovery bails rather than emit a double-counted layout.
+    fn a_long_local_constant_assignment_recovers() {
+        // The two-store `long` local (`x = 7;` → store high word, then low) folds
+        // to a single `long` assignment. A genuine `long` slot is disambiguated
+        // from two adjacent `int` slots by its `dx:ax` read-back, so two `int`
+        // stores at offsets differing by 2 are *not* mistaken for one `long`.
         let f = recover_stack("long f() { long x; x = 7; return x; }\n");
-        assert!(!f.complete, "long-local store pairing is deferred (bails, not wrong)");
+        assert!(f.complete, "a long-local constant store pair is recovered");
+        assert_eq!(f.long_vars.len(), 1, "exactly one long local");
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Assign(_, Expr::LongConst(7)))),
+            "the store pair folds to `x = 7L`",
+        );
+
+        // Two adjacent `int` locals (byte-identical store shape) stay two ints.
+        let g = recover_stack("int f() { int x; int y; x = 3; y = 4; return x + y; }\n");
+        assert!(g.complete && g.long_vars.is_empty(), "two int stores are not a long");
     }
 
     #[test]
