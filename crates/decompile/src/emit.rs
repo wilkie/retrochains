@@ -11,7 +11,43 @@
 
 use std::fmt::Write as _;
 
-use crate::hi_ir::{recover, Expr, Function, LValue, RelOp, Stmt, Type};
+use crate::hi_ir::{recover, Expr, Function, LValue, RelOp, Stmt, Type, Var};
+use crate::lo_ir::Reg;
+
+/// The declaration order → name binding for a function's variables. Lookups are
+/// by identity (stack slot or register), so emitted references stay consistent.
+struct Names(Vec<(Var, String)>);
+
+impl Names {
+    /// Build names in declaration order: register variables first (`si` before
+    /// `di`, the order BCC allocates them), then stack slots closest-to-bp
+    /// first (BCC assigns slots from bp downward in declaration order). Naming
+    /// every variable `v1`, `v2`, … in that order makes recompilation reproduce
+    /// the same storage assignment.
+    fn build(vars: &[Var]) -> Names {
+        let mut order: Vec<Var> = vars.iter().filter(|v| matches!(v, Var::Reg(_))).copied().collect();
+        order.sort_by_key(|v| match v {
+            Var::Reg(Reg::Si) => 0,
+            Var::Reg(_) => 1,
+            Var::Slot(_) => 2,
+        });
+        let mut slots: Vec<Var> = vars.iter().filter(|v| matches!(v, Var::Slot(_))).copied().collect();
+        slots.sort_by(|a, b| match (a, b) {
+            (Var::Slot(x), Var::Slot(y)) => y.cmp(x), // descending disp (closest to bp first)
+            _ => std::cmp::Ordering::Equal,
+        });
+        order.extend(slots);
+        Names(order.into_iter().enumerate().map(|(i, v)| (v, format!("v{}", i + 1))).collect())
+    }
+
+    fn of(&self, var: Var) -> &str {
+        self.0.iter().find(|(v, _)| *v == var).map_or("v?", |(_, n)| n.as_str())
+    }
+
+    fn decls(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|(_, n)| n.as_str())
+    }
+}
 
 /// Decompile `_TEXT` bytes to C, or `None` if the function isn't fully
 /// recovered yet (it still holds ops the lift/fold can't model). A `Some` result
@@ -35,15 +71,12 @@ pub fn to_c(f: &Function) -> Option<String> {
     };
     let mut s = format!("{ret} f() {{\n");
 
-    // Declare locals closest-to-bp first; BCC allocates locals from bp downward
-    // in declaration order, so this order makes it re-assign the same slots.
-    let mut locals = f.locals.clone();
-    locals.sort_by(|a, b| b.cmp(a));
-    for slot in &locals {
-        let _ = writeln!(s, "  int {};", local_name(*slot));
+    let names = Names::build(&f.vars);
+    for decl in names.decls() {
+        let _ = writeln!(s, "  int {decl};");
     }
 
-    emit_block(&f.body, 1, true, &mut s);
+    emit_block(&f.body, 1, true, &names, &mut s);
     s.push_str("}\n");
     Some(s)
 }
@@ -51,13 +84,13 @@ pub fn to_c(f: &Function) -> Option<String> {
 /// Emit a statement list at indent depth `depth`. `top` marks the function's
 /// outermost block, where a trailing valueless `return` is implicit and dropped
 /// (keeping the body identical to an empty one).
-fn emit_block(stmts: &[Stmt], depth: usize, top: bool, out: &mut String) {
+fn emit_block(stmts: &[Stmt], depth: usize, top: bool, names: &Names, out: &mut String) {
     let n = stmts.len();
     for (i, stmt) in stmts.iter().enumerate() {
         if top && i + 1 == n && matches!(stmt, Stmt::Return(None)) {
             continue;
         }
-        emit_stmt(stmt, depth, out);
+        emit_stmt(stmt, depth, names, out);
     }
 }
 
@@ -67,57 +100,56 @@ fn indent(depth: usize, out: &mut String) {
     }
 }
 
-fn emit_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
+fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
     indent(depth, out);
     match stmt {
         Stmt::Assign(lv, e) => {
-            let _ = writeln!(out, "{} = {};", lvalue_str(lv), expr_str(e));
+            let _ = writeln!(out, "{} = {};", lvalue_str(lv, names), expr_str(e, names));
         }
         Stmt::Return(None) => out.push_str("return;\n"),
         Stmt::Return(Some(e)) => {
-            let _ = writeln!(out, "return {};", expr_str(e));
+            let _ = writeln!(out, "return {};", expr_str(e, names));
         }
         Stmt::If(cond, then, els) => {
-            let _ = writeln!(out, "if ({}) {{", expr_str(cond));
-            emit_block(then, depth + 1, false, out);
+            let _ = writeln!(out, "if ({}) {{", expr_str(cond, names));
+            emit_block(then, depth + 1, false, names, out);
             if els.is_empty() {
                 indent(depth, out);
                 out.push_str("}\n");
             } else {
                 indent(depth, out);
                 out.push_str("} else {\n");
-                emit_block(els, depth + 1, false, out);
+                emit_block(els, depth + 1, false, names, out);
                 indent(depth, out);
                 out.push_str("}\n");
             }
         }
         Stmt::While(cond, body) => {
-            let _ = writeln!(out, "while ({}) {{", expr_str(cond));
-            emit_block(body, depth + 1, false, out);
+            let _ = writeln!(out, "while ({}) {{", expr_str(cond, names));
+            emit_block(body, depth + 1, false, names, out);
             indent(depth, out);
             out.push_str("}\n");
         }
     }
 }
 
-fn lvalue_str(lv: &LValue) -> String {
+fn lvalue_str(lv: &LValue, names: &Names) -> String {
     match lv {
-        LValue::Local(slot) => local_name(*slot),
+        LValue::Var(v) => names.of(*v).to_string(),
     }
 }
 
-/// `v1` for `[bp-2]`, `v2` for `[bp-4]`, … — a stable name per slot.
-fn local_name(slot: i16) -> String {
-    format!("v{}", (-slot) / 2)
-}
-
-fn expr_str(e: &Expr) -> String {
+fn expr_str(e: &Expr, names: &Names) -> String {
     match e {
         Expr::Const(v) => v.to_string(),
-        Expr::Local(slot) => local_name(*slot),
+        Expr::Var(v) => names.of(*v).to_string(),
         // Fully parenthesized so the printed tree matches the recovered one.
-        Expr::Binary(op, l, r) => format!("({} {} {})", expr_str(l), binop_token(*op), expr_str(r)),
-        Expr::Rel(op, l, r) => format!("({} {} {})", expr_str(l), relop_token(*op), expr_str(r)),
+        Expr::Binary(op, l, r) => {
+            format!("({} {} {})", expr_str(l, names), binop_token(*op), expr_str(r, names))
+        }
+        Expr::Rel(op, l, r) => {
+            format!("({} {} {})", expr_str(l, names), relop_token(*op), expr_str(r, names))
+        }
     }
 }
 
@@ -242,6 +274,25 @@ mod tests {
         );
         assert_roundtrips_stack(
             "int f() { int x; x = 7; if (x > 3) { x = x - 1; } else { x = x + 1; } return x; }\n",
+        );
+    }
+
+    #[test]
+    fn register_variable_control_flow_roundtrips() {
+        // Default options — BCC promotes `x` to the `si` register variable. This
+        // is the payoff: decompiling *default* BCC output (not just `-r-`), so
+        // the reg-var data-flow (mov ax,si / mov si,ax / xor si,si / or si,si)
+        // recovers and recompiles byte-exact.
+        assert_roundtrips("int f() { int x; x = 0; if (x) { x = 1; } return x; }\n");
+        assert_roundtrips("int f() { int x; x = 3; if (x == 5) { x = 7; } return x; }\n");
+        assert_roundtrips("int f() { int x; x = 0; while (x < 10) { x = x + 1; } return x; }\n");
+        assert_roundtrips(
+            "int f() { int x; x = 0; while (x < 10) { if (x == 5) { x = 8; } x = x + 1; } return x; }\n",
+        );
+        // Two register variables (si and di): the declaration ordering must
+        // reproduce BCC's allocation of each.
+        assert_roundtrips(
+            "int f() { int i; int s; s = 0; i = 0; while (i < 4) { s = s + i; i = i + 1; } return s; }\n",
         );
     }
 

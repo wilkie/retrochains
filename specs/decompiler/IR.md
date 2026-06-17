@@ -166,10 +166,18 @@ that conditionally branches *back* to the body is a `while` (the branch is the
 loop-continue condition, taken verbatim). Nesting falls out of the recursion —
 `if`-in-`while`, sequential `if`s, accumulation loops all round-trip. Conditions
 recover from the `cmp` operands plus a `Jcc`-nibble → relational-operator table
-(signed `< <= > >= == !=`; unsigned and flag-only codes mark incomplete). This
-increment recovers **stack** locals; BCC's default `si`/`di` register-variable
-allocation (see §3) is the separable next step — the roundtrip tests compile
-with `-r-` to exercise the structuring before register-variable data-flow lands.
+(signed `< <= > >= == !=`; unsigned and flag-only codes mark incomplete).
+
+**Register variables are recovered** (§3): a `Var` is either a stack slot or a
+`si`/`di` register variable, and the reg-var data-flow forms lift uniformly —
+`mov ax,si` / `mov si,ax` route the accumulator through the variable, `mov
+si,imm` is a direct assignment, `xor si,si` is the zero idiom, `or si,si; jcc`
+is the truthiness test (`x != 0`). Both kinds emit as plain `int` locals;
+recompiling a plain `int` reproduces BCC's deterministic register allocation, so
+the emitter just declares variables in allocation order (reg vars `si` then `di`,
+then stack slots closest-to-bp first) and BCC re-derives the same storage. This
+closes the loop on **default** BCC output — multi-variable functions using both
+`si` and `di` round-trip byte-exact.
 
 Expression folding is built:
 [`crates/decompile/src/hi_ir.rs`](../../crates/decompile/src/hi_ir.rs) +

@@ -21,7 +21,7 @@
 //! rather than present a half-recovery; the recompile-verify loop adjudicates
 //! the rest.
 
-use crate::lo_ir::{lift, BinOp, Cond, LoInsn, LoOp, Place, Reg};
+use crate::lo_ir::{lift, BinOp, Cond, LoInsn, LoOp, Place, Reg, UnOp};
 
 /// A relational operator recovered from a `cmp` + conditional branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,19 +68,37 @@ fn cond_to_relop(cond: Cond) -> Option<RelOp> {
 pub enum Expr {
     /// An integer constant.
     Const(i32),
-    /// A local variable, identified by its `[bp+disp]` slot (`disp < 0`).
-    Local(i16),
+    /// A local variable — a stack slot or a register variable.
+    Var(Var),
     /// `lhs op rhs` (left-associative, as the accumulator chain produces).
     Binary(BinOp, Box<Expr>, Box<Expr>),
     /// `lhs rel rhs` — a comparison (the condition of an `if`/`while`).
     Rel(RelOp, Box<Expr>, Box<Expr>),
 }
 
+/// A recovered local variable. BCC keeps `int` locals either on the stack frame
+/// or in the `si`/`di` register variables; both lift to ordinary named locals
+/// (the storage class is a hint, not semantics — and recompiling a plain `int`
+/// reproduces BCC's deterministic register allocation, so the emitter doesn't
+/// even mark them `register`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Var {
+    /// A stack slot at `[bp+disp]` (`disp < 0`).
+    Slot(i16),
+    /// A register variable (`si` or `di`).
+    Reg(Reg),
+}
+
 /// An assignable location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LValue {
-    /// A local variable slot.
-    Local(i16),
+    /// A local variable.
+    Var(Var),
+}
+
+/// Is `r` one of the registers BCC uses for register variables?
+fn is_reg_var(r: Reg) -> bool {
+    matches!(r, Reg::Si | Reg::Di)
 }
 
 /// A recovered statement.
@@ -110,8 +128,8 @@ pub enum Type {
 pub struct Function {
     /// The return type, inferred from whether any `return` carries a value.
     pub ret: Type,
-    /// The local slots the body touches, in first-appearance order. All `int`.
-    pub locals: Vec<i16>,
+    /// The local variables the body touches, in first-appearance order. All `int`.
+    pub vars: Vec<Var>,
     /// The recovered statements.
     pub body: Vec<Stmt>,
     /// `false` if any op couldn't be modelled — the function is only partially
@@ -133,16 +151,27 @@ fn is_foldable(op: BinOp) -> bool {
 /// The structuring/folding context over one function's Lo-IR.
 struct Ctx {
     insns: Vec<LoInsn>,
-    locals: Vec<i16>,
+    vars: Vec<Var>,
     complete: bool,
     returns_value: bool,
 }
 
 impl Ctx {
-    /// Record a local slot the first time it's seen (preserving order).
-    fn note(&mut self, slot: i16) {
-        if !self.locals.contains(&slot) {
-            self.locals.push(slot);
+    /// Record a variable the first time it's seen (preserving order).
+    fn note(&mut self, var: Var) {
+        if !self.vars.contains(&var) {
+            self.vars.push(var);
+        }
+    }
+
+    /// The variable a place names — a stack slot or a register variable — or
+    /// `None` if it isn't a variable this increment models (a param, global,
+    /// pointer, scratch register, …).
+    fn var_of(place: Place) -> Option<Var> {
+        match place {
+            Place::Local(d) if d < 0 => Some(Var::Slot(d)),
+            Place::Reg(r) if is_reg_var(r) => Some(Var::Reg(r)),
+            _ => None,
         }
     }
 
@@ -152,27 +181,21 @@ impl Ctx {
     }
 
     /// A source operand as an [`Expr`], or `None` if outside this increment (a
-    /// param, global, register, pointer, …).
+    /// param, global, scratch register, pointer, …).
     fn operand(&mut self, place: Place) -> Option<Expr> {
-        match place {
-            Place::Imm(v) => Some(Expr::Const(v)),
-            Place::Local(d) if d < 0 => {
-                self.note(d);
-                Some(Expr::Local(d))
-            }
-            _ => None,
+        if let Place::Imm(v) = place {
+            return Some(Expr::Const(v));
         }
+        let var = Self::var_of(place)?;
+        self.note(var);
+        Some(Expr::Var(var))
     }
 
     /// A destination operand as an [`LValue`], or `None` if unsupported yet.
     fn dest(&mut self, place: Place) -> Option<LValue> {
-        match place {
-            Place::Local(d) if d < 0 => {
-                self.note(d);
-                Some(LValue::Local(d))
-            }
-            _ => None,
-        }
+        let var = Self::var_of(place)?;
+        self.note(var);
+        Some(LValue::Var(var))
     }
 
     /// Fold a straight-line instruction range `[lo, hi)` into statements,
@@ -205,6 +228,22 @@ impl Ctx {
                     }
                 }
 
+                // `mov si, …` — an assignment to a register variable. The source
+                // is an immediate, the accumulator (`mov si,ax` stores the
+                // current expression), or another register variable.
+                LoOp::Load { dst: Place::Reg(r), src } if is_reg_var(r) => {
+                    let lv = self.dest(Place::Reg(r));
+                    let val = match src {
+                        Place::Imm(v) => Some(Expr::Const(v)),
+                        Place::Reg(Reg::Ax) => acc.take(),
+                        other => self.operand(other),
+                    };
+                    match (lv, val) {
+                        (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
+                        _ => self.complete = false,
+                    }
+                }
+
                 LoOp::Bin { dst: Place::Reg(Reg::Ax), op, lhs: Place::Reg(Reg::Ax), rhs }
                     if is_foldable(op) =>
                 {
@@ -214,13 +253,37 @@ impl Ctx {
                     }
                 }
 
+                // `xor si,si` — the zero idiom on a register variable (`x = 0`).
+                LoOp::Bin { dst: Place::Reg(r), op: BinOp::Xor, lhs: Place::Reg(a), rhs: Place::Reg(b) }
+                    if is_reg_var(r) && a == r && b == r =>
+                {
+                    match self.dest(Place::Reg(r)) {
+                        Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(0))),
+                        None => self.complete = false,
+                    }
+                }
+
                 // `inc`/`dec ax` extends the accumulator by ±1 (`x = x + 1`).
                 LoOp::Un { dst: Place::Reg(Reg::Ax), op, operand: Place::Reg(Reg::Ax) }
-                    if matches!(op, crate::lo_ir::UnOp::Inc | crate::lo_ir::UnOp::Dec) =>
+                    if matches!(op, UnOp::Inc | UnOp::Dec) =>
                 {
-                    let step = if matches!(op, crate::lo_ir::UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
+                    let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
                     match acc.take() {
                         Some(e) => acc = Some(Expr::Binary(step, Box::new(e), Box::new(Expr::Const(1)))),
+                        None => self.complete = false,
+                    }
+                }
+
+                // `inc`/`dec si` — `x = x ± 1` directly on a register variable.
+                LoOp::Un { dst: Place::Reg(r), op, operand: Place::Reg(o) }
+                    if is_reg_var(r) && o == r && matches!(op, UnOp::Inc | UnOp::Dec) =>
+                {
+                    let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
+                    match self.dest(Place::Reg(r)) {
+                        Some(lv) => out.push(Stmt::Assign(
+                            lv,
+                            Expr::Binary(step, Box::new(Expr::Var(Var::Reg(r))), Box::new(Expr::Const(1))),
+                        )),
                         None => self.complete = false,
                     }
                 }
@@ -242,16 +305,26 @@ impl Ctx {
         }
     }
 
-    /// Recover the condition of an `if`/`while` from the `cmp` at `cmp_idx` and
+    /// Recover the condition of an `if`/`while` from the test at `cmp_idx` and
     /// the branch at `branch_idx`. `negate` inverts it (for a skip branch).
+    ///
+    /// Two test shapes feed a branch: an explicit `cmp lhs, rhs`, and the
+    /// register-variable truthiness idiom `or si,si` (which sets flags without
+    /// changing `si`) — the latter is a comparison of the variable against 0.
     fn condition(&mut self, cmp_idx: usize, branch_idx: usize, negate: bool) -> Expr {
         let bad = |s: &mut Self| {
             s.complete = false;
             Expr::Const(0)
         };
-        let LoOp::Bin { dst: Place::Flags, op: BinOp::Cmp, lhs, rhs } = self.insns[cmp_idx].op.clone()
-        else {
-            return bad(self);
+        let (lhs, rhs) = match self.insns[cmp_idx].op.clone() {
+            LoOp::Bin { dst: Place::Flags, op: BinOp::Cmp, lhs, rhs } => (lhs, rhs),
+            // `or si,si` — test a register variable against 0.
+            LoOp::Bin { dst: Place::Reg(r), op: BinOp::Or, lhs: Place::Reg(a), rhs: Place::Reg(b) }
+                if is_reg_var(r) && a == r && b == r =>
+            {
+                (Place::Reg(r), Place::Imm(0))
+            }
+            _ => return bad(self),
         };
         let LoOp::Branch { cond, .. } = self.insns[branch_idx].op else {
             return bad(self);
@@ -395,11 +468,11 @@ impl Ctx {
 #[must_use]
 pub fn recover(code: &[u8]) -> Function {
     let insns: Vec<LoInsn> = lift(code);
-    let mut ctx = Ctx { insns, locals: Vec::new(), complete: true, returns_value: false };
+    let mut ctx = Ctx { insns, vars: Vec::new(), complete: true, returns_value: false };
     let len = ctx.insns.len();
     let body = ctx.structure(0, len);
     let ret = if ctx.returns_value { Type::Int } else { Type::Void };
-    Function { ret, locals: ctx.locals, body, complete: ctx.complete }
+    Function { ret, vars: ctx.vars, body, complete: ctx.complete }
 }
 
 #[cfg(test)]
@@ -433,17 +506,50 @@ mod tests {
 
     #[test]
     fn assign_then_return_folds_through_the_slot() {
-        let f = recover_c("int f() { int x; x = 5; return x; }\n");
+        // `-r-` keeps `x` on the stack, so the variable is a slot.
+        let f = recover_stack("int f() { int x; x = 5; return x; }\n");
         assert!(f.complete, "straight-line int code is fully recovered");
-        assert_eq!(f.locals.len(), 1, "one local slot");
-        let slot = f.locals[0];
+        assert_eq!(f.vars.len(), 1, "one variable");
+        let var = f.vars[0];
+        assert!(matches!(var, Var::Slot(d) if d < 0), "a stack slot below bp");
         assert_eq!(
             f.body,
             vec![
-                Stmt::Assign(LValue::Local(slot), Expr::Const(5)),
-                Stmt::Return(Some(Expr::Local(slot))),
+                Stmt::Assign(LValue::Var(var), Expr::Const(5)),
+                Stmt::Return(Some(Expr::Var(var))),
             ],
         );
+    }
+
+    #[test]
+    fn register_variable_is_recovered_from_default_codegen() {
+        // BCC promotes a sufficiently-used local to `si` (a single store+load
+        // stays on the stack; a variable read in a loop is promoted). The
+        // accumulator routing (`mov ax,si` / `mov si,ax`) and the `xor si,si`
+        // zero idiom must recover it as an ordinary variable.
+        let f = recover_c("int f() { int x; x = 0; while (x < 10) { x = x + 1; } return x; }\n");
+        assert!(f.complete, "a register-variable function is recovered");
+        assert_eq!(f.vars.len(), 1, "one variable");
+        assert!(matches!(f.vars[0], Var::Reg(Reg::Si)), "x lives in si");
+        // x = 0 (xor si,si), the loop, then return x (mov ax,si).
+        assert!(matches!(f.body.first(), Some(Stmt::Assign(_, Expr::Const(0)))));
+        assert!(matches!(f.body.last(), Some(Stmt::Return(Some(Expr::Var(Var::Reg(Reg::Si)))))));
+    }
+
+    #[test]
+    fn register_variable_truthiness_test_recovers() {
+        // `if (x)` on a register variable is `or si,si; jz` — the truthiness
+        // idiom must recover as `x != 0`.
+        let f = recover_c("int f() { int x; x = 0; if (x) { x = 1; } return x; }\n");
+        assert!(f.complete, "register-variable if is recovered");
+        let Stmt::If(Expr::Rel(op, lhs, rhs), ..) =
+            f.body.iter().find(|s| matches!(s, Stmt::If(..))).expect("an if")
+        else {
+            panic!("expected a relational condition");
+        };
+        assert_eq!(*op, RelOp::Ne, "or si,si; jz → x != 0");
+        assert!(matches!(**lhs, Expr::Var(Var::Reg(Reg::Si))));
+        assert_eq!(**rhs, Expr::Const(0));
     }
 
     #[test]
