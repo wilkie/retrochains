@@ -157,6 +157,22 @@ Two recoveries produce it:
   initial `if`'s else), so pattern-matching the templates is more reliable than
   generic interval analysis — and, again, the recompile check adjudicates.
 
+Expression folding is built:
+[`crates/decompile/src/hi_ir.rs`](../../crates/decompile/src/hi_ir.rs) +
+[`emit.rs`](../../crates/decompile/src/emit.rs). `recover(code)` folds the
+single-block accumulator into `Assign`/`Return` statements; `decompile(code)`
+emits C — but only for a *fully* recovered function. Anything not yet modelled
+(control flow, calls, params, globals, byte/long widths, pointers) sets
+`Function::complete = false` and `decompile` returns `None`, so a half-recovery
+is never presented as done. With this the §8 loop **closes end-to-end** for the
+first time: a battery of tests compiles a C snippet, decompiles its `_TEXT`
+purely from the bytes, and `verify`s that the recovered C recompiles to the
+identical bytes — straight-line `int` returns, local assignments, and
+arithmetic/bitwise chains (including the `x - 2` ⇒ `add ax,-2` sign asymmetry).
+Control-flow structuring is the next increment. (Closing the arithmetic case
+also added the `alu ax, imm16` accumulator idioms — `05/2d/…` — to the
+recognizer; until then `add ax,3` was an `Asm` gap.)
+
 ## 6. Types and type recovery
 
 The lattice: `char` (8), `int` (16, the default), `long` (32, `dx:ax`),

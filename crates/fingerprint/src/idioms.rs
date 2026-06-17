@@ -146,6 +146,10 @@ pub enum Idiom {
     StoreGlobalByte,
     /// `03/2b/0b/23/33/3b /r [mem]` — an ALU op against a global.
     AluGlobal,
+    /// `05/0d/15/1d/25/2d/35/3d ii ii` — an ALU op on `ax` with an `imm16`
+    /// (`add/or/adc/sbb/and/sub/xor/cmp ax, imm`). The accumulator-specific
+    /// short encoding BCC/TASM prefer over `81 /r` for `ax`.
+    AluAxImm,
 }
 
 impl Idiom {
@@ -240,6 +244,7 @@ impl Idiom {
             Idiom::LoadGlobalByte => "load global byte (mov al, [mem])",
             Idiom::StoreGlobalByte => "store global byte (mov [mem], al)",
             Idiom::AluGlobal => "alu reg, global",
+            Idiom::AluAxImm => "alu ax, imm16",
         }
     }
 }
@@ -339,6 +344,9 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::CdeclPopN, pat: &[L(0x83), L(0xc4), A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), BP_DISP8, A, A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), REG, A] },
+    // alu ax, imm16 — the accumulator short forms (05/0d/15/1d/25/2d/35/3d), all
+    // `00xxx101`, distinguished by the `reg`-like bits from the 81/83 groups.
+    Def { idiom: Idiom::AluAxImm, pat: &[M(0xc7, 0x05), A, A] },
     // unary group 3 (imul/idiv/...) and shift-by-1.
     Def { idiom: Idiom::Grp3, pat: &[L(0xf7), REG] },
     Def { idiom: Idiom::Shift1, pat: &[L(0xd1), REG] },

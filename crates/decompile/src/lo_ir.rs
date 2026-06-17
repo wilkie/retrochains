@@ -352,6 +352,13 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let dst = if op == BinOp::Cmp { Place::Flags } else { R(reg_of(1)) };
             vec![LoOp::Bin { dst, op, lhs: R(reg_of(1)), rhs: Global(u16_at(bytes, 2)) }]
         }
+        Idiom::AluAxImm => {
+            // The op lives in the same bit positions as the group-1 `reg` field.
+            let op = group1_op(bytes[0] >> 3);
+            let imm = i32::from(u16_at(bytes, 1).cast_signed());
+            let dst = if op == BinOp::Cmp { Place::Flags } else { R(Reg::Ax) };
+            vec![LoOp::Bin { dst, op, lhs: R(Reg::Ax), rhs: Imm(imm) }]
+        }
         Idiom::AluImm => {
             // group 1 with imm8 (sign-extended). Local form: `83 46 disp imm`;
             // register form: `83 modrm imm`.
