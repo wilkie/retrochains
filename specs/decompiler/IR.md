@@ -347,7 +347,17 @@ Recovery is driven by the idioms, not guessed:
   recognizer addition (`c6 07 ib`, `StoreImmByteDeref`, the byte analogue of the
   `c7 07` word store-imm). The `char` *return* type these often want is built
   separately (see the Width note above), so `char f(char *p) { return *p; }`
-  now round-trips too.)*
+  now round-trips too. **Constant-offset derefs** (`p[K]` / `*(p+K)`) are built:
+  `mov ax,[bx+disp8]` (and the byte `mov al,[bx+disp8]`) — a new
+  `PointerLoadDisp8` recognizer idiom (`8b/8a` with mod=01 rm=bx) lifted to a
+  `Place::DerefDisp(reg, disp)`. The fold divides the byte displacement by the
+  pointee stride (2 for `int`, 1 for `char`) to recover the element index and
+  emits `*(p + K)` (a `Deref` of an `Add`), which BCC recompiles to the same
+  `[bx+K*stride]`; `K == 0` collapses to a plain `*p`. An odd displacement on an
+  `int *` isn't a clean index, so it bails. This recovery is what the
+  fixture-driven `bcc` work above enabled: the stack-resident `p[K]` read/write
+  and `*(p+K)` read paths all panicked until fixtures 4273–4276 closed them, so
+  the recovered C now recompiles instead of trapping.)*
 - **Promotions** — `Cbw`/`Cwd` become explicit `Cast` nodes, so the emitted C's
   implicit promotions recompile to the same `cbw`/`cwd`.
 - **Aggregates** — a `Lea base` then indexed access ⇒ array; a constant field

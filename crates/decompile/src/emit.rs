@@ -504,6 +504,15 @@ mod tests {
         assert_roundtrips_stack(
             "int f(int *p) { int s; s = 0; while (*p > s) { s = s + 1; } return s; }\n",
         );
+        // A constant-offset deref (`p[K]` / `*(p+K)`) reads `[bx+K*stride]` — the
+        // byte displacement divided by the pointee stride recovers the element
+        // index, rendered as `*(p + K)` (which BCC recompiles to the same code).
+        // `p[0]` collapses to a plain `*p`. Int (stride 2) and char (stride 1).
+        assert_roundtrips_stack("int f(int *p) { return p[2]; }\n");
+        assert_roundtrips_stack("int f(int *p) { return p[1]; }\n");
+        assert_roundtrips_stack("int f(int *p) { return *(p + 3); }\n");
+        assert_roundtrips_stack("int f(char *p) { return p[3]; }\n");
+        assert_roundtrips_stack("int f(int *p) { return p[2] + 1; }\n");
     }
 
     #[test]

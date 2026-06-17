@@ -91,6 +91,9 @@ pub enum Place {
     Global(u16),
     /// `[si]` / `[di]` — a near-pointer dereference (`*p`).
     Deref(Reg),
+    /// `[reg + disp]` — a pointer dereference at a constant byte offset, the
+    /// `p[K]` / `*(p+K)` addressing mode (`mov ax,[bx+4]`).
+    DerefDisp(Reg, i16),
     /// An immediate constant.
     Imm(i32),
     /// The flags register — the result side of a `cmp`/`test`.
@@ -520,6 +523,20 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         // 0x8a (byte deref)
         Idiom::PointerLoad => {
             vec![LoOp::Load { dst: Byte(byte_reg_of(1)), src: Deref(deref_base(modrm(1))) }]
+        }
+        // `mov r,[bx+disp8]` — deref at a constant offset (`p[K]` / `*(p+K)`).
+        Idiom::PointerLoadDisp8 if bytes[0] == 0x8b => {
+            vec![LoOp::Load {
+                dst: R(reg_of(1)),
+                src: Place::DerefDisp(deref_base(modrm(1)), disp8_at(bytes, 2)),
+            }]
+        }
+        // 0x8a (byte deref at offset)
+        Idiom::PointerLoadDisp8 => {
+            vec![LoOp::Load {
+                dst: Byte(byte_reg_of(1)),
+                src: Place::DerefDisp(deref_base(modrm(1)), disp8_at(bytes, 2)),
+            }]
         }
         Idiom::PointerStore if bytes[0] == 0x89 => {
             vec![LoOp::Store { dst: Deref(deref_base(modrm(1))), src: R(reg_of(1)) }]

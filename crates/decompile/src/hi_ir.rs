@@ -480,6 +480,18 @@ impl Ctx {
         }
     }
 
+    /// `*(ptr + k)` — a dereference at a constant *element* offset, or a plain
+    /// `*ptr` when `k == 0`. The element index is already scaled (the caller
+    /// divides the byte displacement by the pointee stride).
+    fn deref_at(ptr: Expr, k: i16) -> Expr {
+        let inner = if k == 0 {
+            ptr
+        } else {
+            Expr::Binary(BinOp::Add, Box::new(ptr), Box::new(Expr::Const(i32::from(k))))
+        };
+        Expr::Deref(Box::new(inner))
+    }
+
     /// Does `op` leave its result in `al` (a byte)? A `return` reached right
     /// after such an op — with no `cbw` between — is a `char` return, not `int`.
     fn writes_byte(op: &LoOp) -> bool {
@@ -655,6 +667,37 @@ impl Ctx {
                                 self.note_ptr(v);
                             }
                             acc = Some(Expr::Deref(Box::new(ptr)));
+                        }
+                        None => self.complete = false,
+                    }
+                }
+
+                // `mov ax, [bx+disp]` — deref an `int *` at a constant byte
+                // offset: `*(p + K)` where K = disp/2 (the `int` stride). An odd
+                // displacement isn't a clean `int` index — bail.
+                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::DerefDisp(Reg::Bx, disp) } => {
+                    flush_call(&mut acc, out);
+                    match bx.clone() {
+                        Some(ptr) if disp % 2 == 0 => {
+                            if let Expr::Var(v) = ptr {
+                                self.note_ptr(v);
+                            }
+                            acc = Some(Self::deref_at(ptr, disp / 2));
+                        }
+                        _ => self.complete = false,
+                    }
+                }
+
+                // `mov al, [bx+disp]` — deref a `char *` at a constant byte offset:
+                // `*(p + K)` where K = disp (the `char` stride is 1).
+                LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::DerefDisp(Reg::Bx, disp) } => {
+                    flush_call(&mut acc, out);
+                    match bx.clone() {
+                        Some(ptr) => {
+                            if let Expr::Var(v) = ptr {
+                                self.note_char_ptr(v);
+                            }
+                            acc = Some(Self::deref_at(ptr, disp));
                         }
                         None => self.complete = false,
                     }
