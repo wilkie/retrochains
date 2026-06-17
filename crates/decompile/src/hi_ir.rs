@@ -83,6 +83,16 @@ fn cond_to_relop(cond: Cond) -> Option<RelOp> {
     }
 }
 
+/// A prefix unary operator that maps directly to one machine op (distinct from
+/// the logical `!`, which is the `neg;sbb;inc` idiom — [`Expr::Not`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    /// `-e` — arithmetic negation (`neg`).
+    Neg,
+    /// `~e` — bitwise complement (`not`).
+    BitNot,
+}
+
 /// A recovered expression — a subset of the §5 grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
@@ -115,6 +125,8 @@ pub enum Expr {
     /// re-evaluate `x` at word width (`mov ax,[x]`), so the cast is what
     /// reproduces the byte load.
     Cast(Type, Box<Expr>),
+    /// `-e` / `~e` — a prefix unary op (`neg`/`not`). Logical `!` is [`Not`].
+    Unary(UnaryOp, Box<Expr>),
 }
 
 /// Does an expression contain a (side-effecting) call anywhere?
@@ -122,7 +134,7 @@ fn contains_call(e: &Expr) -> bool {
     match e {
         Expr::Call(..) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
-        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => contains_call(a),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => contains_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
@@ -223,7 +235,7 @@ fn expr_mentions(expr: &Expr, var: Var) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_mentions(a, var) || expr_mentions(b, var)
         }
-        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => expr_mentions(a, var),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_mentions(a, var),
         Expr::Call(_, args) => args.iter().any(|a| expr_mentions(a, var)),
         Expr::Const(_) | Expr::LongConst(_) => false,
     }
@@ -291,7 +303,7 @@ fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
             walk_vars_expr(a, f);
             walk_vars_expr(b, f);
         }
-        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => walk_vars_expr(a, f),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => walk_vars_expr(a, f),
         Expr::Call(_, args) => args.iter_mut().for_each(|a| walk_vars_expr(a, f)),
         Expr::Const(_) | Expr::LongConst(_) => {}
     }
@@ -777,7 +789,7 @@ impl Ctx {
                 self.mark_unsigned(a);
                 self.mark_unsigned(b);
             }
-            Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => self.mark_unsigned(a),
+            Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => self.mark_unsigned(a),
             Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..) => {}
         }
     }
@@ -949,12 +961,13 @@ impl Ctx {
         // already returned that way, so the physical `Ret` it lands on isn't
         // double-counted (and a void fall-off — no such jump — returns nothing).
         let mut returned = false;
-        // Set when an arm consumed the *following* instruction too (a two-store
-        // `long` assignment), so the loop skips it.
-        let mut skip_next = false;
+        // How many *following* instructions an arm already consumed, so the loop
+        // skips them (a two-store `long` assignment skips 1; the `!x` idiom's
+        // `sbb`/`inc` tail skips 2).
+        let mut skip = 0usize;
         for i in lo..hi {
-            if skip_next {
-                skip_next = false;
+            if skip > 0 {
+                skip -= 1;
                 continue;
             }
             match self.insns[i].op.clone() {
@@ -1482,6 +1495,52 @@ impl Ctx {
                     }
                 }
 
+                // `neg ax`/`neg al` — arithmetic negation `-x`, unless it opens
+                // the `!x` idiom `neg ax; sbb ax,ax; inc ax` (which leaves 0/1 for
+                // logical not). The `sbb`/`inc` tail is then consumed.
+                LoOp::Un { dst: Place::Reg(Reg::Ax), op: UnOp::Neg, operand: Place::Reg(Reg::Ax) }
+                | LoOp::Un {
+                    dst: Place::Byte(ByteReg::Al),
+                    op: UnOp::Neg,
+                    operand: Place::Byte(ByteReg::Al),
+                } => {
+                    let is_lognot = matches!(
+                        self.insns.get(i + 1).map(|n| &n.op),
+                        Some(LoOp::Bin {
+                            dst: Place::Reg(Reg::Ax),
+                            op: BinOp::Sbb,
+                            lhs: Place::Reg(Reg::Ax),
+                            rhs: Place::Reg(Reg::Ax),
+                        })
+                    ) && matches!(
+                        self.insns.get(i + 2).map(|n| &n.op),
+                        Some(LoOp::Un {
+                            dst: Place::Reg(Reg::Ax),
+                            op: UnOp::Inc,
+                            operand: Place::Reg(Reg::Ax),
+                        })
+                    );
+                    match acc.take() {
+                        Some(e) if is_lognot => {
+                            acc = Some(Expr::Not(Box::new(e)));
+                            skip = 2;
+                        }
+                        Some(e) => acc = Some(Expr::Unary(UnaryOp::Neg, Box::new(e))),
+                        None => self.complete = false,
+                    }
+                }
+
+                // `not ax`/`not al` — bitwise complement `~x`.
+                LoOp::Un { dst: Place::Reg(Reg::Ax), op: UnOp::Not, operand: Place::Reg(Reg::Ax) }
+                | LoOp::Un {
+                    dst: Place::Byte(ByteReg::Al),
+                    op: UnOp::Not,
+                    operand: Place::Byte(ByteReg::Al),
+                } => match acc.take() {
+                    Some(e) => acc = Some(Expr::Unary(UnaryOp::BitNot, Box::new(e))),
+                    None => self.complete = false,
+                },
+
                 // `inc`/`dec ax` (or byte `inc al`) extends the accumulator by
                 // ±1 (`x = x + 1` / char `c = c + 1` kept byte-wide).
                 LoOp::Un { dst: Place::Reg(Reg::Ax), op, operand: Place::Reg(Reg::Ax) }
@@ -1706,7 +1765,7 @@ impl Ctx {
                             self.note_long(var);
                             let value = (imm_hi << 16) | (imm_lo & 0xFFFF);
                             out.push(Stmt::Assign(LValue::Var(var), Expr::LongConst(value)));
-                            skip_next = true;
+                            skip = 1;
                         }
                         None => match self.dest(Place::Local(hi)) {
                             Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(imm_hi))),

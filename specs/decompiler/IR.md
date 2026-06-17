@@ -156,7 +156,8 @@ Close to a C AST, plus provenance (§8):
 Stmt   = Assign(LValue, Expr) | Compound(LValue, op, Expr) | Call(target, [Expr], result?)
        | If(Expr, [Stmt], [Stmt]) | While(Expr, [Stmt]) | For(…) | Do(…)
        | Return(Expr?) | Break | Continue | Switch(Expr, cases)
-Expr   = Const | Var | Global | Param | Binary(op, Expr, Expr) | Unary(op, Expr)
+Expr   = Const | Var | Global | Param | Binary(op, Expr, Expr)
+       | Unary(op, Expr)   // `-e` (neg), `~e` (not); logical `!e` is its own node
        | Deref(Expr) | AddrOf(LValue) | Index(Expr, Expr) | Field(Expr, name)
        | Cast(Type, Expr)  // a narrowing `(char)x` — see §6
        | CallExpr(target, [Expr])

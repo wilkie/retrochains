@@ -462,7 +462,7 @@ fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_has_external_call(a, callees) || expr_has_external_call(b, callees)
         }
-        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => expr_has_external_call(a, callees),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_external_call(a, callees),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
@@ -494,7 +494,7 @@ fn expr_has_call(e: &Expr) -> bool {
     match e {
         Expr::Call(..) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
-        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) => expr_has_call(a),
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
@@ -668,6 +668,13 @@ fn expr_str(e: &Expr, names: &Names) -> String {
             format!("{}({list})", names.callee(*target))
         }
         Expr::Cast(ty, e) => format!("({}){}", type_str(*ty), expr_str(e, names)),
+        Expr::Unary(op, e) => {
+            let sym = match op {
+                crate::hi_ir::UnaryOp::Neg => "-",
+                crate::hi_ir::UnaryOp::BitNot => "~",
+            };
+            format!("{sym}{}", expr_str(e, names))
+        }
     }
 }
 
@@ -1180,6 +1187,19 @@ mod tests {
         assert_roundtrips(
             "int f(int n){ int s; int i; s=0; for(i=0;i<n;i++){ s+=i; } return s; }\n",
         );
+    }
+
+    #[test]
+    fn unary_operators_roundtrip() {
+        // Prefix `-` (`neg`), `~` (`not`), and `!` (the `neg; sbb ax,ax; inc ax`
+        // idiom that leaves 0/1). The `!` peephole consumes its `sbb`/`inc` tail;
+        // a bare `neg` opening it must not be mistaken for `-x`.
+        assert_roundtrips("int f(int x){ return -x; }\n");
+        assert_roundtrips("int f(int x){ return ~x; }\n");
+        assert_roundtrips("int f(int x){ return !x; }\n");
+        assert_roundtrips("int f(int a, int b){ return -a + b; }\n");
+        assert_roundtrips("int f(int x){ return ~x & 15; }\n");
+        assert_roundtrips_stack("int f(){ int x; x=5; return !x; }\n");
     }
 
     #[test]

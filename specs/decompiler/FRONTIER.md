@@ -20,14 +20,18 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | param-promo | char-compound | narrowing-cast | meaning |
-|-------------|--------:|---|------------:|--------------:|---------------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 1826 (44.2%) | 1846 (44.7%) | **1862 (45.1%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1940 | 1920 | 1920 (46.5%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 331 | 331 | 323 (7.8%) | recovered C recompiles to *different* bytes |
+| bucket      | initial | … | char-compound | narrowing-cast | unary-ops | meaning |
+|-------------|--------:|---|--------------:|---------------:|----------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 1846 (44.7%) | 1862 (45.1%) | **1908 (46.2%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1920 | 1920 | 1871 (45.3%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 331 | 323 | 326 (7.9%) | recovered C recompiles to *different* bytes |
 | cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
-| PANIC       |    27 | … | 26 | 26 | 19 | recover/verify crashed |
+| PANIC       |    27 | … | 26 | 19 | 19 | recover/verify crashed |
+
+(The +3 mismatch at the unary step is ternary/abs-adjacent: folding `-x`
+unblocks `a > 0 ? a : -a`, whose ternary control flow isn't structured yet —
+`render_idiomatic` gates these on verify, so production still declines them.)
 
 (Intermediate columns multi-fn/in-place/var-shift elided; see git history. The
 narrowing-cast step is a triple win: +16 match, −8 mismatch, **−7 panic** — the
@@ -138,5 +142,15 @@ clears most of them.
    the byte load (a plain `c = x` would word-load) and a mixed `int`/`char` frame
    is no longer mis-modelled as a `char` array (the panic source). The cast is
    dropped inside a `char` compound (`c |= n`).
-7. **Panic → sound-incomplete** (19), **shared globals across functions**, then
-   `int→long`/`char*char→int` widening, bitfields, arrays/struct/pointer-deref.
+7. ~~**Unary operators**~~ — **DONE** (MATCH 45.1% → 46.2%, +46). `-e` (`neg`),
+   `~e` (`not`), and `!e` (the `neg; sbb ax,ax; inc ax` idiom that leaves 0/1) as
+   a new `Expr::Unary` / `Expr::Not`. A bare `neg` opening `!x` is disambiguated
+   by lookahead (the fold's skip-count consumes the `sbb`/`inc` tail). The +3
+   mismatch is ternary/abs-adjacent (`a>0 ? a : -a`), now the most visible
+   *incomplete* near this work.
+8. **Ternary / `? :` recovery** — `a>0 ? a : -a` mis-structures as an empty `if`;
+   the compare-branch-merge-into-`ax` shape isn't recognized. Newly surfaced by
+   the unary work.
+9. **`int→long`/`char*char→int` widening** (the imul-spill with `cbw` operands),
+   **panic → sound-incomplete** (19), **shared globals across functions**,
+   bitfields, arrays/struct/pointer-deref.
