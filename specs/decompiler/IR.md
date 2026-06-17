@@ -157,6 +157,20 @@ Two recoveries produce it:
   initial `if`'s else), so pattern-matching the templates is more reliable than
   generic interval analysis — and, again, the recompile check adjudicates.
 
+Both are built (`hi_ir.rs`). The structurer recurses over the Lo-IR by index,
+matching BCC's stereotyped shapes directly: a **forward** `cmp` + conditional
+branch that *skips* the then-block is an `if` (so the source condition is the
+branch's, **negated**); an unconditional jump at the then-block's tail past a
+second block makes it `if/else`; a **loop-rotated** header jump to a bottom test
+that conditionally branches *back* to the body is a `while` (the branch is the
+loop-continue condition, taken verbatim). Nesting falls out of the recursion —
+`if`-in-`while`, sequential `if`s, accumulation loops all round-trip. Conditions
+recover from the `cmp` operands plus a `Jcc`-nibble → relational-operator table
+(signed `< <= > >= == !=`; unsigned and flag-only codes mark incomplete). This
+increment recovers **stack** locals; BCC's default `si`/`di` register-variable
+allocation (see §3) is the separable next step — the roundtrip tests compile
+with `-r-` to exercise the structuring before register-variable data-flow lands.
+
 Expression folding is built:
 [`crates/decompile/src/hi_ir.rs`](../../crates/decompile/src/hi_ir.rs) +
 [`emit.rs`](../../crates/decompile/src/emit.rs). `recover(code)` folds the
