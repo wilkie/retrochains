@@ -1523,7 +1523,16 @@ impl<'a> super::FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\t{width} ptr {addr},{v_masked}\r\n");
                 return;
             }
-            panic!("non-constant rhs in `int *p; p[K] = v` not yet supported (no fixture)");
+            // Non-constant RHS — evaluate it into AX, then store through the
+            // (already-loaded) pointer register. Same shape as `*(p+K) = v`.
+            // Fixture 4277 (`p[K] = v`).
+            self.emit_expr_to_ax(value);
+            if pointee.is_char_like() {
+                let _ = write!(self.out, "\tmov\tbyte ptr {addr},al\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tword ptr {addr},ax\r\n");
+            }
+            return;
         }
         // Global array? Route to DGROUP-relative addressing.
         if let Some(gty) = self.globals.type_of(array) {

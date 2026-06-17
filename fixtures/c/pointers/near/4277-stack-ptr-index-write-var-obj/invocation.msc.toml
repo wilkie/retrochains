@@ -1,0 +1,4 @@
+description = "constant-indexed write of a variable through a stack-resident near pointer (p[K] = v). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
