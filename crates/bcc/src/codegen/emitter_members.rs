@@ -637,14 +637,20 @@ impl<'a> super::FunctionEmitter<'a> {
         };
         let load_byte = field_ty.is_char_like();
         if matches!(kind, crate::ast::MemberKind::Arrow) {
-            // `p->x`: p holds the address; field at `[reg + K]`.
-            let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
-                panic!("stack-resident pointer in `p->x` not yet supported (no fixture)");
+            // `p->x`: p holds the address; field at `[reg + K]`. A stack-resident
+            // pointer (`-r-`, or one BCC couldn't promote) is loaded into bx
+            // first, then accessed through it. Fixture 4278 (`return p->b;`).
+            let reg_name = match self.locals.location_of(name) {
+                LocalLocation::Reg(reg) => reg.name(),
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    "bx"
+                }
             };
             let addr = if field_off == 0 {
-                format!("[{}]", reg.name())
+                format!("[{reg_name}]")
             } else {
-                format!("[{}+{field_off}]", reg.name())
+                format!("[{reg_name}+{field_off}]")
             };
             if load_byte {
                 let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
@@ -1080,15 +1086,20 @@ impl<'a> super::FunctionEmitter<'a> {
                     bp_addr(off)
                 }
                 crate::ast::MemberKind::Arrow => {
-                    let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
-                        panic!(
-                            "stack-resident pointer in `p->x = …` not yet supported (no fixture)"
-                        );
+                    // A stack-resident struct pointer is loaded into bx first,
+                    // then the field is stored through it. Fixture 4279
+                    // (`p->b = v;`).
+                    let reg_name = match self.locals.location_of(name) {
+                        LocalLocation::Reg(reg) => reg.name(),
+                        LocalLocation::Stack(off) => {
+                            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                            "bx"
+                        }
                     };
                     if field_off == 0 {
-                        format!("[{}]", reg.name())
+                        format!("[{reg_name}]")
                     } else {
-                        format!("[{}+{field_off}]", reg.name())
+                        format!("[{reg_name}+{field_off}]")
                     }
                 }
             };
