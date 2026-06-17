@@ -1202,6 +1202,21 @@ mod tests {
     }
 
     #[test]
+    fn widening_conversions_roundtrip() {
+        // `char * char` promotes both to `int` (each `cbw`) and multiplies via
+        // the register spill — `imul dx` reads the spilled right operand, not a
+        // constant. `int → long` is a `cwd` that isn't feeding an `idiv` (which
+        // would just be the dividend setup), so the value widens to `long`.
+        assert_roundtrips_stack("int f(char a, char b){ return a * b; }\n");
+        assert_roundtrips_stack("int f(){ char a; char b; a=5; b=3; return a * b; }\n");
+        assert_roundtrips_stack("long f(int i){ return i; }\n");
+        assert_roundtrips_stack("long f(int i){ return (long)i; }\n");
+        // The `cwd; idiv` dividend setup must stay a no-op (not a widening).
+        assert_roundtrips_stack("int f(int a, int b){ return a / b; }\n");
+        assert_roundtrips_stack("int f(int a){ return a % 2; }\n");
+    }
+
+    #[test]
     fn ternary_expressions_roundtrip() {
         // `cond ? t : f` is a diamond whose both arms leave a value in `ax` and
         // converge; recovered as `Expr::Ternary` and seeded into the consumer

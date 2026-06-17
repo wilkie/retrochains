@@ -1003,7 +1003,21 @@ impl Ctx {
                 | LoOp::SaveReg { .. }
                 | LoOp::RestoreReg { .. }
                 | LoOp::Cleanup { .. }
-                | LoOp::Promote { kind: crate::lo_ir::Promote::Cbw | crate::lo_ir::Promote::Cwd } => {}
+                | LoOp::Promote { kind: Promote::Cbw } => {}
+
+                // `cwd` sign-extends `ax` into `dx:ax`. Feeding an `idiv` it just
+                // sets up the dividend (a no-op — the accumulator already is it);
+                // otherwise it widens an `int` to a `long`, `(long)i`, so the
+                // accumulator is now a `long` value.
+                LoOp::Promote { kind: Promote::Cwd } => {
+                    let feeds_idiv = matches!(
+                        self.insns.get(i + 1).map(|n| &n.op),
+                        Some(LoOp::Bin { dst: Place::DxAx, op: BinOp::Idiv, .. })
+                    );
+                    if !feeds_idiv {
+                        acc_long = true;
+                    }
+                }
 
                 // A jump to the epilogue is a `return <accumulator>`. The return
                 // *type* is `char` when the value is left in `al` (a byte) with no
@@ -1474,9 +1488,12 @@ impl Ctx {
                 // multiplier loaded into `dx` (`mov dx,K; imul dx`).
                 LoOp::Bin { dst: Place::DxAx, op: BinOp::Imul, lhs: Place::Reg(Reg::Ax), rhs } => {
                     let r = match rhs {
+                        // `dx` holds either a constant multiplier (`mov dx,K; imul
+                        // dx`) or the spilled right operand (`mov dx,ax` from a
+                        // two-register multiply, e.g. `char a * char b`).
                         Place::Reg(Reg::Dx) => match dx.take() {
                             Some(DxState::Const(v)) => Some(Expr::Const(v)),
-                            _ => None,
+                            _ => dx_temp.take(),
                         },
                         other => self.operand(other),
                     };

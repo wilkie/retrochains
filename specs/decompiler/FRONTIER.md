@@ -20,11 +20,11 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | narrowing-cast | unary-ops | ternary | meaning |
-|-------------|--------:|---|---------------:|----------:|--------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 1862 (45.1%) | 1908 (46.2%) | **2001 (48.4%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1920 | 1871 | 1844 (44.6%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 323 | 326 | 260 (6.3%) | recovered C recompiles to *different* bytes |
+| bucket      | initial | … | unary-ops | ternary | widening | meaning |
+|-------------|--------:|---|----------:|--------:|---------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 1908 (46.2%) | 2001 (48.4%) | **2009 (48.6%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1871 | 1844 | 1842 (44.6%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 326 | 260 | 254 (6.1%) | recovered C recompiles to *different* bytes |
 | cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
 | PANIC       |    27 | … | 19 | 19 | 19 | recover/verify crashed |
@@ -154,7 +154,14 @@ clears most of them.
    MISMATCH 326 → 260, −66). The diamond whose both arms reduce to a value folds
    to `Expr::Ternary`, seeded into the consumer via `pending_acc`. This also
    reclaimed the unary-step's abs mismatches.
-9. **`int→long`/`char*char→int` widening** (the imul-spill with `cbw` operands),
-   **panic → sound-incomplete** (19), **shared globals across functions**,
-   bitfields, arrays/struct/pointer-deref. Ternaries with a side-effecting arm
-   (`a ? b++ : c`) or a pointer result are the small remaining tail here.
+9. ~~**`char*char→int` / `int→long` widening**~~ — **PARTIAL** (MATCH 48.4% →
+   48.6%, MISMATCH 260 → 254). `char*char` promotes via `cbw` then multiplies in
+   the register spill (`imul dx` now reads the spilled right operand, not only a
+   constant). `int→long` is a `cwd` *not* feeding an `idiv` → `acc_long`, so the
+   widened value returns/propagates as `long`. **Still open:** the `long`-local
+   *store* (`long r = (long)i` / `long r = a+b`) — the `dx:ax`→two-slot store
+   pair, which uses *opposite* register→slot orderings for a widened int (`dx`
+   high) vs a long add (`ax` high); a real long-store fold, deferred.
+10. **`long`-local store fold** (the two register orderings above), **panic →
+    sound-incomplete** (19), **shared globals across functions**, bitfields,
+    arrays/struct/pointer-deref, ternary side-effect/pointer tail.
