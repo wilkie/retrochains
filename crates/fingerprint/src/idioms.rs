@@ -149,6 +149,12 @@ pub enum Idiom {
     PointerLoadDisp8,
     /// `89/88 /r [si|di]` — store through a near pointer (`*p = …`).
     PointerStore,
+    /// `89 /r [bx+disp8]` — store a word through a near pointer at a constant
+    /// byte offset (`p[K] = r16` / `*(p+K) = r16`).
+    PointerStoreDisp8,
+    /// `c7 47 disp8 iw` — store a word immediate at `[bx+disp8]`
+    /// (`p[K] = const` / `*(p+K) = const`).
+    StoreImmDispDeref,
     /// `a0 aa aa` — `mov al, [mem]`: load a `char` global.
     LoadGlobalByte,
     /// `a2 aa aa` — `mov [mem], al`: store a `char` global.
@@ -274,6 +280,8 @@ impl Idiom {
             Idiom::PointerLoad => "load via pointer (mov r16, [si/di])",
             Idiom::PointerLoadDisp8 => "load via pointer+offset (mov r, [bx+disp8])",
             Idiom::PointerStore => "store via pointer (mov [si/di], r16)",
+            Idiom::PointerStoreDisp8 => "store via pointer+offset (mov [bx+disp8], r16)",
+            Idiom::StoreImmDispDeref => "store imm via pointer+offset (mov [bx+disp8], imm16)",
             Idiom::LoadGlobalByte => "load global byte (mov al, [mem])",
             Idiom::StoreGlobalByte => "store global byte (mov [mem], al)",
             Idiom::AluGlobal => "alu reg, global",
@@ -362,6 +370,9 @@ const IDIOMS: &[Def] = &[
     // `mov r,[bx+disp8]` — pointer deref at a constant offset (mod=01, rm=bx).
     Def { idiom: Idiom::PointerLoadDisp8, pat: &[L(0x8b), M(0xc7, 0x47), A] },
     Def { idiom: Idiom::PointerLoadDisp8, pat: &[L(0x8a), M(0xc7, 0x47), A] },
+    // `mov [bx+disp8],r16` / `mov [bx+disp8],imm16` — store at a constant offset.
+    Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x47), A] },
+    Def { idiom: Idiom::StoreImmDispDeref, pat: &[L(0xc7), M(0xc7, 0x47), A, A, A] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x89), M(0xc7, 0x07)] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x88), M(0xc7, 0x07)] },
     Def { idiom: Idiom::StoreImmDeref, pat: &[L(0xc7), M(0xc7, 0x07), A, A] }, // mov [bx], imm16

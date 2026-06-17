@@ -513,6 +513,12 @@ mod tests {
         assert_roundtrips_stack("int f(int *p) { return *(p + 3); }\n");
         assert_roundtrips_stack("int f(char *p) { return p[3]; }\n");
         assert_roundtrips_stack("int f(int *p) { return p[2] + 1; }\n");
+        // The write side: a store at a constant offset (`*(p+K) = value`) is
+        // `mov [bx+K*stride],<imm|ax>`. A constant and a variable RHS, and two
+        // writes in sequence. Recovered as `*(p + K) = …`.
+        assert_roundtrips_stack("void f(int *p) { p[2] = 5; }\n");
+        assert_roundtrips_stack("void f(int *p, int v) { *(p + 2) = v; }\n");
+        assert_roundtrips_stack("void f(int *p) { p[1] = 10; p[2] = 20; }\n");
     }
 
     #[test]

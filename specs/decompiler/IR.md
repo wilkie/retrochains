@@ -357,7 +357,15 @@ Recovery is driven by the idioms, not guessed:
   `int *` isn't a clean index, so it bails. This recovery is what the
   fixture-driven `bcc` work above enabled: the stack-resident `p[K]` read/write
   and `*(p+K)` read paths all panicked until fixtures 4273–4276 closed them, so
-  the recovered C now recompiles instead of trapping.)*
+  the recovered C now recompiles instead of trapping. The **write** side
+  mirrors it: `mov [bx+disp],ax` (`PointerStoreDisp8`) and `mov word ptr
+  [bx+disp],imm16` (`StoreImmDispDeref`) recover as `*(p + K) = value` (an
+  `LValue::Deref` of the same offset-pointer expression), for a constant or a
+  variable RHS. Recovering as `*(p+K)` rather than the `p[K]` subscript is
+  deliberate: BCC compiles them identically, but the explicit-arithmetic store
+  path has wider coverage in our `bcc` (the subscript variable-RHS write is
+  still a `bcc` gap). Scoped to `int` writes — a `char` indexed-immediate write
+  hits a separate `bcc`/TASM gap (`byte ptr [bx+disp],imm`).)*
 - **Promotions** — `Cbw`/`Cwd` become explicit `Cast` nodes, so the emitted C's
   implicit promotions recompile to the same `cbw`/`cwd`.
 - **Aggregates** — a `Lea base` then indexed access ⇒ array; a constant field

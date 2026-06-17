@@ -480,16 +480,20 @@ impl Ctx {
         }
     }
 
-    /// `*(ptr + k)` — a dereference at a constant *element* offset, or a plain
-    /// `*ptr` when `k == 0`. The element index is already scaled (the caller
-    /// divides the byte displacement by the pointee stride).
-    fn deref_at(ptr: Expr, k: i16) -> Expr {
-        let inner = if k == 0 {
+    /// `ptr + k` (a pointer advanced by a constant *element* index), or just
+    /// `ptr` when `k == 0`. The index is already scaled (the caller divides the
+    /// byte displacement by the pointee stride).
+    fn offset_ptr(ptr: Expr, k: i16) -> Expr {
+        if k == 0 {
             ptr
         } else {
             Expr::Binary(BinOp::Add, Box::new(ptr), Box::new(Expr::Const(i32::from(k))))
-        };
-        Expr::Deref(Box::new(inner))
+        }
+    }
+
+    /// `*(ptr + k)` — a dereference at a constant element offset (`p[k]`).
+    fn deref_at(ptr: Expr, k: i16) -> Expr {
+        Expr::Deref(Box::new(Self::offset_ptr(ptr, k)))
     }
 
     /// Does `op` leave its result in `al` (a byte)? A `return` reached right
@@ -1042,6 +1046,34 @@ impl Ctx {
                                 self.note_ptr(v);
                             }
                             out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), e));
+                        }
+                        _ => self.complete = false,
+                    }
+                }
+
+                // `mov [bx+disp],ax` / `mov word ptr [bx+disp],imm` — store a word
+                // through an `int *` at a constant offset: `*(p + K) = value`,
+                // K = disp/2 (the `int` stride). An odd displacement isn't a clean
+                // `int` index — bail.
+                LoOp::Store { dst: Place::DerefDisp(Reg::Bx, disp), src } => {
+                    let value = match src {
+                        Place::Reg(Reg::Ax) => acc.take(),
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
+                    };
+                    match (bx.clone(), value) {
+                        (Some(ptr), Some(e)) if disp % 2 == 0 => {
+                            if let Expr::Var(v) = ptr {
+                                self.note_ptr(v);
+                            }
+                            let place = LValue::Deref(Box::new(Self::offset_ptr(ptr, disp / 2)));
+                            out.push(Stmt::Assign(place, e));
                         }
                         _ => self.complete = false,
                     }
