@@ -714,6 +714,21 @@ impl Ctx {
         }
     }
 
+    /// If instruction `i+1` is the low-word half of a `long` register store
+    /// paired with the high-word store at slot `s1` in register `r1`, return the
+    /// low slot offset. The two stores write `dx:ax` to a `(lo, lo+2)` slot pair
+    /// (high first), the registers being `ax`/`dx` in either order.
+    fn paired_long_store_low(&self, i: usize, s1: i16, r1: Reg) -> Option<i16> {
+        if !matches!(r1, Reg::Ax | Reg::Dx) {
+            return None;
+        }
+        let LoOp::Store { dst: Place::Local(s2), src: Place::Reg(r2) } = self.insns.get(i + 1)?.op
+        else {
+            return None;
+        };
+        (matches!(r2, Reg::Ax | Reg::Dx) && r2 != r1 && s2 == s1 - 2).then_some(s2)
+    }
+
     /// Re-type any word-accessed variable in `e` back to `int`: a byte load of an
     /// `int`'s low byte (the rhs of a `char op= int`) char-marks the slot, but
     /// the slot's word stores prove it's an `int`. Undoes that local mis-marking.
@@ -1062,6 +1077,11 @@ impl Ctx {
                     let mut args = std::mem::take(&mut pending_args);
                     args.reverse();
                     acc = Some(Expr::Call(target, args));
+                    // A call's result type isn't tracked; clear the `long` flag so
+                    // a following `dx:ax` store of an *unrecovered* `long` (e.g. a
+                    // `long` shift via a runtime helper) declines rather than
+                    // folding a stale value.
+                    acc_long = false;
                 }
 
                 // `mov dx, ax` — save the accumulator (a binary op's right
@@ -1761,6 +1781,26 @@ impl Ctx {
                             }
                             let place = LValue::Deref(Box::new(Self::offset_ptr(ptr, disp / 2)));
                             out.push(Stmt::Assign(place, e));
+                        }
+                        _ => self.complete = false,
+                    }
+                }
+
+                // A `long` local store from `dx:ax`: the high word then the low to
+                // a slot pair (`mov [hi],<reg>; mov [lo],<reg>`, the two registers
+                // ax/dx in some order — a widened `int` keeps the high in `dx`, a
+                // `long` add in `ax`). Folds to one `long` assignment of the long
+                // accumulator, so the high slot never becomes a separate `int`.
+                LoOp::Store { dst: Place::Local(s1), src: Place::Reg(r1) }
+                    if acc_long && self.paired_long_store_low(i, s1, r1).is_some() =>
+                {
+                    let lo = s1 - 2;
+                    match (Self::var_of(Place::Local(lo)), acc.take()) {
+                        (Some(v), Some(e)) => {
+                            self.note(v);
+                            self.note_long(v);
+                            out.push(Stmt::Assign(LValue::Var(v), e));
+                            skip = 1;
                         }
                         _ => self.complete = false,
                     }

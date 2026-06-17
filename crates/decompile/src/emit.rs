@@ -1214,6 +1214,16 @@ mod tests {
         // The `cwd; idiv` dividend setup must stay a no-op (not a widening).
         assert_roundtrips_stack("int f(int a, int b){ return a / b; }\n");
         assert_roundtrips_stack("int f(int a){ return a % 2; }\n");
+        // A `long`-local store from `dx:ax`: the widened int is written as a
+        // high/low slot pair. A `long` shift via a runtime helper (its result in
+        // `dx:ax` too) must *not* fold this way — the call clears `acc_long`, so
+        // it declines instead of folding a stale value.
+        assert_roundtrips_stack("int f(int i){ long r; r = (long)i; return (int)r; }\n");
+        let opts = CompileOpts { no_reg_vars: true, ..CompileOpts::default() };
+        let code =
+            recompile_text("int f(long a, int n){ long r; r = a << n; return (int)r; }\n", &opts)
+                .unwrap();
+        assert!(decompile(&code).is_none(), "a helper-based long shift store declines");
     }
 
     #[test]

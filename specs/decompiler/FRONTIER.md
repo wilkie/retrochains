@@ -20,11 +20,11 @@ for a single fixture.
 
 ## Baseline history (4131 considered, 70 skipped)
 
-| bucket      | initial | … | unary-ops | ternary | widening | meaning |
-|-------------|--------:|---|----------:|--------:|---------:|---------|
-| **MATCH**   |  1433 (34.7%) | … | 1908 (46.2%) | 2001 (48.4%) | **2009 (48.6%)** | round-trips byte-exact |
-| incomplete  |  2111 (51.1%) | … | 1871 | 1844 | 1842 (44.6%) | recovery declines (sound) — a feature gap |
-| MISMATCH    |   553 (13.4%) | … | 326 | 260 | 254 (6.1%) | recovered C recompiles to *different* bytes |
+| bucket      | initial | … | ternary | widening | long-store | meaning |
+|-------------|--------:|---|--------:|---------:|-----------:|---------|
+| **MATCH**   |  1433 (34.7%) | … | 2001 (48.4%) | 2009 (48.6%) | **2013 (48.7%)** | round-trips byte-exact |
+| incomplete  |  2111 (51.1%) | … | 1844 | 1842 | 1838 (44.5%) | recovery declines (sound) — a feature gap |
+| MISMATCH    |   553 (13.4%) | … | 260 | 254 | 254 (6.1%) | recovered C recompiles to *different* bytes |
 | cerr        |     2 | … |  2 |  2 |  2 | recovered C didn't compile |
 | notext      |     5 | … |  5 |  5 |  5 | no `_TEXT` (all-data fixture; nothing to recover) |
 | PANIC       |    27 | … | 19 | 19 | 19 | recover/verify crashed |
@@ -162,6 +162,16 @@ clears most of them.
    *store* (`long r = (long)i` / `long r = a+b`) — the `dx:ax`→two-slot store
    pair, which uses *opposite* register→slot orderings for a widened int (`dx`
    high) vs a long add (`ax` high); a real long-store fold, deferred.
-10. **`long`-local store fold** (the two register orderings above), **panic →
-    sound-incomplete** (19), **shared globals across functions**, bitfields,
-    arrays/struct/pointer-deref, ternary side-effect/pointer tail.
+10. ~~**`long`-local store fold**~~ — **PARTIAL** (MATCH 48.6% → 48.7%). A
+    `dx:ax`→two-slot store pair (`paired_long_store_low`, either register order)
+    folds to one `long` assignment, so `long r = (long)i` recovers. Guarded:
+    a call clears `acc_long`, so a `long` shift/mul via a runtime helper (result
+    in `dx:ax` too) declines instead of folding a stale value. **Still open:** the
+    *reversed* long add/load (`ax` high, used when a `long` arithmetic result is
+    stored to a local rather than returned) — `long r = a + b` still declines.
+11. **Full `long` support** is now the dominant remaining theme — it recurs
+    across compound-assign, arrays, struct fields, and pointers (≈150 of the long
+    incompletes are `long` *struct/array* elements). Sub-levers: reversed long
+    add/load ordering; long shift/mul/div helpers (`__alshl` etc.) recovered as
+    operators; long struct-field and array-element access. Then **panic →
+    sound-incomplete** (19), **shared globals**, bitfields, pointer-deref.
