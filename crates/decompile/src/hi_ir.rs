@@ -386,12 +386,17 @@ fn flip_addsub(op: BinOp) -> BinOp {
 /// the C-level index is the un-shifted value `i`. A non-shift index (a `char *`,
 /// stride 1, needs no scaling) is itself. The shift *amount* is trusted to match
 /// the pointee — the recompile check is the gate.
-fn strip_scale(mut index: Expr) -> Expr {
-    // Strip the whole scaling chain: `int` is `<<1`, `long` is `<<1 <<1`.
+fn strip_scale(mut index: Expr) -> (Expr, u8) {
+    // Strip the whole scaling chain (`int` is `<<1`, `long` is `<<1 <<1`),
+    // returning the count — the stride is `2^count`, which types the element
+    // (1 shift → `int`, 2 → `long`) when the access width can't (a `long` array
+    // store writes only the low word, so it has no `dx:ax` pair to read).
+    let mut shifts = 0u8;
     while let Expr::Binary(BinOp::Shl, base, _amount) = index {
         index = *base;
+        shifts += 1;
     }
-    index
+    (index, shifts)
 }
 
 /// Build `lhs op rhs`, collapsing a constant shift applied to an existing
@@ -507,6 +512,19 @@ impl Ctx {
             && !self.long_array_bases.contains(&off)
         {
             self.long_array_bases.push(off);
+        }
+    }
+
+    /// Is `ptr` the address of a `long` array element (`&a[0] + i` for a known
+    /// `long` array)? A *store* through it writes only the low word (a BCC
+    /// codegen quirk) — not a clean `long` assignment — so the recovery declines.
+    fn is_long_array_elem(&self, ptr: &Expr) -> bool {
+        if let Expr::Binary(BinOp::Add, lhs, _) = ptr
+            && let Expr::AddrOf(Var::Slot(off)) = **lhs
+        {
+            self.long_array_bases.contains(&off)
+        } else {
+            false
         }
     }
 
@@ -914,13 +932,21 @@ impl Ctx {
                 } => match (bx.take(), acc.take()) {
                     // Array: the `lea` base is in ax, the index in bx.
                     (Some(index), Some(base @ Expr::AddrOf(_))) => {
-                        let idx = strip_scale(index);
-                        bx = Some(Expr::Binary(BinOp::Add, Box::new(base), Box::new(idx)));
+                        let (idx, shifts) = strip_scale(index);
+                        let combined = Expr::Binary(BinOp::Add, Box::new(base), Box::new(idx));
+                        // A `<<2` scale is a 4-byte stride — a `long` array. (The
+                        // read also confirms it via the `dx:ax` pair, but a `long`
+                        // array *store* writes only the low word, so the shift is
+                        // its only type signal.)
+                        if shifts >= 2 {
+                            self.note_long_array_base(&combined);
+                        }
+                        bx = Some(combined);
                     }
                     // Pointer: the loaded pointer is in bx, the index in ax.
                     (Some(Expr::Var(p)), Some(index)) => {
                         self.note_ptr(p);
-                        let idx = strip_scale(index);
+                        let (idx, _) = strip_scale(index);
                         bx = Some(Expr::Binary(BinOp::Add, Box::new(Expr::Var(p)), Box::new(idx)));
                     }
                     _ => self.complete = false,
@@ -1266,6 +1292,11 @@ impl Ctx {
                         }
                     };
                     match (bx.clone(), value) {
+                        // A `long` array element store writes only the low word (a
+                        // BCC quirk) — not a clean `long` assignment — so decline.
+                        (Some(ptr), _) if self.is_long_array_elem(&ptr) => {
+                            self.complete = false;
+                        }
                         (Some(ptr), Some(e)) => {
                             if let Expr::Var(v) = ptr {
                                 self.note_ptr(v);
@@ -1927,6 +1958,15 @@ mod tests {
         // `dx:ax` pair deref (`mov dx,[bx+2]; mov ax,[bx]`) with no slot evidence.
         let f = recover_stack("long f(int i) { long a[8]; return a[i]; }\n");
         assert_eq!(f.arrays, vec![ArraySpec { base: -32, len: 8, elem: ArrayElem::Long }]);
+    }
+
+    #[test]
+    fn a_long_array_store_is_sound_not_wrong() {
+        // A `long` array *store* writes only the low word (a BCC quirk), so it
+        // isn't a clean `long` assignment — the recovery declines rather than
+        // mis-shape it as an `int` array (which the stride-4 index would betray).
+        let f = recover_stack("void f(int i, long v) { long a[8]; a[i] = v; }\n");
+        assert!(!f.complete, "the long-array store is declined, not mis-recovered");
     }
 
     #[test]

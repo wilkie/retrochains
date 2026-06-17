@@ -457,8 +457,12 @@ Recovery is driven by the idioms, not guessed:
   store is a word *pair* that isn't yet folded into an array element, stays
   unmodelled — when such a variable-indexed element is recognized but the frame
   pass can't reconstruct the array, the recovery bails rather than emit a
-  dangling `&v[i]`.) Pointer slots still opt out; a frame mixing element types
-  opts out too.)*
+  dangling `&v[i]`.) The element type also reads off the **index scale**: a `<<2`
+  is a 4-byte stride, the only `long` signal a *store* gives — a `long`-array
+  element store writes just the low word (a BCC codegen quirk), so it's not a
+  clean `long` assignment and the recovery *declines* it (sound, not mis-shaped
+  as an `int` array the stride-4 index would betray). Pointer slots still opt
+  out; a frame mixing element types opts out too.)*
 
 Near globals are built (`hi_ir.rs`). A global is a `Var::Global(offset)` — and
 crucially the offset is *not* a placeholder like a call target: it's the real
