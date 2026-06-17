@@ -338,6 +338,12 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::PointerLoad, pat: &[L(0x8a), PTR] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x89), PTR] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x88), PTR] },
+    // deref via `[bx]` (mod=00, rm=111) — a pointer loaded into bx (`*p` after
+    // `mov bx, p`). Distinct rm from the si/di `PTR` mask above.
+    Def { idiom: Idiom::PointerLoad, pat: &[L(0x8b), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::PointerLoad, pat: &[L(0x8a), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::PointerStore, pat: &[L(0x89), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::PointerStore, pat: &[L(0x88), M(0xc7, 0x07)] },
     // global loads/stores: accumulator-direct (a0-a3) and reg via [disp16].
     Def { idiom: Idiom::LoadGlobal, pat: &[L(0xa1), A, A] },
     Def { idiom: Idiom::StoreGlobal, pat: &[L(0xa3), A, A] },

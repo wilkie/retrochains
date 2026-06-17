@@ -76,6 +76,10 @@ pub enum Expr {
     Rel(RelOp, Box<Expr>, Box<Expr>),
     /// `!e` — logical negation, recovered from the `or r,r; jnz` truthiness test.
     Not(Box<Expr>),
+    /// `*e` — a pointer dereference (`mov bx,p; mov ax,[bx]`).
+    Deref(Box<Expr>),
+    /// `&v` — the address of a variable (`lea ax,[bp+disp]`).
+    AddrOf(Var),
     /// A call with its argument list (source order). The callee is an opaque
     /// external: a `call` is a placeholder `e8 00 00` patched by a relocation,
     /// so the target's identity isn't in `_TEXT` and any declared extern
@@ -88,8 +92,8 @@ fn contains_call(e: &Expr) -> bool {
     match e {
         Expr::Call(_) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
-        Expr::Not(a) => contains_call(a),
-        Expr::Const(_) | Expr::Var(_) => false,
+        Expr::Not(a) | Expr::Deref(a) => contains_call(a),
+        Expr::Const(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
 
@@ -157,11 +161,11 @@ pub enum Stmt {
 /// Does `expr` mention variable `var`? Used to confirm a `for` loop variable.
 fn expr_mentions(expr: &Expr, var: Var) -> bool {
     match expr {
-        Expr::Var(v) => *v == var,
+        Expr::Var(v) | Expr::AddrOf(v) => *v == var,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_mentions(a, var) || expr_mentions(b, var)
         }
-        Expr::Not(a) => expr_mentions(a, var),
+        Expr::Not(a) | Expr::Deref(a) => expr_mentions(a, var),
         Expr::Call(args) => args.iter().any(|a| expr_mentions(a, var)),
         Expr::Const(_) => false,
     }
@@ -234,6 +238,9 @@ pub struct Function {
     /// The subset of `vars` accessed at byte width — these are `char` (the rest
     /// are `int`). Width is inferred from the access, not guessed.
     pub char_vars: Vec<Var>,
+    /// The subset of `vars` that are pointers (dereferenced somewhere) —
+    /// declared `int *` rather than `int`.
+    pub ptr_vars: Vec<Var>,
     /// The recovered statements.
     pub body: Vec<Stmt>,
     /// `false` if any op couldn't be modelled — the function is only partially
@@ -270,6 +277,7 @@ struct Ctx {
     insns: Vec<LoInsn>,
     vars: Vec<Var>,
     char_vars: Vec<Var>,
+    ptr_vars: Vec<Var>,
     complete: bool,
     returns_value: bool,
 }
@@ -290,6 +298,13 @@ impl Ctx {
     fn note_char(&mut self, var: Var) {
         if !self.char_vars.contains(&var) {
             self.char_vars.push(var);
+        }
+    }
+
+    /// Note a variable that's dereferenced — it's a pointer (`int *`).
+    fn note_ptr(&mut self, var: Var) {
+        if !self.ptr_vars.contains(&var) {
+            self.ptr_vars.push(var);
         }
     }
 
@@ -368,6 +383,9 @@ impl Ctx {
     #[allow(clippy::too_many_lines)] // a flat per-op match reads better unsplit
     fn fold_linear(&mut self, lo: usize, hi: usize, out: &mut Vec<Stmt>) {
         let mut acc: Option<Expr> = None;
+        // The pointer value loaded into `bx` (for a `mov bx,p; mov ax,[bx]`
+        // dereference).
+        let mut bx: Option<Expr> = None;
         // Arguments pushed for the call currently being assembled (push order).
         let mut pending_args: Vec<Expr> = Vec::new();
         // Each `return <expr>` is `mov ax,val; jmp epilogue`, so a jump to the
@@ -432,6 +450,41 @@ impl Ctx {
                     }
                     // Otherwise the `return`s were emitted at the jumps to the
                     // epilogue; the physical `ret` they land on adds nothing.
+                }
+
+                // `mov ax, [bx]` — dereference the pointer held in bx (`*p`).
+                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Deref(Reg::Bx) } => {
+                    flush_call(&mut acc, out);
+                    match bx.clone() {
+                        Some(ptr) => {
+                            if let Expr::Var(v) = ptr {
+                                self.note_ptr(v);
+                            }
+                            acc = Some(Expr::Deref(Box::new(ptr)));
+                        }
+                        None => self.complete = false,
+                    }
+                }
+
+                // `mov bx, …` loads a pointer for a following `[bx]` dereference.
+                LoOp::Load { dst: Place::Reg(Reg::Bx), src } => {
+                    flush_call(&mut acc, out);
+                    bx = self.operand(src);
+                    if bx.is_none() {
+                        self.complete = false;
+                    }
+                }
+
+                // `lea ax, [bp+disp]` — the address of a variable (`&x`).
+                LoOp::Lea { dst: Place::Reg(Reg::Ax), src } => {
+                    flush_call(&mut acc, out);
+                    match Self::var_of(src) {
+                        Some(v) => {
+                            self.note(v);
+                            acc = Some(Expr::AddrOf(v));
+                        }
+                        None => self.complete = false,
+                    }
                 }
 
                 // `mov ax, …` starts a fresh accumulator value, discarding any
@@ -812,12 +865,25 @@ impl Ctx {
 #[must_use]
 pub fn recover(code: &[u8]) -> Function {
     let insns: Vec<LoInsn> = lift(code);
-    let mut ctx =
-        Ctx { insns, vars: Vec::new(), char_vars: Vec::new(), complete: true, returns_value: false };
+    let mut ctx = Ctx {
+        insns,
+        vars: Vec::new(),
+        char_vars: Vec::new(),
+        ptr_vars: Vec::new(),
+        complete: true,
+        returns_value: false,
+    };
     let len = ctx.insns.len();
     let body = fold_for_loops(ctx.structure(0, len));
     let ret = if ctx.returns_value { Type::Int } else { Type::Void };
-    Function { ret, vars: ctx.vars, char_vars: ctx.char_vars, body, complete: ctx.complete }
+    Function {
+        ret,
+        vars: ctx.vars,
+        char_vars: ctx.char_vars,
+        ptr_vars: ctx.ptr_vars,
+        body,
+        complete: ctx.complete,
+    }
 }
 
 #[cfg(test)]
@@ -1038,6 +1104,25 @@ mod tests {
         // model — so the function isn't recovered.
         let f = recover_c("int f(int a) { return a * a; }\n");
         assert!(!f.complete, "an unmodelled multiply leaves the function incomplete");
+    }
+
+    #[test]
+    fn pointer_deref_and_address_of_recover() {
+        // `&x` is an AddrOf; `*p` is a Deref; the deref'd variable is a pointer.
+        let f = recover_stack("int f() { int x; int *p; x = 3; p = &x; return *p; }\n");
+        assert!(f.complete, "address-of and deref are recovered");
+        // p (the deref'd variable) is a pointer; x is not.
+        assert_eq!(f.ptr_vars.len(), 1, "exactly one pointer (p)");
+        // `p = &x`
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Assign(_, Expr::AddrOf(_)))),
+            "an `&x` address-of assignment",
+        );
+        // `return *p`
+        assert!(
+            matches!(f.body.last(), Some(Stmt::Return(Some(Expr::Deref(_))))),
+            "returns a dereference",
+        );
     }
 
     #[test]

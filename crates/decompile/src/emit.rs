@@ -20,6 +20,8 @@ struct Names {
     bindings: Vec<(Var, String)>,
     /// Variables accessed at byte width — declared `char` rather than `int`.
     chars: Vec<Var>,
+    /// Variables that are pointers — declared `int *`.
+    ptrs: Vec<Var>,
     /// The number of parameters to declare — the highest parameter slot used
     /// decides it, since intermediate parameters must be declared to push the
     /// later ones to the right offset even when they're unread.
@@ -44,7 +46,7 @@ impl Names {
     /// `v1, v2, …` in BCC's allocation order — register variables first (`si`
     /// before `di`), then stack slots closest-to-bp first — so recompiling a
     /// plain `int` reproduces the same storage assignment.
-    fn build(vars: &[Var], char_vars: &[Var]) -> Names {
+    fn build(vars: &[Var], char_vars: &[Var], ptr_vars: &[Var]) -> Names {
         let mut bindings = Vec::new();
 
         let mut param_count = 0;
@@ -77,24 +79,31 @@ impl Names {
             bindings.push((v, format!("v{}", i + 1)));
         }
 
-        Names { bindings, chars: char_vars.to_vec(), param_count, global_count }
+        Names { bindings, chars: char_vars.to_vec(), ptrs: ptr_vars.to_vec(), param_count, global_count }
     }
 
     fn of(&self, var: Var) -> &str {
         self.bindings.iter().find(|(v, _)| *v == var).map_or("v?", |(_, n)| n.as_str())
     }
 
-    /// The C type for a variable — `char` if byte-accessed, else `int`.
-    fn ty(&self, var: Var) -> &'static str {
-        if self.chars.contains(&var) { "char" } else { "int" }
+    /// A full typed declaration `<type> <name>` — `int *p` for a pointer (the
+    /// `*` binds to the name), `char c` for a byte var, else `int x`.
+    fn decl(&self, var: Var, name: &str) -> String {
+        if self.ptrs.contains(&var) {
+            format!("int *{name}")
+        } else if self.chars.contains(&var) {
+            format!("char {name}")
+        } else {
+            format!("int {name}")
+        }
     }
 
-    /// The parameter list for the signature — `int p1, char p2` (or empty).
+    /// The parameter list for the signature — `int p1, char *p2` (or empty).
     fn signature(&self) -> String {
         (1..=self.param_count)
             .map(|i| {
                 let off = i16::try_from(i).unwrap_or(0) * 2 + 2; // [bp+4] is param 1
-                format!("{} p{i}", self.ty(Var::Param(off)))
+                self.decl(Var::Param(off), &format!("p{i}"))
             })
             .collect::<Vec<_>>()
             .join(", ")
@@ -105,7 +114,7 @@ impl Names {
     fn global_decls(&self) -> impl Iterator<Item = String> + '_ {
         (1..=self.global_count).map(|i| {
             let off = u16::try_from(i - 1).unwrap_or(0) * 2;
-            format!("{} gv{i}", self.ty(Var::Global(off)))
+            self.decl(Var::Global(off), &format!("gv{i}"))
         })
     }
 
@@ -115,7 +124,7 @@ impl Names {
         self.bindings
             .iter()
             .filter(|(v, _)| matches!(v, Var::Slot(_) | Var::Reg(_) | Var::ByteReg(_)))
-            .map(|(v, n)| format!("{} {n}", self.ty(*v)))
+            .map(|(v, n)| self.decl(*v, n))
     }
 }
 
@@ -139,7 +148,7 @@ pub fn to_c(f: &Function) -> Option<String> {
         Type::Int => "int",
         Type::Void => "void",
     };
-    let names = Names::build(&f.vars, &f.char_vars);
+    let names = Names::build(&f.vars, &f.char_vars, &f.ptr_vars);
 
     let mut s = String::new();
     // The callee of every recovered call is an opaque external (its identity
@@ -181,8 +190,8 @@ fn expr_has_call(e: &Expr) -> bool {
     match e {
         Expr::Call(_) => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
-        Expr::Not(a) => expr_has_call(a),
-        Expr::Const(_) | Expr::Var(_) => false,
+        Expr::Not(a) | Expr::Deref(a) => expr_has_call(a),
+        Expr::Const(_) | Expr::Var(_) | Expr::AddrOf(_) => false,
     }
 }
 
@@ -280,6 +289,8 @@ fn expr_str(e: &Expr, names: &Names) -> String {
             format!("({} {} {})", expr_str(l, names), relop_token(*op), expr_str(r, names))
         }
         Expr::Not(e) => format!("!{}", expr_str(e, names)),
+        Expr::Deref(e) => format!("*{}", expr_str(e, names)),
+        Expr::AddrOf(v) => format!("&{}", names.of(*v)),
         Expr::Call(args) => {
             let list = args.iter().map(|a| expr_str(a, names)).collect::<Vec<_>>().join(", ");
             format!("g0({list})")
@@ -391,6 +402,18 @@ mod tests {
     #[test]
     fn while_roundtrips() {
         assert_roundtrips_stack("int f() { int x; x = 0; while (x < 10) { x = x + 1; } return x; }\n");
+    }
+
+    #[test]
+    fn pointers_roundtrip() {
+        // `*p` is `mov bx,p; mov ax,[bx]`; `&x` is `lea ax,[bp+disp]`. Pointer
+        // params/locals/globals, deref in arithmetic, address-of, and a pointer
+        // copy all recover and recompile.
+        assert_roundtrips_stack("int f(int *p) { return *p; }\n");
+        assert_roundtrips_stack("int f(int *p) { return *p + 1; }\n");
+        assert_roundtrips_stack("int f() { int x; int *p; x = 3; p = &x; return *p; }\n");
+        assert_roundtrips_stack("int f(int *p) { int *q; q = p; return *q; }\n");
+        assert_roundtrips_stack("int *gp; int f() { return *gp; }\n");
     }
 
     #[test]

@@ -249,7 +249,18 @@ Recovery is driven by the idioms, not guessed:
 - **Signedness** — `Cbw`/`Cwd`/`sar`/`idiv` ⇒ signed; zero-extend / `shr`
   / `div` ⇒ unsigned.
 - **Pointers** — `Lea` of a slot, or `PointerLoad`/`PointerStore` through
-  `[si]/[di]`, ⇒ a pointer; near vs far from the relocation form.
+  `[si]/[di]`, ⇒ a pointer; near vs far from the relocation form. *(Built for
+  near `int *` reads: `*p` is `mov bx,p; mov ax,[bx]`, so a `bx` tracker holds
+  the pointer value and `mov ax,[bx]` lifts to `Expr::Deref(p)`; `&x` is `lea
+  ax,[bp+disp]` → `Expr::AddrOf(x)`. A dereferenced variable is recorded in
+  `ptr_vars` and declared `int *`. The `[bx]` deref needed a recognizer
+  addition — `8b/89/8a/88` with mod=00 rm=111, distinct from the `si`/`di` `PTR`
+  mask — and a fix to the 16-bit memory-`rm` decode (`100`→`si`, `101`→`di`,
+  `111`→`bx`, not the register encoding). Pointer **writes** (`*p = v`) and
+  multi-deref expressions (`*p + *q`) currently panic in our `bcc` — separate
+  compiler gaps, like the char-register stores were, deferred to a fixture +
+  fix. Deref inside a condition is incomplete (the `cmp`-operand resolver
+  doesn't yet reconstruct a `[bx]` load).)*
 - **Promotions** — `Cbw`/`Cwd` become explicit `Cast` nodes, so the emitted C's
   implicit promotions recompile to the same `cbw`/`cwd`.
 - **Aggregates** — a `Lea base` then indexed access ⇒ array; a constant field

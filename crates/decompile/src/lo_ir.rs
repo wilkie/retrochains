@@ -254,7 +254,18 @@ fn alu_op(opcode: u8) -> BinOp {
     }
 }
 
-/// The `BinOp` for the byte `r8, r/m8` ALU opcodes `02/0a/22/2a/32/3a`.
+/// The base register of a 16-bit `mod=00` memory operand — the `rm` field here
+/// selects an addressing mode, *not* a register by the usual encoding
+/// (`100`→`[si]`, `101`→`[di]`, `111`→`[bx]`).
+fn deref_base(modrm: u8) -> Reg {
+    match modrm & 7 {
+        4 => Reg::Si,
+        5 => Reg::Di,
+        _ => Reg::Bx, // 7 = [bx] (the matchers only admit 4/5/7)
+    }
+}
+
+/// The `BinOp` for the byte `r8, r/m8` ALU opcodes `02/2a/...`.
 fn byte_alu_op(opcode: u8) -> BinOp {
     match opcode {
         0x02 => BinOp::Add,
@@ -468,13 +479,19 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
 
         // ---- pointers (near, [si]/[di]) ------------------------------------
         Idiom::PointerLoad if bytes[0] == 0x8b => {
-            vec![LoOp::Load { dst: R(reg_of(1)), src: Deref(rm_of(1)) }]
+            vec![LoOp::Load { dst: R(reg_of(1)), src: Deref(deref_base(modrm(1))) }]
         }
-        Idiom::PointerLoad => vec![LoOp::Load { dst: Byte(byte_reg_of(1)), src: Deref(rm_of(1)) }], // 0x8a
+        // 0x8a (byte deref)
+        Idiom::PointerLoad => {
+            vec![LoOp::Load { dst: Byte(byte_reg_of(1)), src: Deref(deref_base(modrm(1))) }]
+        }
         Idiom::PointerStore if bytes[0] == 0x89 => {
-            vec![LoOp::Store { dst: Deref(rm_of(1)), src: R(reg_of(1)) }]
+            vec![LoOp::Store { dst: Deref(deref_base(modrm(1))), src: R(reg_of(1)) }]
         }
-        Idiom::PointerStore => vec![LoOp::Store { dst: Deref(rm_of(1)), src: Byte(byte_reg_of(1)) }], // 0x88
+        // 0x88 (byte deref)
+        Idiom::PointerStore => {
+            vec![LoOp::Store { dst: Deref(deref_base(modrm(1))), src: Byte(byte_reg_of(1)) }]
+        }
 
         // ---- inc/dec of a register -----------------------------------------
         Idiom::IncDecReg => {
