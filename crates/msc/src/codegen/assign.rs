@@ -700,6 +700,12 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::DerefPostMutateParam { param_idx, step } => {
             return emit_assign_deref_postmutate_param(param_idx, step, value, locals, out, fixups);
         }
+        AssignTarget::DerefPreMutateLocal { local_idx, step } => {
+            return emit_assign_deref_premutate_local(local_idx, step, value, locals, out, fixups);
+        }
+        AssignTarget::DerefPreMutateParam { param_idx, step } => {
+            return emit_assign_deref_premutate_param(param_idx, step, value, locals, out, fixups);
+        }
     };
     let disp = locals.disp(local_idx);
     // `<struct-local> = <struct-returning call>`: a call returning a struct by
@@ -4761,6 +4767,53 @@ pub(crate) fn emit_assign_deref_postmutate_param(param_idx: usize, step: i32, va
         emit_expr_to_ax(value, locals, out, fixups);
         if psz == 1 {
             if out.last() == Some(&0x98) { out.pop(); } // storing AL, drop cbw
+            out.extend_from_slice(&[0x88, 0x07]);
+        } else {
+            out.extend_from_slice(&[0x89, 0x07]);
+        }
+    }
+}
+/// `*++<ptr-local> = <expr>;` — advance the pointer FIRST, then store through
+/// the NEW value: `add [bp-p],step; mov bx,[bp-p]; mov [bx],ax/imm`. Fixture 4285.
+pub(crate) fn emit_assign_deref_premutate_local(local_idx: usize, step: i32, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let disp = locals.disp(local_idx);
+    emit_postmutate_local(step, locals.size(local_idx), disp, out); // advance first
+    out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[bp-p]
+    let psz = step.unsigned_abs() as usize;
+    if let Some(k) = value.fold(locals.inits) {
+        if psz == 1 {
+            out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]);
+        } else {
+            out.extend_from_slice(&[0xC7, 0x07]);
+            out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        if psz == 1 {
+            if out.last() == Some(&0x98) { out.pop(); } // storing AL, drop cbw
+            out.extend_from_slice(&[0x88, 0x07]);
+        } else {
+            out.extend_from_slice(&[0x89, 0x07]);
+        }
+    }
+}
+/// `*++<ptr-param> = <expr>;` — the parameter analog: advance first, then store.
+pub(crate) fn emit_assign_deref_premutate_param(param_idx: usize, step: i32, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let pdisp = param_disp(param_idx) as i16;
+    emit_postmutate_local(step, 2, pdisp, out); // advance the 2-byte pointer slot first
+    out.push(0x8B); out.push(bp_modrm(0x5E, pdisp)); push_bp_disp(out, pdisp); // mov bx,[bp+p]
+    let psz = step.unsigned_abs() as usize;
+    if let Some(k) = value.fold(locals.inits) {
+        if psz == 1 {
+            out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]);
+        } else {
+            out.extend_from_slice(&[0xC7, 0x07]);
+            out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        if psz == 1 {
+            if out.last() == Some(&0x98) { out.pop(); }
             out.extend_from_slice(&[0x88, 0x07]);
         } else {
             out.extend_from_slice(&[0x89, 0x07]);

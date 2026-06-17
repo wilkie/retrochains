@@ -732,6 +732,17 @@ impl<'a> super::FunctionEmitter<'a> {
     /// ```
     /// where SI holds the pointer.
     pub(crate) fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
+        // `*++p = v` / `*--p = v` — pre-increment/decrement the pointer (a side
+        // effect on the pointer variable), then store through the updated value.
+        // Fixture 4285.
+        if let ExprKind::Update { target: p_name, op, position: UpdatePosition::Pre } =
+            &target.kind
+        {
+            self.emit_update_in_place(p_name, *op, UpdatePosition::Pre);
+            let updated = Expr { kind: ExprKind::Ident(p_name.clone()), span: target.span };
+            self.emit_deref_assign(&updated, value);
+            return;
+        }
         // `*(<seg-selector> + <offset>) = v;` — write through a
         // `_seg` segment-only pointer. Loads the segment into ES,
         // then stores via `es:[<offset>]`. Constant RHS folds to

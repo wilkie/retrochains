@@ -3549,6 +3549,38 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
+            // `*++p = v;` / `*--p = v;` — advance the pointer first, then store
+            // through the new value. Fixture 4285.
+            if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+                let step_sign = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1i32 } else { -1i32 };
+                if let Some(Tok::Ident(nm)) = p.toks.get(p.pos + 1).cloned() {
+                    if let Some(local_idx) = p.resolve_local(&nm) {
+                        p.bump(); // ++/--
+                        p.bump(); // ident
+                        let ptsz = p.local_specs[local_idx].pointee_size;
+                        let step = step_sign * if ptsz > 0 { ptsz as i32 } else { 1 };
+                        p.eat(&Tok::Assign)?;
+                        let value = parse_expr(p)?;
+                        p.eat(&Tok::Semi)?;
+                        return Ok(Stmt::Assign {
+                            target: AssignTarget::DerefPreMutateLocal { local_idx, step },
+                            value,
+                        });
+                    } else if let Some(param_idx) = p.param_names.iter().position(|n| *n == nm) {
+                        p.bump(); // ++/--
+                        p.bump(); // ident
+                        let ptsz = p.param_pointee_sizes.get(param_idx).copied().unwrap_or(0);
+                        let step = step_sign * if ptsz > 0 { ptsz as i32 } else { 1 };
+                        p.eat(&Tok::Assign)?;
+                        let value = parse_expr(p)?;
+                        p.eat(&Tok::Semi)?;
+                        return Ok(Stmt::Assign {
+                            target: AssignTarget::DerefPreMutateParam { param_idx, step },
+                            value,
+                        });
+                    }
+                }
+            }
             let target_name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
