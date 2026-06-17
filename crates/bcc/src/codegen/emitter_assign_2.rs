@@ -1034,8 +1034,13 @@ impl<'a> super::FunctionEmitter<'a> {
             }
             let addr_reg = match self.locals.location_of(base_name) {
                 LocalLocation::Reg(reg) => reg.name(),
-                LocalLocation::Stack(_) => {
-                    panic!("stack-resident pointer in `*p = v` not yet supported (no fixture)");
+                // A stack-resident near pointer: load it into bx, then store
+                // through `[bx]` (the register-resident path's `addr_reg`).
+                // Fixture 4271 (`*p = 5` with p on the stack → `mov bx,[bp-N];
+                // mov word ptr [bx],5`).
+                LocalLocation::Stack(p_off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(p_off));
+                    "bx"
                 }
             };
             // Long pointee: store both halves through `[reg]` /

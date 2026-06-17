@@ -146,6 +146,12 @@ impl<'a> super::FunctionEmitter<'a> {
                             let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
                             return OperandSource::DerefReg(Reg::Bx);
                         }
+                        // Stack-resident pointer: load it into BX, deref `[bx]`.
+                        // Fixture 4272 (`*p + *q` with p, q on the stack).
+                        if let LocalLocation::Stack(p_off) = self.locals.location_of(name) {
+                            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(p_off));
+                            return OperandSource::DerefReg(Reg::Bx);
+                        }
                     }
                 }
                 // `*(p + K)` where p is a register-resident pointer
