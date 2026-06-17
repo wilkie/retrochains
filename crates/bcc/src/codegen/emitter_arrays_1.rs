@@ -1481,10 +1481,17 @@ impl<'a> super::FunctionEmitter<'a> {
                 }
                 return;
             }
-            let LocalLocation::Reg(reg) = self.locals.location_of(array) else {
-                panic!("stack-resident pointer indexed write not yet supported (no fixture)");
+            // A stack-resident pointer (`-r-`, or one BCC couldn't promote) is
+            // loaded into `bx` first, then the store goes through `[bx±K*stride]`;
+            // a register-resident pointer stores directly. Fixture 4274
+            // (`p[2] = 5;`).
+            let r = match self.locals.location_of(array) {
+                LocalLocation::Reg(reg) => reg.name(),
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    "bx"
+                }
             };
-            let r = reg.name();
             let stride = u32::from(pointee.size_bytes());
             let byte_off = (k * stride) as i32;
             if pointee.is_long_like() {

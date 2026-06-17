@@ -1982,10 +1982,14 @@ impl<'a> super::FunctionEmitter<'a> {
             }
             return;
         }
+        // A stack-resident pointer (`-r-`, or one BCC couldn't promote) is loaded
+        // into `bx` first, then indexed through `[bx±K*stride]`. A register-
+        // resident pointer indexes directly. Fixture 4273 (`return p[2];`).
         let addr_reg = match self.locals.location_of(ptr_name) {
             LocalLocation::Reg(reg) => reg.name(),
-            LocalLocation::Stack(_) => {
-                panic!("stack-resident pointer in `p[K]` not yet supported (no fixture)");
+            LocalLocation::Stack(off) => {
+                let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                "bx"
             }
         };
         // The address operand: `[reg]` for k=0, else `[reg±K*stride]`.
