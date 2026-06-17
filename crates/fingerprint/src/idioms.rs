@@ -142,6 +142,9 @@ pub enum Idiom {
     Cwd,
     /// `58+r` — `pop r16` (a register other than the specific cases above).
     PopReg,
+    /// `2e ff a7 disp16` — `jmp cs:[bx+disp16]`: a jump-table `switch` dispatch
+    /// through the table at `disp16`.
+    JumpTableJmp,
     /// `8b/8a /r [si|di]` — load through a near pointer (`*p`).
     PointerLoad,
     /// `8b/8a /r [bx+disp8]` — load through a near pointer at a constant byte
@@ -277,6 +280,7 @@ impl Idiom {
             Idiom::IncDecReg => "inc/dec reg",
             Idiom::Cwd => "cwd (sign-extend ax→dx:ax)",
             Idiom::PopReg => "pop reg",
+            Idiom::JumpTableJmp => "jump-table dispatch (jmp cs:[bx+disp16])",
             Idiom::PointerLoad => "load via pointer (mov r16, [si/di])",
             Idiom::PointerLoadDisp8 => "load via pointer+offset (mov r, [bx+disp8])",
             Idiom::PointerStore => "store via pointer (mov [si/di], r16)",
@@ -457,6 +461,7 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::PushAx, pat: &[L(0x50)] },
     Def { idiom: Idiom::CdeclPop1, pat: &[L(0x59)] },
     Def { idiom: Idiom::PopReg, pat: &[M(0xf8, 0x58)] }, // 58-5f; after the specific pops
+    Def { idiom: Idiom::JumpTableJmp, pat: &[L(0x2e), L(0xff), L(0xa7), A, A] }, // jmp cs:[bx+disp16]
 ];
 
 fn matches_at(code: &[u8], at: usize, pat: &[Bm]) -> bool {

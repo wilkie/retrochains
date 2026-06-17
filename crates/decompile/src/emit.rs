@@ -631,6 +631,26 @@ mod tests {
     }
 
     #[test]
+    fn jump_table_switch_roundtrips() {
+        // A dense switch (≥ 4 contiguous cases) BCC lowers to a jump table:
+        // `cmp bx,N; ja default; jmp cs:[bx+table]` with the case-body offsets in
+        // an embedded table. Recovered by reading the table. Base 0, base 1, a
+        // non-1 base (`sub bx,K`), and break cases.
+        assert_roundtrips_stack(
+            "int f(int a) { switch (a) { case 0: return 1; case 1: return 2; case 2: return 3; case 3: return 4; } return 99; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; } return 99; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int a) { switch (a) { case 5: return 1; case 6: return 2; case 7: return 3; case 8: return 4; } return 99; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int a) { int r; r = 0; switch (a) { case 1: r = 10; break; case 2: r = 20; break; case 3: r = 30; break; case 4: r = 40; break; } return r; }\n",
+        );
+    }
+
+    #[test]
     fn local_int_array_roundtrips() {
         // A constant array index folds to a direct `[bp+disp]` slot, so the
         // `int a[M]` surfaces as scalar slots — but only the accessed ones, which
@@ -959,12 +979,13 @@ mod tests {
 
     #[test]
     fn incomplete_function_emits_nothing() {
-        // A dense switch that BCC lowers to a *jump table* (≥ 4 contiguous cases)
-        // isn't structured yet — the recovery declines rather than emit a wrong
-        // body. (The compare-chain form, ≤ 3 cases, does recover.)
+        // A jump-table switch with *fall-through* (two case values sharing a
+        // body, so the table has repeated entries) isn't structured yet — the
+        // recovery declines rather than emit a wrong body. (Distinct dense cases
+        // do recover.)
         let opts = CompileOpts::default();
         let code = recompile_text(
-            "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; } return 0; }\n",
+            "int f(int a) { switch (a) { case 1: case 2: return 5; case 3: return 6; case 4: return 7; } return 0; }\n",
             &opts,
         )
         .expect("compiles");

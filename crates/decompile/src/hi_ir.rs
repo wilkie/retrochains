@@ -446,10 +446,29 @@ fn flush_call(acc: &mut Option<Expr>, out: &mut Vec<Stmt>) {
     }
 }
 
+/// A recognized jump-table `switch` dispatch (see [`Ctx::detect_jump_table`]).
+struct JumpTable {
+    /// Index of `mov bx,scrut` — where the dispatch begins.
+    load_idx: usize,
+    /// The scrutinee's source operand.
+    scrut: Place,
+    /// The lowest case value (`dec`→1, `sub K`→K, none→0).
+    base: i32,
+    /// The highest index (the `cmp bx,N` value); `N+1` table entries.
+    n: i32,
+    /// The no-match (post-switch) block's byte offset.
+    default_off: usize,
+    /// The table's byte offset within `_TEXT`.
+    table_disp: usize,
+}
+
 /// The structuring/folding context over one function's Lo-IR.
 #[allow(clippy::struct_excessive_bools)] // independent recovery flags, not a state enum
 struct Ctx {
     insns: Vec<LoInsn>,
+    /// The raw `_TEXT` bytes — needed to read an embedded jump table (a `switch`
+    /// dispatch reads `(N+1)` word offsets at a fixed displacement).
+    code: Vec<u8>,
     vars: Vec<Var>,
     char_vars: Vec<Var>,
     ptr_vars: Vec<Var>,
@@ -1612,6 +1631,106 @@ impl Ctx {
         Some((value, ti))
     }
 
+    /// Build the arms of a recovered `switch` from `(case value, body start
+    /// index)` pairs. A case body running to a trailing jump at the no-match
+    /// block (`def_idx`) ends in `break`; one ending at the epilogue is a
+    /// `return` (folded). Each body spans from its start to the next case's.
+    fn build_switch_arms(&mut self, cases: &[(i32, usize)], def_idx: usize) -> Vec<(i32, Vec<Stmt>)> {
+        let cont_off = self.insns[def_idx].span.start;
+        let mut arms = Vec::new();
+        for (j, &(value, start)) in cases.iter().enumerate() {
+            let end = cases.get(j + 1).map_or(def_idx, |&(_, s)| s);
+            let breaks = end > start
+                && matches!(self.insns[end - 1].op, LoOp::Jump { target } if target == cont_off);
+            let body_end = if breaks { end - 1 } else { end };
+            let mut body = self.structure(start, body_end);
+            if breaks {
+                body.push(Stmt::Break);
+            }
+            arms.push((value, body));
+        }
+        arms
+    }
+
+    /// Recognize a jump-table `switch` dispatch whose range-check branch (`ja
+    /// default`) is at index `ja_idx`: `mov bx,scrut; {dec|sub bx,base}; cmp
+    /// bx,N; ja default; shl bx,1; jmp cs:[bx+table]`.
+    fn detect_jump_table(&self, ja_idx: usize) -> Option<JumpTable> {
+        let LoOp::Branch { cond, target: default_off } = self.insns.get(ja_idx)?.op else {
+            return None;
+        };
+        if cond_to_relop(cond) != Some(RelOp::UGt) {
+            return None;
+        }
+        let cmp_idx = ja_idx.checked_sub(1)?;
+        let LoOp::Bin {
+            dst: Place::Flags,
+            op: BinOp::Cmp,
+            lhs: Place::Reg(Reg::Bx),
+            rhs: Place::Imm(n),
+        } = self.insns.get(cmp_idx)?.op
+        else {
+            return None;
+        };
+        // The normalization (`dec`/`sub bx,base`, or none) and the scrutinee load.
+        let (base, load_idx) = match self.insns.get(cmp_idx.checked_sub(1)?)?.op {
+            LoOp::Un { dst: Place::Reg(Reg::Bx), op: UnOp::Dec, operand: Place::Reg(Reg::Bx) } => {
+                (1, cmp_idx - 2)
+            }
+            LoOp::Bin {
+                dst: Place::Reg(Reg::Bx),
+                op: BinOp::Sub,
+                lhs: Place::Reg(Reg::Bx),
+                rhs: Place::Imm(k),
+            } => (k, cmp_idx - 2),
+            LoOp::Load { dst: Place::Reg(Reg::Bx), .. } => (0, cmp_idx - 1),
+            _ => return None,
+        };
+        let LoOp::Load { dst: Place::Reg(Reg::Bx), src: scrut } = self.insns.get(load_idx)?.op else {
+            return None;
+        };
+        // `shl bx,1` scaling the index, then the indirect jump `jmp cs:[bx+disp]`.
+        match self.insns.get(ja_idx + 1)?.op {
+            LoOp::Bin {
+                dst: Place::Reg(Reg::Bx),
+                op: BinOp::Shl,
+                lhs: Place::Reg(Reg::Bx),
+                rhs: Place::Imm(1),
+            } => {}
+            _ => return None,
+        }
+        let LoOp::IndirectJump { disp } = self.insns.get(ja_idx + 2)?.op else {
+            return None;
+        };
+        Some(JumpTable { load_idx, scrut, base, n, default_off, table_disp: usize::from(disp) })
+    }
+
+    /// Read a jump table's `(N+1)` word entries and turn them into `(case value,
+    /// body index)` pairs plus the no-match block index. Scoped to the simple
+    /// dense case — distinct, strictly-increasing entries, none the no-match
+    /// block — so a table with gaps or fall-through (shared entries) returns
+    /// `None` (the recovery then declines, not mis-shapes).
+    fn jump_table_cases(&self, jt: &JumpTable) -> Option<(Vec<(i32, usize)>, usize)> {
+        let count = usize::try_from(jt.n).ok()?.checked_add(1)?;
+        if jt.table_disp.checked_add(2 * count)? > self.code.len() {
+            return None;
+        }
+        let mut entries = Vec::with_capacity(count);
+        for k in 0..count {
+            let o = jt.table_disp + 2 * k;
+            entries.push(usize::from(self.code[o]) | (usize::from(self.code[o + 1]) << 8));
+        }
+        let increasing = entries.windows(2).all(|w| w[0] < w[1]);
+        if !increasing || entries.contains(&jt.default_off) {
+            return None;
+        }
+        let mut cases = Vec::with_capacity(count);
+        for (k, &off) in entries.iter().enumerate() {
+            cases.push((jt.base + i32::try_from(k).ok()?, self.idx_of(off)?));
+        }
+        Some((cases, self.idx_of(jt.default_off)?))
+    }
+
     /// Recognize a loop-rotated `while` whose header jump is at index `i`:
     /// `jmp test; body…; test: cmp…; jcc body`. Returns the body range, the
     /// `cmp`/branch indices, and the continue index, or `None`.
@@ -1674,38 +1793,40 @@ impl Ctx {
                     }
                     let cmp_idx = i - 1;
 
-                    // A compare-chain (`cmp ax,Ki; je Ti` × N) is a `switch`. The
-                    // scrutinee is the value the run left in `ax`; each case body
-                    // runs from its target to the next case's (or the no-match
-                    // block); the no-match block is the post-switch code.
+                    // A `switch`, two shapes. A compare-chain (`cmp ax,Ki; je Ti`
+                    // × N) — the scrutinee is the value the run left in `ax`. Or a
+                    // jump table (`cmp bx,N; ja default; jmp cs:[bx+table]`) — the
+                    // scrutinee is the value loaded into `bx`, read from the
+                    // embedded offset table.
                     if let Some((cases, def_idx)) = self.detect_switch(cmp_idx) {
-                        let scrut = self.fold_linear(linear_start, cmp_idx, &mut stmts);
-                        match scrut {
+                        match self.fold_linear(linear_start, cmp_idx, &mut stmts) {
                             Some(scrutinee) => {
-                                // The post-switch block is the `break` target.
-                                let cont_off = self.insns[def_idx].span.start;
-                                let mut arms = Vec::new();
-                                for (j, &(value, start)) in cases.iter().enumerate() {
-                                    let end = cases.get(j + 1).map_or(def_idx, |&(_, s)| s);
-                                    // A trailing jump to the continuation is a
-                                    // `break`; otherwise the body returns (or
-                                    // falls through to the next case).
-                                    let breaks = end > start
-                                        && matches!(self.insns[end - 1].op,
-                                            LoOp::Jump { target } if target == cont_off);
-                                    let body_end = if breaks { end - 1 } else { end };
-                                    let mut body = self.structure(start, body_end);
-                                    if breaks {
-                                        body.push(Stmt::Break);
-                                    }
-                                    arms.push((value, body));
-                                }
+                                let arms = self.build_switch_arms(&cases, def_idx);
                                 stmts.push(Stmt::Switch(scrutinee, arms));
                             }
                             None => self.complete = false,
                         }
                         i = def_idx;
                         linear_start = def_idx;
+                        continue;
+                    }
+                    if let Some(jt) = self.detect_jump_table(i) {
+                        if let Some((cases, def_idx)) = self.jump_table_cases(&jt) {
+                            self.fold_linear(linear_start, jt.load_idx, &mut stmts);
+                            match self.operand(jt.scrut) {
+                                Some(scrutinee) => {
+                                    let arms = self.build_switch_arms(&cases, def_idx);
+                                    stmts.push(Stmt::Switch(scrutinee, arms));
+                                }
+                                None => self.complete = false,
+                            }
+                            i = def_idx;
+                            linear_start = def_idx;
+                            continue;
+                        }
+                        // A jump table we can't fully read (gaps / fall-through).
+                        self.complete = false;
+                        i += 1;
                         continue;
                     }
 
@@ -1805,6 +1926,7 @@ pub fn recover(code: &[u8]) -> Function {
     }
     let mut ctx = Ctx {
         insns,
+        code: code.to_vec(),
         vars: Vec::new(),
         char_vars: Vec::new(),
         ptr_vars: Vec::new(),
@@ -1819,7 +1941,13 @@ pub fn recover(code: &[u8]) -> Function {
         returns_long: false,
         returns_char: false,
     };
-    let len = ctx.insns.len();
+    // Structure up to the last `ret` — a jump-table `switch` appends its offset
+    // table after the epilogue, and that data isn't code.
+    let len = ctx
+        .insns
+        .iter()
+        .rposition(|n| matches!(n.op, LoOp::Ret { .. }))
+        .map_or(ctx.insns.len(), |r| r + 1);
     let body = fold_for_loops(ctx.structure(0, len));
     // A `long` occupies two slots (lo, lo+2). If the high-word slot was also
     // recovered as a separate variable (e.g. a `long` local's paired stores read
@@ -2319,13 +2447,27 @@ mod tests {
     }
 
     #[test]
-    fn a_jump_table_switch_marks_the_function_incomplete() {
-        // A dense switch (≥ 4 contiguous cases) BCC lowers to a jump table
-        // (`dec bx; cmp bx,N; ja default; jmp cs:[bx+table]`), not yet structured.
+    fn a_distinct_jump_table_switch_recovers() {
+        // A dense switch with distinct bodies (≥ 4 contiguous cases) is a jump
+        // table (`cmp bx,N; ja default; jmp cs:[bx+table]`) read from the table.
         let f = recover_c(
             "int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; case 4: return 4; } return 0; }\n",
         );
-        assert!(!f.complete, "a jump-table switch leaves the function incomplete");
+        assert!(f.complete, "a distinct jump-table switch is recovered");
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms) if arms.len() == 4)),
+            "recovers a 4-arm switch",
+        );
+    }
+
+    #[test]
+    fn a_fallthrough_jump_table_marks_the_function_incomplete() {
+        // Fall-through (two case values sharing a body) gives the table repeated
+        // entries — not the simple distinct dense case, so it stays incomplete.
+        let f = recover_c(
+            "int f(int a) { switch (a) { case 1: case 2: return 5; case 3: return 6; case 4: return 7; } return 0; }\n",
+        );
+        assert!(!f.complete, "a fall-through jump table leaves the function incomplete");
     }
 
     #[test]

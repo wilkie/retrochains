@@ -199,6 +199,9 @@ pub enum LoOp {
     RestoreReg { reg: Reg },
     /// A `pop` that isn't a register-variable restore.
     Pop { dst: Place },
+    /// `jmp cs:[bx+disp]` — a jump-table `switch` dispatch through the table at
+    /// byte offset `disp` within `_TEXT`.
+    IndirectJump { disp: u16 },
     /// Bytes the recognizer didn't cover — the long tail, lifted opaquely.
     Asm { bytes: Vec<u8> },
 }
@@ -589,6 +592,9 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         Idiom::ShortJump | Idiom::BccExitJump => {
             vec![LoOp::Jump { target: rel8_target(bytes[1].cast_signed()) }]
         }
+        // `jmp cs:[bx+disp16]` — a jump-table dispatch; the disp16 is the table's
+        // byte offset within `_TEXT`.
+        Idiom::JumpTableJmp => vec![LoOp::IndirectJump { disp: u16_at(bytes, 3) }],
     }
 }
 

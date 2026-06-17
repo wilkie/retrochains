@@ -223,8 +223,18 @@ that follows, matching C's fall-through). It emits `Stmt::Switch(scrutinee,
 **`break`** (`Stmt::Break`); one ending in a jump to the epilogue is a `return`.
 So `case 1: r = 10; break;` and `case 2: return 99;` both recover, in the same
 switch. A *dense* switch (≥ 4 contiguous cases) BCC lowers to a
-**jump table** (`dec bx; cmp bx,N; ja default; shl bx,1; jmp cs:[bx+table]` plus
-the table data) — a distinct shape not yet structured, so it stays incomplete.
+**jump table**, which is also recovered: `mov bx,scrut; {dec|sub bx,base}; cmp
+bx,N; ja default; shl bx,1; jmp cs:[bx+table]`, then the case bodies, then the
+`(N+1)`-entry offset table appended after the epilogue. The structurer reads the
+table from the raw `_TEXT` bytes — each entry is a case body's offset — and maps
+case value `base+k` to the body at `table[k]`. (The indirect jump `2e ff a7
+disp16` is a `JumpTableJmp` recognizer idiom — `IndirectJump { disp }` — so the
+linear lift consumes the `disp16` cleanly instead of mis-decoding the table
+boundary; the structural range is trimmed to the last `ret` so the trailing
+table data isn't structured as code.) Scoped to the simple dense case: distinct,
+strictly-increasing entries, none the no-match block — a table with gaps or
+fall-through (repeated entries) declines, staying incomplete rather than
+mis-shaped.
 
 **Early returns / multi-exit are recovered.** Every `return <expr>` is `mov
 ax,val; jmp epilogue` — a jump to the shared epilogue (which begins at the
