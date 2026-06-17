@@ -166,7 +166,21 @@ that conditionally branches *back* to the body is a `while` (the branch is the
 loop-continue condition, taken verbatim). Nesting falls out of the recursion —
 `if`-in-`while`, sequential `if`s, accumulation loops all round-trip. Conditions
 recover from the `cmp` operands plus a `Jcc`-nibble → relational-operator table
-(signed `< <= > >= == !=`; unsigned and flag-only codes mark incomplete).
+(signed `< <= > >= == !=`; unsigned and flag-only codes mark incomplete). A `cmp`
+operand may be the accumulator (`mov ax,i; cmp ax,n` when comparing two memory
+operands — x86 can't compare memory-to-memory), resolved from the load before
+the `cmp`; this is what lets a loop or `if` bound be a parameter or global.
+
+**`for` loops are recovered** as `for` syntax. BCC lowers `for (init; cond;
+step) { body }` to `init; goto test; loop: body; step; test: if (cond) goto
+loop` — exactly the loop-rotated `while` shape with the step appended to the
+body. So the structurer first recovers it as a `while`, then a post-pass
+re-renders it: when the loop variable (one named in the condition) is assigned
+just before the loop and stepped at the body's tail, it folds back to
+`for (init; cond; step) { body-without-step }`. A loop whose body is *only* the
+step stays a `while` (an empty-body `for` lowers differently — the recompile
+check catches that, so the pass requires a real body). For and the equivalent
+while lower identically, so this is a faithful re-rendering the oracle confirms.
 
 **Register variables are recovered** (§3): a `Var` is either a stack slot or a
 `si`/`di` register variable, and the reg-var data-flow forms lift uniformly —

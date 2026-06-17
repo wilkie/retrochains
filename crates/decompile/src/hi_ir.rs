@@ -148,6 +148,71 @@ pub enum Stmt {
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     /// `while (cond) { body }`.
     While(Expr, Vec<Stmt>),
+    /// `for (init; cond; step) { body }` — recovered from a `while` whose loop
+    /// variable is initialized just before it and stepped at the body's tail
+    /// (BCC lowers `for` to exactly that shape).
+    For(Box<Stmt>, Expr, Box<Stmt>, Vec<Stmt>),
+}
+
+/// Does `expr` mention variable `var`? Used to confirm a `for` loop variable.
+fn expr_mentions(expr: &Expr, var: Var) -> bool {
+    match expr {
+        Expr::Var(v) => *v == var,
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            expr_mentions(a, var) || expr_mentions(b, var)
+        }
+        Expr::Not(a) => expr_mentions(a, var),
+        Expr::Call(args) => args.iter().any(|a| expr_mentions(a, var)),
+        Expr::Const(_) => false,
+    }
+}
+
+/// Render `while` loops with for-loop structure (a loop variable initialized
+/// just before the loop and stepped at the body's tail) as `for` statements.
+/// BCC lowers `for` and the equivalent `init; while { body; step }` to identical
+/// code, so this is a faithful re-rendering — and the recompile check confirms it.
+fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    // Recurse into nested blocks first.
+    let recursed = stmts.into_iter().map(|s| match s {
+        Stmt::If(c, t, e) => Stmt::If(c, fold_for_loops(t), fold_for_loops(e)),
+        Stmt::While(c, b) => Stmt::While(c, fold_for_loops(b)),
+        Stmt::For(i, c, st, b) => Stmt::For(i, c, st, fold_for_loops(b)),
+        other => other,
+    });
+
+    let mut out: Vec<Stmt> = Vec::new();
+    for s in recursed {
+        let Stmt::While(cond, mut body) = s else {
+            out.push(s);
+            continue;
+        };
+        // The init is the preceding statement assigning the loop variable; the
+        // step is the body's final statement assigning the same variable, which
+        // must appear in the condition.
+        let init_var = match out.last() {
+            Some(Stmt::Assign(LValue::Var(v), _)) => Some(*v),
+            _ => None,
+        };
+        let step_var = match body.last() {
+            Some(Stmt::Assign(LValue::Var(v), _)) => Some(*v),
+            _ => None,
+        };
+        // Require a real body beyond the step: a loop whose body is *only* the
+        // step (`while (c < 9) { c = c + 1; }`) stays a `while` — an empty-body
+        // `for` lowers differently, so converting it wouldn't round-trip.
+        if let (Some(iv), Some(sv)) = (init_var, step_var)
+            && iv == sv
+            && body.len() >= 2
+            && expr_mentions(&cond, iv)
+        {
+            let init = out.pop().expect("init present");
+            let step = body.pop().expect("step present");
+            out.push(Stmt::For(Box::new(init), cond, Box::new(step), body));
+        } else {
+            out.push(Stmt::While(cond, body));
+        }
+    }
+    out
 }
 
 /// A recovered value type. Minimal for now — this increment is all `int`.
@@ -570,15 +635,35 @@ impl Ctx {
             };
         }
 
-        // Otherwise an explicit comparison.
+        // Otherwise an explicit comparison. An operand may be the accumulator
+        // (`cmp ax,n` when comparing two memory operands — one is loaded first),
+        // so resolve it from the load that precedes the `cmp`.
         let LoOp::Bin { dst: Place::Flags, op: BinOp::Cmp, lhs, rhs } = self.insns[cmp_idx].op.clone()
         else {
             return bad(self);
         };
-        match (self.operand(lhs), self.operand(rhs)) {
+        match (self.resolve_operand(lhs, cmp_idx), self.resolve_operand(rhs, cmp_idx)) {
             (Some(l), Some(r)) => Expr::Rel(rel, Box::new(l), Box::new(r)),
             _ => bad(self),
         }
+    }
+
+    /// Resolve an operand to an [`Expr`]. A direct operand goes through
+    /// [`operand`](Self::operand); the accumulator (`ax`/`al`) is resolved from
+    /// the `Load` into it immediately before `at` (e.g. `mov ax,i; cmp ax,n`).
+    fn resolve_operand(&mut self, place: Place, at: usize) -> Option<Expr> {
+        if matches!(place, Place::Reg(Reg::Ax) | Place::Byte(ByteReg::Al)) {
+            if at == 0 {
+                return None;
+            }
+            if let LoOp::Load { dst, src } = self.insns[at - 1].op.clone()
+                && matches!(dst, Place::Reg(Reg::Ax) | Place::Byte(ByteReg::Al))
+            {
+                return self.operand(src);
+            }
+            return None;
+        }
+        self.operand(place)
     }
 
     /// If the then-block ending at the branch-target index `tb` is followed by
@@ -615,10 +700,12 @@ impl Ctx {
             if let LoOp::Branch { target: bt, .. } = self.insns[k].op
                 && bt == body_start
             {
-                // The test must be exactly the `cmp` the branch reads: the header
-                // jump lands on it and it sits just before the branch
-                // (single-compare condition — the common shape).
-                if k > 0 && test_idx == k - 1 {
+                // The branch reads the `cmp` just before it; the header jump
+                // lands at the start of the test region, which may include a
+                // register-setup load before the `cmp` (e.g. `mov ax,i; cmp
+                // ax,n` when comparing two memory operands). So the test region
+                // is `[test_idx, k)` with the `cmp` at `k-1`.
+                if k > 0 && test_idx < k {
                     return Some((i + 1, test_idx, k - 1, k, k + 1));
                 }
                 return None;
@@ -711,7 +798,7 @@ pub fn recover(code: &[u8]) -> Function {
     let mut ctx =
         Ctx { insns, vars: Vec::new(), char_vars: Vec::new(), complete: true, returns_value: false };
     let len = ctx.insns.len();
-    let body = ctx.structure(0, len);
+    let body = fold_for_loops(ctx.structure(0, len));
     let ret = if ctx.returns_value { Type::Int } else { Type::Void };
     Function { ret, vars: ctx.vars, char_vars: ctx.char_vars, body, complete: ctx.complete }
 }
@@ -817,6 +904,44 @@ mod tests {
         };
         assert_eq!(then.len(), 1, "then arm");
         assert_eq!(els.len(), 1, "else arm");
+    }
+
+    #[test]
+    fn for_loop_recovers_for_structure() {
+        // A `for` lowers to `init; while (cond) { body; step }`, and a `while`
+        // with that exact shape (loop var initialized before, stepped at the
+        // tail) recovers as a `for`.
+        let f = recover_stack(
+            "int f() { int s; int i; s = 0; for (i = 0; i < 10; i = i + 1) { s = s + i; } return s; }\n",
+        );
+        assert!(f.complete, "the for-loop is recovered");
+        let Some(Stmt::For(init, Expr::Rel(op, _, rhs), step, body)) =
+            f.body.iter().find(|s| matches!(s, Stmt::For(..)))
+        else {
+            panic!("expected a for-loop");
+        };
+        assert!(matches!(**init, Stmt::Assign(..)), "init is the loop-var assignment");
+        assert!(matches!(**step, Stmt::Assign(..)), "step is the loop-var update");
+        assert_eq!(*op, RelOp::Lt);
+        assert_eq!(**rhs, Expr::Const(10));
+        assert_eq!(body.len(), 1, "body without the step is `s = s + i`");
+    }
+
+    #[test]
+    fn loop_condition_comparing_two_memory_operands_recovers() {
+        // `i < n` (local vs parameter) compiles to `mov ax,i; cmp ax,n` — the
+        // accumulator operand resolves to `i` from the preceding load.
+        let f = recover_stack(
+            "int f(int n) { int i; int s; s = 0; for (i = 0; i < n; i = i + 1) { s = s + i; } return s; }\n",
+        );
+        assert!(f.complete, "a loop comparing a local to a parameter is recovered");
+        let Some(Stmt::For(_, Expr::Rel(_, lhs, rhs), ..)) =
+            f.body.iter().find(|s| matches!(s, Stmt::For(..)))
+        else {
+            panic!("expected a for-loop");
+        };
+        assert!(matches!(**lhs, Expr::Var(Var::Slot(_))), "lhs is the local i");
+        assert_eq!(**rhs, Expr::Var(Var::Param(4)), "rhs is the parameter n");
     }
 
     #[test]

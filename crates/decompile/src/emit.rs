@@ -168,6 +168,12 @@ fn body_has_call(stmts: &[Stmt]) -> bool {
         Stmt::Return(None) => false,
         Stmt::If(c, t, e) => expr_has_call(c) || body_has_call(t) || body_has_call(e),
         Stmt::While(c, b) => expr_has_call(c) || body_has_call(b),
+        Stmt::For(init, c, step, b) => {
+            body_has_call(std::slice::from_ref(init))
+                || expr_has_call(c)
+                || body_has_call(std::slice::from_ref(step))
+                || body_has_call(b)
+        }
     })
 }
 
@@ -232,6 +238,27 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
             indent(depth, out);
             out.push_str("}\n");
         }
+        Stmt::For(init, cond, step, body) => {
+            let _ = writeln!(
+                out,
+                "for ({}; {}; {}) {{",
+                assign_inline(init, names),
+                expr_str(cond, names),
+                assign_inline(step, names),
+            );
+            emit_block(body, depth + 1, false, names, out);
+            indent(depth, out);
+            out.push_str("}\n");
+        }
+    }
+}
+
+/// Render an `Assign` statement inline (no indent, no trailing `;`) for a `for`
+/// header clause.
+fn assign_inline(stmt: &Stmt, names: &Names) -> String {
+    match stmt {
+        Stmt::Assign(lv, e) => format!("{} = {}", lvalue_str(lv, names), expr_str(e, names)),
+        _ => String::new(),
     }
 }
 
@@ -364,6 +391,21 @@ mod tests {
     #[test]
     fn while_roundtrips() {
         assert_roundtrips_stack("int f() { int x; x = 0; while (x < 10) { x = x + 1; } return x; }\n");
+    }
+
+    #[test]
+    fn for_loops_roundtrip() {
+        // `for` recovers as `for` and recompiles byte-exact, including a
+        // parameter or global as the loop bound (a two-memory-operand compare).
+        assert_roundtrips_stack(
+            "int f() { int s; int i; s = 0; for (i = 0; i < 10; i = i + 1) { s = s + i; } return s; }\n",
+        );
+        assert_roundtrips_stack(
+            "int f(int n) { int i; int s; s = 0; for (i = 0; i < n; i = i + 1) { s = s + i; } return s; }\n",
+        );
+        assert_roundtrips_stack(
+            "int g; int f() { int i; i = 0; while (i < g) { i = i + 1; } return i; }\n",
+        );
     }
 
     #[test]
