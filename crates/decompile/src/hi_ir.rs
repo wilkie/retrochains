@@ -23,7 +23,10 @@
 
 use crate::lo_ir::{lift, BinOp, ByteReg, Cond, LoInsn, LoOp, Place, Reg, UnOp};
 
-/// A relational operator recovered from a `cmp` + conditional branch.
+/// A relational operator recovered from a `cmp` + conditional branch. The
+/// unsigned variants (from `jb`/`ja`/…) print the same C token as their signed
+/// peers but mark their operands `unsigned` (so the compare re-emits as `jb`/`ja`
+/// rather than `jl`/`jg`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelOp {
     Eq,
@@ -32,6 +35,10 @@ pub enum RelOp {
     Le,
     Gt,
     Ge,
+    ULt,
+    ULe,
+    UGt,
+    UGe,
 }
 
 impl RelOp {
@@ -44,7 +51,16 @@ impl RelOp {
             RelOp::Ge => RelOp::Lt,
             RelOp::Le => RelOp::Gt,
             RelOp::Gt => RelOp::Le,
+            RelOp::ULt => RelOp::UGe,
+            RelOp::UGe => RelOp::ULt,
+            RelOp::ULe => RelOp::UGt,
+            RelOp::UGt => RelOp::ULe,
         }
+    }
+
+    /// Is this an unsigned comparison (its operands are `unsigned`)?
+    fn is_unsigned(self) -> bool {
+        matches!(self, RelOp::ULt | RelOp::ULe | RelOp::UGt | RelOp::UGe)
     }
 }
 
@@ -53,13 +69,17 @@ impl RelOp {
 /// branch is *taken* when this holds.
 fn cond_to_relop(cond: Cond) -> Option<RelOp> {
     match cond.0 {
-        0x4 => Some(RelOp::Eq), // jz / je
-        0x5 => Some(RelOp::Ne), // jnz / jne
-        0xc => Some(RelOp::Lt), // jl
-        0xd => Some(RelOp::Ge), // jge
-        0xe => Some(RelOp::Le), // jle
-        0xf => Some(RelOp::Gt), // jg
-        _ => None,              // unsigned (jb/ja/…) and jo/js/jp need more type info
+        0x4 => Some(RelOp::Eq),  // jz / je
+        0x5 => Some(RelOp::Ne),  // jnz / jne
+        0xc => Some(RelOp::Lt),  // jl
+        0xd => Some(RelOp::Ge),  // jge
+        0xe => Some(RelOp::Le),  // jle
+        0xf => Some(RelOp::Gt),  // jg
+        0x2 => Some(RelOp::ULt), // jb / jc
+        0x3 => Some(RelOp::UGe), // jae / jnb
+        0x6 => Some(RelOp::ULe), // jbe / jna
+        0x7 => Some(RelOp::UGt), // ja / jnbe
+        _ => None,               // jo/js/jp need more context
     }
 }
 
@@ -257,11 +277,28 @@ pub struct Function {
     pub ptr_vars: Vec<Var>,
     /// The subset of `vars` that are 32-bit `long` (loaded as a `dx:ax` pair).
     pub long_vars: Vec<Var>,
+    /// The subset of `vars` that are `unsigned` (compared with `jb`/`ja` or
+    /// shifted logically with `shr`).
+    pub unsigned_vars: Vec<Var>,
     /// The recovered statements.
     pub body: Vec<Stmt>,
     /// `false` if any op couldn't be modelled — the function is only partially
     /// recovered and must not be presented as done.
     pub complete: bool,
+}
+
+/// Build `lhs op rhs`, collapsing a constant shift applied to an existing
+/// constant shift of the same kind: `(x >> a) >> b` ⇒ `x >> (a+b)`.
+fn combine_shift(op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
+    if matches!(op, BinOp::Shl | BinOp::Shr | BinOp::Sar)
+        && let Expr::Const(k) = rhs
+        && let Expr::Binary(inner_op, base, inner_k) = &lhs
+        && *inner_op == op
+        && let Expr::Const(ik) = **inner_k
+    {
+        return Expr::Binary(op, base.clone(), Box::new(Expr::Const(ik + k)));
+    }
+    Expr::Binary(op, Box::new(lhs), Box::new(rhs))
 }
 
 /// The arithmetic ops the single-accumulator fold models as a C binary
@@ -295,6 +332,7 @@ struct Ctx {
     char_vars: Vec<Var>,
     ptr_vars: Vec<Var>,
     long_vars: Vec<Var>,
+    unsigned_vars: Vec<Var>,
     complete: bool,
     returns_value: bool,
     returns_long: bool,
@@ -330,6 +368,23 @@ impl Ctx {
     fn note_long(&mut self, var: Var) {
         if !self.long_vars.contains(&var) {
             self.long_vars.push(var);
+        }
+    }
+
+    /// Mark every variable in `expr` as `unsigned` (an unsigned compare/shift).
+    fn mark_unsigned(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Var(v) => {
+                if !self.unsigned_vars.contains(v) {
+                    self.unsigned_vars.push(*v);
+                }
+            }
+            Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+                self.mark_unsigned(a);
+                self.mark_unsigned(b);
+            }
+            Expr::Not(a) | Expr::Deref(a) => self.mark_unsigned(a),
+            Expr::Const(_) | Expr::AddrOf(_) | Expr::Call(_) => {}
         }
     }
 
@@ -653,7 +708,18 @@ impl Ctx {
                     if is_foldable(op) =>
                 {
                     match (acc.take(), self.operand(rhs)) {
-                        (Some(l), Some(r)) => acc = Some(Expr::Binary(op, Box::new(l), Box::new(r))),
+                        (Some(l), Some(r)) => {
+                            // A logical right shift (`shr`, not `sar`) means the
+                            // shifted value is `unsigned`.
+                            if op == BinOp::Shr {
+                                self.mark_unsigned(&l);
+                            }
+                            // BCC unrolls a constant shift into shift-by-1s, so
+                            // collapse `(x <shift> a) <shift> b` back to
+                            // `x <shift> (a+b)` — re-emitting nested shifts would
+                            // make the intermediate signed (`sar` not `shr`).
+                            acc = Some(combine_shift(op, l, r));
+                        }
                         _ => self.complete = false,
                     }
                 }
@@ -867,11 +933,10 @@ impl Ctx {
             // value (so a register-variable test recompiles to `or`, not `cmp`);
             // the signed relations render as `e <rel> 0`.
             return match rel {
-                RelOp::Ne => e,                                          // if (x)
-                RelOp::Eq => Expr::Not(Box::new(e)),                     // if (!x)
-                RelOp::Lt | RelOp::Le | RelOp::Gt | RelOp::Ge => {
-                    Expr::Rel(rel, Box::new(e), Box::new(Expr::Const(0))) // if (x <rel> 0)
-                }
+                RelOp::Ne => e,                      // if (x)
+                RelOp::Eq => Expr::Not(Box::new(e)),  // if (!x)
+                // A signed/unsigned relation against 0 (`if (x <rel> 0)`).
+                _ => Expr::Rel(rel, Box::new(e), Box::new(Expr::Const(0))),
             };
         }
 
@@ -883,7 +948,15 @@ impl Ctx {
             return bad(self);
         };
         match (self.cmp_operand(lhs, acc), self.cmp_operand(rhs, acc)) {
-            (Some(l), Some(r)) => Expr::Rel(rel, Box::new(l), Box::new(r)),
+            (Some(l), Some(r)) => {
+                // An unsigned comparison (`jb`/`ja`) means its operands are
+                // `unsigned` — mark them so the compare re-emits unsigned.
+                if rel.is_unsigned() {
+                    self.mark_unsigned(&l);
+                    self.mark_unsigned(&r);
+                }
+                Expr::Rel(rel, Box::new(l), Box::new(r))
+            }
             _ => bad(self),
         }
     }
@@ -1043,6 +1116,7 @@ pub fn recover(code: &[u8]) -> Function {
         char_vars: Vec::new(),
         ptr_vars: Vec::new(),
         long_vars: Vec::new(),
+        unsigned_vars: Vec::new(),
         complete: true,
         returns_value: false,
         returns_long: false,
@@ -1076,6 +1150,7 @@ pub fn recover(code: &[u8]) -> Function {
         char_vars: ctx.char_vars,
         ptr_vars: ctx.ptr_vars,
         long_vars: ctx.long_vars,
+        unsigned_vars: ctx.unsigned_vars,
         body,
         complete: ctx.complete,
     }
@@ -1313,11 +1388,25 @@ mod tests {
     }
 
     #[test]
-    fn an_unsigned_comparison_marks_the_function_incomplete() {
-        // An unsigned compare uses `jb`/`ja`, which `cond_to_relop` doesn't model
-        // yet (it needs unsigned operand types) — so the function isn't recovered.
-        let f = recover_c("int f(unsigned a) { if (a > 5) { return 1; } return 0; }\n");
-        assert!(!f.complete, "an unsigned comparison leaves the function incomplete");
+    fn unsigned_comparison_recovers_and_marks_operands_unsigned() {
+        // `a > 5` (unsigned) compiles to `cmp a,5; jbe` — the unsigned branch
+        // marks `a` unsigned so it re-emits as `jbe`, not `jg`.
+        let f = recover_stack("int f(unsigned a) { if (a > 5) { return 1; } return 0; }\n");
+        assert!(f.complete, "an unsigned comparison is recovered");
+        assert!(f.unsigned_vars.contains(&Var::Param(4)), "the compared operand is unsigned");
+        let Some(Stmt::If(Expr::Rel(op, ..), ..)) = f.body.iter().find(|s| matches!(s, Stmt::If(..)))
+        else {
+            panic!("expected an unsigned if");
+        };
+        assert_eq!(*op, RelOp::UGt, "jbe negated → unsigned >");
+    }
+
+    #[test]
+    fn an_unsigned_char_marks_the_function_incomplete() {
+        // `unsigned char` zero-extends with `mov ah,0` (not `cbw`), which isn't
+        // modelled yet — so the function isn't recovered.
+        let f = recover_c("int f(unsigned char c) { return c; }\n");
+        assert!(!f.complete, "an unsigned char (zero-extend) leaves the function incomplete");
     }
 
     #[test]

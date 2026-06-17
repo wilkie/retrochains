@@ -24,6 +24,8 @@ struct Names {
     ptrs: Vec<Var>,
     /// Variables loaded as a `dx:ax` pair — declared `long`.
     longs: Vec<Var>,
+    /// Variables compared/shifted as unsigned — declared `unsigned`.
+    unsigneds: Vec<Var>,
     /// The number of parameters to declare — the highest parameter slot used
     /// decides it, since intermediate parameters must be declared to push the
     /// later ones to the right offset even when they're unread.
@@ -48,7 +50,13 @@ impl Names {
     /// `v1, v2, …` in BCC's allocation order — register variables first (`si`
     /// before `di`), then stack slots closest-to-bp first — so recompiling a
     /// plain `int` reproduces the same storage assignment.
-    fn build(vars: &[Var], char_vars: &[Var], ptr_vars: &[Var], long_vars: &[Var]) -> Names {
+    fn build(
+        vars: &[Var],
+        char_vars: &[Var],
+        ptr_vars: &[Var],
+        long_vars: &[Var],
+        unsigned_vars: &[Var],
+    ) -> Names {
         let mut bindings = Vec::new();
 
         let mut param_count = 0;
@@ -86,6 +94,7 @@ impl Names {
             chars: char_vars.to_vec(),
             ptrs: ptr_vars.to_vec(),
             longs: long_vars.to_vec(),
+            unsigneds: unsigned_vars.to_vec(),
             param_count,
             global_count,
         }
@@ -96,16 +105,21 @@ impl Names {
     }
 
     /// A full typed declaration `<type> <name>` — `int *p` for a pointer (the
-    /// `*` binds to the name), `long l`, `char c`, else `int x`.
+    /// `*` binds to the name), `long l`, `char c`, `unsigned u`, else `int x`.
     fn decl(&self, var: Var, name: &str) -> String {
         if self.ptrs.contains(&var) {
-            format!("int *{name}")
-        } else if self.longs.contains(&var) {
-            format!("long {name}")
+            return format!("int *{name}");
+        }
+        let unsigned = if self.unsigneds.contains(&var) { "unsigned " } else { "" };
+        if self.longs.contains(&var) {
+            format!("{unsigned}long {name}")
         } else if self.chars.contains(&var) {
-            format!("char {name}")
-        } else {
+            format!("{unsigned}char {name}")
+        } else if unsigned.is_empty() {
             format!("int {name}")
+        } else {
+            // `unsigned` on its own is `unsigned int`.
+            format!("unsigned {name}")
         }
     }
 
@@ -160,7 +174,7 @@ pub fn to_c(f: &Function) -> Option<String> {
         Type::Long => "long",
         Type::Void => "void",
     };
-    let names = Names::build(&f.vars, &f.char_vars, &f.ptr_vars, &f.long_vars);
+    let names = Names::build(&f.vars, &f.char_vars, &f.ptr_vars, &f.long_vars, &f.unsigned_vars);
 
     let mut s = String::new();
     // The callee of every recovered call is an opaque external (its identity
@@ -334,13 +348,15 @@ fn binop_token(op: crate::lo_ir::BinOp) -> &'static str {
 }
 
 fn relop_token(op: RelOp) -> &'static str {
+    // Unsigned comparisons print the same token as their signed peers; the
+    // operands' `unsigned` declarations make the compare re-emit unsigned.
     match op {
         RelOp::Eq => "==",
         RelOp::Ne => "!=",
-        RelOp::Lt => "<",
-        RelOp::Le => "<=",
-        RelOp::Gt => ">",
-        RelOp::Ge => ">=",
+        RelOp::Lt | RelOp::ULt => "<",
+        RelOp::Le | RelOp::ULe => "<=",
+        RelOp::Gt | RelOp::UGt => ">",
+        RelOp::Ge | RelOp::UGe => ">=",
     }
 }
 
@@ -443,6 +459,19 @@ mod tests {
         assert_roundtrips_stack("int f(int *p) { if (*p) { return 1; } return 0; }\n");
         assert_roundtrips_stack(
             "int f(int *p) { int s; s = 0; while (*p > s) { s = s + 1; } return s; }\n",
+        );
+    }
+
+    #[test]
+    fn unsigned_comparisons_and_shifts_roundtrip() {
+        // Unsigned compares (jb/ja → operands declared unsigned), an unsigned
+        // loop bound, and an unsigned right shift (shr, collapsed from shift-by-1s).
+        assert_roundtrips_stack("int f(unsigned a) { if (a > 5) { return 1; } return 0; }\n");
+        assert_roundtrips_stack("int f(unsigned a) { if (a < 5) { return 1; } return 0; }\n");
+        assert_roundtrips_stack("int f(unsigned a, unsigned b) { if (a < b) { return 1; } return 0; }\n");
+        assert_roundtrips_stack("unsigned f(unsigned a) { return a >> 2; }\n");
+        assert_roundtrips_stack(
+            "int f(unsigned n) { unsigned i; int s; s = 0; for (i = 0; i < n; i = i + 1) { s = s + 1; } return s; }\n",
         );
     }
 
@@ -586,11 +615,10 @@ mod tests {
 
     #[test]
     fn incomplete_function_emits_nothing() {
-        // An unsigned comparison (jb/ja) isn't modelled yet — the recovery
-        // declines rather than emit a wrong body.
+        // An `unsigned char` zero-extend (`mov ah,0`) isn't modelled yet — the
+        // recovery declines rather than emit a wrong body.
         let opts = CompileOpts::default();
-        let code = recompile_text("int f(unsigned a) { if (a > 5) { return 1; } return 0; }\n", &opts)
-            .expect("compiles");
+        let code = recompile_text("int f(unsigned char c) { return c; }\n", &opts).expect("compiles");
         assert!(decompile(&code).is_none(), "an incomplete recovery emits no C");
     }
 }

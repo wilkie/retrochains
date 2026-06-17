@@ -266,7 +266,15 @@ Recovery is driven by the idioms, not guessed:
   signed `imul`/`idiv` for now; the unsigned `mul`/`div` and the shift-based
   power-of-two divides are deferred. Needed recognizer additions: `f7` with a
   memory operand (`imul/idiv [bp±N]`/`[disp16]`), which was an `Asm` gap that
-  even mis-lifted `idiv [bp+N]` as a stray `jle`.)*
+  even mis-lifted `idiv [bp+N]` as a stray `jle`. Unsigned built too: an unsigned
+  compare (`jb`/`ja`/`jbe`/`jae` → `ULt`/`UGt`/…) marks its operands `unsigned`,
+  and a logical `shr` marks the shifted value `unsigned` — those declare
+  `unsigned` so the compare/shift re-emits unsigned (`jbe` not `jg`, `shr` not
+  `sar`); the unsigned relations print the same C token, the declared type drives
+  the re-emission. BCC unrolls a constant shift into shift-by-1s, so the fold
+  collapses `(x >> a) >> b` back to `x >> (a+b)` — re-emitting nested shifts would
+  make the intermediate signed (an outer `sar`). `unsigned char` (zero-extend
+  `mov ah,0` not `cbw`) is still incomplete.)*
 - **Pointers** — `Lea` of a slot, or `PointerLoad`/`PointerStore` through
   `[si]/[di]`, ⇒ a pointer; near vs far from the relocation form. *(Built for
   near `int *` reads: `*p` is `mov bx,p; mov ax,[bx]`, so a `bx` tracker holds
