@@ -1,6 +1,15 @@
 use super::*;
 
 impl<'a> super::FunctionEmitter<'a> {
+    /// Is `name` a `char`-typed local (preferred, shadowing) or global?
+    fn name_is_char(&self, name: &str) -> bool {
+        if self.locals.has(name) {
+            self.locals.type_of(name).is_char_like()
+        } else {
+            self.globals.type_of(name).is_some_and(|t| t.is_char_like())
+        }
+    }
+
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt) {
         self.emit_stmt_inner(stmt);
         // Statement boundary: flush any deferred postinc/postdec that
@@ -47,6 +56,27 @@ impl<'a> super::FunctionEmitter<'a> {
                 // 4051 (`_AX = 0xabcd;`), 4053 (`_AH = 0x80;`).
                 if is_asm_pseudo_register(name) {
                     self.emit_assign_pseudo_register(name, value);
+                    return;
+                }
+                // `c = c <op> rhs` for a `char` `c` is the compound assign
+                // `c <op>= rhs`, which BCC computes at byte width (e.g.
+                // `inc al`) — the general expression path would promote to
+                // `int` (`cbw; inc ax`) before narrowing back. Canonicalize
+                // it so the byte peephole fires. Restricted to `char` so the
+                // already-byte-exact `int` codegen is untouched. Fixture 4268
+                // (`c = c + 1` with char `c` in DL).
+                if let ExprKind::BinOp { op, left, right } = &value.kind
+                    && matches!(
+                        op,
+                        BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    )
+                    && let ExprKind::Ident(lname) = &left.kind
+                    && lname == name
+                    && self.name_is_char(name)
+                {
+                    let (op, right) = (*op, right.clone());
+                    self.advance_to_stmt_line(stmt);
+                    self.emit_compound_assign(name, op, &right);
                     return;
                 }
                 // A local shadows a global of the same name (fixture

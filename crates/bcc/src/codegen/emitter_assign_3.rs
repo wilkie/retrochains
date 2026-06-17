@@ -1503,13 +1503,21 @@ impl<'a> super::FunctionEmitter<'a> {
             }
             self.out.truncate(mark);
         }
-        // Non-constant char init: untested. Best guess would be
-        // `<compute to AL> / mov <reg>, al`, but until a fixture pins
-        // the load-to-AL path, bail.
-        assert!(
-            !reg.is_byte(),
-            "non-constant char init/assign not yet supported (no fixture)"
-        );
+        // Non-constant char store to a byte register variable: compute the
+        // value into AL, then `mov <reg>, al` — the register analogue of the
+        // char stack-local store. The store keeps byte width, so drop the
+        // trailing `cbw` promotion `emit_expr_to_ax` appends for `int` context
+        // (the byte result is already in AL beneath it). Fixture 4269
+        // (`b = a` char copy → `mov al,[a]; mov dl,al`).
+        if reg.is_byte() {
+            self.emit_expr_to_ax(expr);
+            const CBW: &[u8] = b"\tcbw\t\r\n";
+            if self.out.ends_with(CBW) {
+                self.out.truncate(self.out.len() - CBW.len());
+            }
+            let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+            return;
+        }
         self.emit_expr_to_ax(expr);
         // Peephole: if `expr` is `<this-reg> <op> <ax-clobbering-rhs>`,
         // emit_expr_to_ax produces `push ax; mov ax, <reg>; pop dx;

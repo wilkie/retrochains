@@ -1,0 +1,5 @@
+description = "char global self-add (c = c + 1) — compound-assign canonicalization. cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
+inputs = ["HELLO.C"]

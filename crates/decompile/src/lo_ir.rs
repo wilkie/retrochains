@@ -398,6 +398,12 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let dst = if op == BinOp::Cmp { Place::Flags } else { Byte(byte_reg_of(1)) };
             vec![LoOp::Bin { dst, op, lhs: Byte(byte_reg_of(1)), rhs: Byte(byte_rm_of(1)) }]
         }
+        Idiom::IncDecByteReg => {
+            let reg = Byte(byte_rm_of(1));
+            // group-4 reg field: /0 = inc, /1 = dec.
+            let op = if (modrm(1) >> 3) & 7 == 1 { UnOp::Dec } else { UnOp::Inc };
+            vec![LoOp::Un { dst: reg, op, operand: reg }]
+        }
         Idiom::AluAxImm => {
             // The op lives in the same bit positions as the group-1 `reg` field.
             let op = group1_op(bytes[0] >> 3);

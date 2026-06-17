@@ -435,7 +435,10 @@ mod tests {
         assert_roundtrips("char cv; int f() { return cv; }\n");
         assert_roundtrips("char cv; void f() { cv = 5; }\n");
         assert_roundtrips("char cv; void f() { cv = cv + 1; }\n");
+        assert_roundtrips("char cv; int f() { cv = cv - 1; return cv; }\n");
         assert_roundtrips("char cv; int f() { if (cv > 0) { cv = 0; } return cv; }\n");
+        // A char in a loop — the `c = c + 1` body stays byte-wide (`inc al`).
+        assert_roundtrips("int f() { char c; c = 0; while (c < 9) { c = c + 1; } return c; }\n");
         assert_roundtrips("int f() { char c; c = 3; return c; }\n");
         assert_roundtrips("int f(char a) { return a; }\n");
     }

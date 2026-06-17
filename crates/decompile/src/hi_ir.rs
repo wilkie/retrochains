@@ -434,13 +434,29 @@ impl Ctx {
                     }
                 }
 
-                // `inc`/`dec ax` extends the accumulator by ±1 (`x = x + 1`).
+                // `inc`/`dec ax` (or byte `inc al`) extends the accumulator by
+                // ±1 (`x = x + 1` / char `c = c + 1` kept byte-wide).
                 LoOp::Un { dst: Place::Reg(Reg::Ax), op, operand: Place::Reg(Reg::Ax) }
+                | LoOp::Un { dst: Place::Byte(ByteReg::Al), op, operand: Place::Byte(ByteReg::Al) }
                     if matches!(op, UnOp::Inc | UnOp::Dec) =>
                 {
                     let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
                     match acc.take() {
                         Some(e) => acc = Some(Expr::Binary(step, Box::new(e), Box::new(Expr::Const(1)))),
+                        None => self.complete = false,
+                    }
+                }
+
+                // `inc`/`dec dl` — `c = c ± 1` directly on a char register variable.
+                LoOp::Un { dst: Place::Byte(r), op, operand: Place::Byte(o) }
+                    if is_byte_reg_var(r) && o == r && matches!(op, UnOp::Inc | UnOp::Dec) =>
+                {
+                    let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
+                    match self.char_dest(Place::Byte(r)) {
+                        Some(lv) => out.push(Stmt::Assign(
+                            lv,
+                            Expr::Binary(step, Box::new(Expr::Var(Var::ByteReg(r))), Box::new(Expr::Const(1))),
+                        )),
                         None => self.complete = false,
                     }
                 }

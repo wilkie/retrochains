@@ -162,6 +162,9 @@ pub enum Idiom {
     /// `02/0a/22/2a/32/3a /r` with mod=11 — a byte ALU reg-reg op
     /// (`add/or/and/sub/xor/cmp r8, r8`); `or dl,dl` is the `char` truthiness test.
     AluByteReg,
+    /// `fe /0` or `fe /1` with mod=11 — `inc r8` / `dec r8` (byte). The `char`
+    /// counterpart of [`IncDecReg`]; `inc al` is `char + 1` kept byte-wide.
+    IncDecByteReg,
     /// `05/0d/15/1d/25/2d/35/3d ii ii` — an ALU op on `ax` with an `imm16`
     /// (`add/or/adc/sbb/and/sub/xor/cmp ax, imm`). The accumulator-specific
     /// short encoding BCC/TASM prefer over `81 /r` for `ax`.
@@ -265,6 +268,7 @@ impl Idiom {
             Idiom::LoadImmByteReg => "load imm into byte reg (mov r8, imm8)",
             Idiom::MovByteReg => "byte reg copy (mov r8, r8)",
             Idiom::AluByteReg => "alu byte reg, reg",
+            Idiom::IncDecByteReg => "inc/dec byte reg",
             Idiom::AluAxImm => "alu ax, imm16",
         }
     }
@@ -351,6 +355,7 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluByteReg, pat: &[L(0x2a), REG] },
     Def { idiom: Idiom::AluByteReg, pat: &[L(0x32), REG] },
     Def { idiom: Idiom::AluByteReg, pat: &[L(0x3a), REG] },
+    Def { idiom: Idiom::IncDecByteReg, pat: &[L(0xfe), REG] }, // inc/dec r8
     // reg-to-reg mov, and ALU reg,reg / reg,local (add/sub/or/and/xor/cmp).
     Def { idiom: Idiom::MovReg, pat: &[L(0x8b), REG] },
     Def { idiom: Idiom::MovReg, pat: &[L(0x89), REG] },
