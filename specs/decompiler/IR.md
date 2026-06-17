@@ -410,10 +410,19 @@ Recovery is driven by the idioms, not guessed:
   the array always round-trips. The array-vs-scalar call is principled but
   inherently partial: a *fully*-accessed `a[M]` is byte-identical to `M` scalars
   and recovers as scalars — only the unused space of a sparse array reveals it.
-  A stronger, unambiguous signal — a `lea` of a frame slot, or a variable index
-  — is the next lever (it also fixes the size for the non-sole-array case);
-  scoped to all-`int` frames for now, since `char`/`long`/pointer slot widths
-  make the layout subtler.)*
+  The unambiguous signal is a **variable index**: `a[i]` is a `lea` of the array
+  base plus a scaled index (`lea ax,[bp-N]; <index in bx>; shl bx,s; add bx,ax;
+  mov ax,[bx]`). It mirrors the pointer `p[i]` exactly but for the base's
+  **provenance** — a `lea` (the address of a local) vs a loaded pointer — and the
+  register roles flip (the array scales its index in bx, the pointer in ax). So
+  the `add bx,ax` fold has two branches: a base that's an `AddrOf` (the `lea`) is
+  an array → `a[i]`; a base that's a loaded `Var` is a pointer → `p[i]`. The
+  `lea` proves the array even with *no* constant access (`int a[8]; return a[i]`
+  recovers from the `lea` and frame alone), and it's the lever for the
+  non-sole-array case. The emit spells `Deref(&a[0] + i)` as the array name
+  `a[i]` (or `*(a + i)`), not the literal `(&a[0])[i]`. Scoped to all-`int`
+  frames for now, since `char`/`long`/pointer slot widths make the layout
+  subtler.)*
 
 Near globals are built (`hi_ir.rs`). A global is a `Var::Global(offset)` — and
 crucially the offset is *not* a placeholder like a call target: it's the real

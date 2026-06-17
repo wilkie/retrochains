@@ -430,11 +430,22 @@ fn lvalue_str(lv: &LValue, names: &Names) -> String {
 /// supports both, so the [`Names::form`] policy chooses. This is the single seam
 /// where the surface form of an indexed access is decided.
 fn deref_str(inner: &Expr, names: &Names) -> String {
-    if names.form == AccessForm::Subscript
-        && let Expr::Binary(BinOp::Add, base, idx) = inner
-    {
-        // `base[k]` for a constant index, `base[i]` for a variable one.
-        return format!("{}[{}]", expr_str(base, names), expr_str(idx, names));
+    if let Expr::Binary(BinOp::Add, base, idx) = inner {
+        // A local *array* indexed: the base is `&a[0]` (the `lea` of the array's
+        // element 0), so it spells the array's name — `a[i]`, not `(&a[0])[i]`.
+        if let Expr::AddrOf(Var::Slot(off)) = **base
+            && let Some((n, 0)) = names.array_index(off)
+        {
+            return match names.form {
+                AccessForm::Subscript => format!("a{n}[{}]", expr_str(idx, names)),
+                AccessForm::PointerArith => format!("*(a{n} + {})", expr_str(idx, names)),
+            };
+        }
+        // A pointer indexed: `base[k]` for a constant index, `base[i]` for a
+        // variable one.
+        if names.form == AccessForm::Subscript {
+            return format!("{}[{}]", expr_str(base, names), expr_str(idx, names));
+        }
     }
     format!("*{}", expr_str(inner, names))
 }
@@ -582,6 +593,13 @@ mod tests {
         assert_roundtrips_stack("int f() { int a[4]; a[0] = 1; return a[2]; }\n");
         assert_roundtrips_stack("int f() { int a[4]; a[0] = 10; a[1] = 20; return a[0] + a[1]; }\n");
         assert_roundtrips_stack("int f() { int a[8]; a[3] = 7; return a[3]; }\n");
+        // Variable index — `a[i]` is a `lea` of the array base plus a scaled
+        // index (the base's provenance, `lea` vs a loaded pointer, is what makes
+        // it `a[i]` not `p[i]`). A read, a write, and a fully-dynamic array (no
+        // constant access — the `lea` and frame alone reveal it) all recover.
+        assert_roundtrips_stack("int f(int i) { int a[4]; a[0] = 1; return a[i]; }\n");
+        assert_roundtrips_stack("void f(int i, int v) { int a[4]; a[i] = v; }\n");
+        assert_roundtrips_stack("int f(int i) { int a[8]; return a[i]; }\n");
     }
 
     #[test]

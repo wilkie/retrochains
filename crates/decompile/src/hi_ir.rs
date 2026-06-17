@@ -762,19 +762,42 @@ impl Ctx {
                     }
                 }
 
-                // `add bx, ax` — index a pointer by a *variable*: bx holds the
-                // pointer `p` (a `mov bx,[p]` provenance — a loaded value, not an
-                // `lea`), and the accumulator holds the scaled index `i << s`
-                // (`s = log2(stride)`). Recover `p + i`: strip the stride shift to
-                // get the C-level index, so the deref that follows reads `p[i]`.
-                // (An `lea`-based base — a local *array* — would arrive with the
-                // index in bx and the base in ax; that sibling stays unhandled.)
+                // `shl bx, s` — scale a *local array* index to a byte offset. The
+                // index sits in bx (a local array's base comes via `lea` into ax,
+                // so BCC scales the index in the other register); the following
+                // `add bx,ax` combines them. (A pointer index scales in ax, the
+                // existing foldable-shift path.)
+                LoOp::Bin {
+                    dst: Place::Reg(Reg::Bx),
+                    op: BinOp::Shl,
+                    lhs: Place::Reg(Reg::Bx),
+                    rhs: Place::Imm(s),
+                } => match bx.take() {
+                    Some(e) => {
+                        bx = Some(Expr::Binary(BinOp::Shl, Box::new(e), Box::new(Expr::Const(s))));
+                    }
+                    None => self.complete = false,
+                },
+
+                // `add bx, ax` — index by a *variable*. Two shapes, told apart by
+                // the base's **provenance**:
+                //   • pointer (`p[i]`): bx holds the pointer `p` (a `mov bx,[p]`
+                //     loaded value), ax the scaled index → `p + i`.
+                //   • local array (`a[i]`): ax holds `&a` (a `lea ax,[bp-N]`), bx
+                //     the scaled index → `&a + i`, which the deref reads as `a[i]`.
+                // Either way strip the stride shift to recover the C-level index.
                 LoOp::Bin {
                     dst: Place::Reg(Reg::Bx),
                     op: BinOp::Add,
                     lhs: Place::Reg(Reg::Bx),
                     rhs: Place::Reg(Reg::Ax),
                 } => match (bx.take(), acc.take()) {
+                    // Array: the `lea` base is in ax, the index in bx.
+                    (Some(index), Some(base @ Expr::AddrOf(_))) => {
+                        let idx = strip_scale(index);
+                        bx = Some(Expr::Binary(BinOp::Add, Box::new(base), Box::new(idx)));
+                    }
+                    // Pointer: the loaded pointer is in bx, the index in ax.
                     (Some(Expr::Var(p)), Some(index)) => {
                         self.note_ptr(p);
                         let idx = strip_scale(index);
