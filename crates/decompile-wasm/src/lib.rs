@@ -121,3 +121,38 @@ pub fn decompile(code: &[u8]) -> Option<String> {
 pub fn decompile_program(code: &[u8]) -> Option<String> {
     decompile::decompile_program(code)
 }
+
+/// Why decompilation declined — the distinct proximate causes recovery hit, for
+/// surfacing in a UI. Empty when [`decompile_program`] succeeds. Each entry is an
+/// op signature (`Bin:Mul`, `Load:deref`, `Asm(unlifted)`, …) or a structural tag
+/// (`structure:*`, `program:globals`, …); see `Function::bail_reason`.
+#[wasm_bindgen]
+#[must_use]
+pub fn decompile_reasons(code: &[u8]) -> Vec<String> {
+    if decompile::decompile_program(code).is_some() {
+        return Vec::new();
+    }
+    let funcs = decompile::recover_program(code);
+    let mut reasons: Vec<String> = funcs
+        .iter()
+        .filter(|f| !f.complete)
+        .map(|f| f.bail_reason.clone().unwrap_or_else(|| "unknown".to_string()))
+        .collect();
+    if reasons.is_empty() {
+        // Every function recovered, yet the program declined — a whole-program
+        // shape the emitter can't frame (most often file-scope globals).
+        reasons.push(
+            if funcs.is_empty() {
+                "program:no-function"
+            } else if funcs.iter().any(|f| f.vars.iter().any(|v| matches!(v, decompile::Var::Global(_)))) {
+                "program:globals"
+            } else {
+                "program:other"
+            }
+            .to_string(),
+        );
+    }
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}

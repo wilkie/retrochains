@@ -85,13 +85,17 @@ export interface Analysis {
   classification: Classification;
   /** Recovered C, or `undefined` if not fully decompilable. */
   decompiled: string | undefined;
+  /** When `decompiled` is `undefined`, the distinct reasons recovery bailed. */
+  reasons: string[];
 }
 
 /** Pull `_TEXT` from an OBJ, classify it, and decompile it back to C. */
 export async function analyze(obj: Uint8Array): Promise<Analysis> {
-  const { classify, codeOfObj, decompileProgram } = await import("@retrochains/decompile");
+  const { classify, codeOfObj, decompileProgram, decompileReasons } =
+    await import("@retrochains/decompile");
   const code = await codeOfObj(obj);
   const classification = await classify(code);
   const decompiled = await decompileProgram(code);
-  return { code, classification, decompiled };
+  const reasons = decompiled === undefined ? await decompileReasons(code) : [];
+  return { code, classification, decompiled, reasons };
 }

@@ -32,6 +32,25 @@ function Code({ text }: { text: string }) {
   );
 }
 
+/** Shown when the decompiler declines: the proximate causes recovery bailed on
+ * (its `bail_reason`s), as chips — the same signal the corpus triage clusters by. */
+function DecompileGap({ reasons }: { reasons: string[] }) {
+  return (
+    <Stack spacing={1}>
+      <Typography color="text.secondary">
+        Not fully decompilable — recovery bailed on:
+      </Typography>
+      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+        {reasons.length ? (
+          reasons.map((r) => <Chip key={r} label={r} size="small" sx={mono} />)
+        ) : (
+          <Chip label="unknown" size="small" sx={mono} />
+        )}
+      </Stack>
+    </Stack>
+  );
+}
+
 export function DetailPane({ fixture, family, onFamily, result, analysis, busy, error }: Props) {
   const [view, setView] = useState(0);
   const families: Family[] = [
@@ -120,7 +139,8 @@ function OutputView({
     case 1:
       return <Code text={result.asm ?? "(no assembly)"} />;
     case 2:
-      return <Code text={analysis?.decompiled ?? "(not fully decompilable)"} />;
+      if (analysis?.decompiled !== undefined) return <Code text={analysis.decompiled} />;
+      return <DecompileGap reasons={analysis?.reasons ?? []} />;
     case 3:
       return analysis ? (
         <Stack spacing={1}>

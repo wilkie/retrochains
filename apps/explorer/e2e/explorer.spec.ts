@@ -14,5 +14,5 @@ test("compiles a fixture in-browser and verifies it byte-exactly", async ({ page
   // The decompiled tab should surface recovered C. The decompiler names functions
   // `f0`, `f1`, … (never `main`), so that text is unique to the decompiled pane.
   await page.getByRole("tab", { name: "decompiled" }).click();
-  await expect(page.getByText(/int f\d+\s*\(|not fully decompilable/)).toBeVisible();
+  await expect(page.getByText(/int f\d+\s*\(|recovery bailed on/)).toBeVisible();
 });

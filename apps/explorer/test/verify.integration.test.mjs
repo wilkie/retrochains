@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { compile as bccCompile } from "@retrochains/bcc";
 import { compile as mscCompile } from "@retrochains/msc";
-import { codeOfObj, classify, decompile } from "@retrochains/decompile";
+import { codeOfObj, classify, decompile, decompileProgram, decompileReasons } from "@retrochains/decompile";
 
 const manifest = JSON.parse(
   readFileSync(new URL("../public/fixtures.json", import.meta.url), "utf8"),
@@ -63,4 +63,22 @@ test("classify + decompile run over a compiled fixture's _TEXT", async () => {
   assert.equal(c.verdict, "bcc", "classifies as BCC");
   // decompile may or may not fully recover; just assert it doesn't throw.
   await decompile(code);
+});
+
+test("a declined decompile reports its bail reasons", async () => {
+  // `long` negation isn't recovered yet — recovery bails on the `neg` (Un:Neg),
+  // which the explorer surfaces in place of the generic "not decompilable".
+  const obj = await bccCompile("long f(){ long x = 5; return -x; }\n", {
+    filename: "hello.c",
+    model: "small",
+    mtimeUnix: 672408000,
+  });
+  const code = await codeOfObj(obj);
+  assert.equal(await decompileProgram(code), undefined, "declines");
+  const reasons = await decompileReasons(code);
+  assert.ok(reasons.length > 0, "surfaces at least one reason");
+  assert.ok(
+    reasons.every((r) => typeof r === "string" && r.length > 0),
+    "reasons are non-empty strings",
+  );
 });

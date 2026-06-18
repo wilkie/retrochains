@@ -82,3 +82,14 @@ export async function decompileProgram(code: Uint8Array): Promise<string | undef
   await ensure();
   return wasm.decompile_program(code) ?? undefined;
 }
+
+/**
+ * Why decompilation declined — the distinct proximate causes recovery hit, for
+ * surfacing in a UI. Empty when {@link decompileProgram} succeeds. Each is an op
+ * signature (`Bin:Mul`, `Load:deref`, `Asm(unlifted)`, …) or a structural tag
+ * (`structure:*`, `program:globals`, …).
+ */
+export async function decompileReasons(code: Uint8Array): Promise<string[]> {
+  await ensure();
+  return wasm.decompile_reasons(code);
+}
