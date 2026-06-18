@@ -5,6 +5,7 @@
 import type { CompileOptions } from "@retrochains/bcc";
 import type { Classification } from "@retrochains/decompile";
 import type { Fixture, Family } from "./types";
+import { sha256Hex } from "./sha256";
 
 export type { Classification };
 
@@ -32,12 +33,20 @@ export function parseBccArgs(args: string[]): CompileOptions {
   return opts;
 }
 
-/** Lower-case hex sha-256 of a byte buffer (Web Crypto; works in Node 18+ too). */
+/**
+ * Lower-case hex sha-256 of a byte buffer. Prefers native Web Crypto, but that
+ * API is exposed only in a secure context (`https://`, `localhost`, `127.0.0.1`);
+ * served over plain HTTP on a LAN/WSL2 IP, `crypto.subtle` is `undefined`, so we
+ * fall back to a pure-JS implementation. Both paths give identical digests.
+ */
 export async function sha256(bytes: Uint8Array): Promise<string> {
-  // Cast through `unknown`: TS 5.7's generic `Uint8Array<ArrayBufferLike>` isn't
-  // assignable to `BufferSource`, but it's a valid argument at runtime.
-  const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (typeof crypto !== "undefined" && crypto.subtle) {
+    // Cast through `unknown`: TS 5.7's generic `Uint8Array<ArrayBufferLike>` isn't
+    // assignable to `BufferSource`, but it's a valid argument at runtime.
+    const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  return sha256Hex(bytes);
 }
 
 export interface CompileResult {
