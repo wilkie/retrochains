@@ -550,6 +550,11 @@ pub struct Function {
     /// `false` if any op couldn't be modelled — the function is only partially
     /// recovered and must not be presented as done.
     pub complete: bool,
+    /// When `!complete`, the proximate cause — the signature of the op that
+    /// defeated recovery (`op_sig`) or a structural tag (`structure:…`,
+    /// `dangling-array`, …). `None` when `complete`. A triage aid; the emitter
+    /// ignores it.
+    pub bail_reason: Option<String>,
     /// The function's start offset in `_TEXT` (its prologue / `Enter`). In a
     /// multi-function program this is the offset a local `call` targets, so it
     /// names the callee; for a lone function it's just the segment start.
@@ -745,9 +750,38 @@ struct Ctx {
     /// A value to seed the *next* straight-line fold with — the merged result of
     /// a ternary diamond, which the following code (a `return`/store) consumes.
     pending_acc: Option<Expr>,
+    /// Diagnostic: the index of the op `fold_linear` is currently processing, so a
+    /// bail there can name the op that defeated it without allocating on the happy
+    /// path. Read lazily by [`Ctx::cant`].
+    cur: usize,
+    /// Diagnostic: why recovery first set `complete = false` (the op signature or a
+    /// structural tag). Surfaced as [`Function::bail_reason`] to drive triage; does
+    /// not affect what is emitted.
+    reason: Option<String>,
 }
 
 impl Ctx {
+    /// Mark recovery incomplete, blaming the op `fold_linear` is on (`self.cur`).
+    /// Keeps the *first* reason — the proximate cause — and is otherwise identical
+    /// to setting `complete = false`.
+    fn cant(&mut self) {
+        self.complete = false;
+        if self.reason.is_none() {
+            let sig = self.insns.get(self.cur).map_or("?", |n| op_sig(&n.op));
+            self.reason = Some(sig.to_string());
+        }
+    }
+
+    /// Mark recovery incomplete with an explicit structural reason (a bail that
+    /// isn't about one straight-line op — unrecognized control flow, a jump table
+    /// we can't read, …).
+    fn cant_for(&mut self, why: &str) {
+        self.complete = false;
+        if self.reason.is_none() {
+            self.reason = Some(why.to_string());
+        }
+    }
+
     /// Record a variable the first time it's seen (preserving order). A byte
     /// register variable is always `char`.
     fn note(&mut self, var: Var) {
@@ -1120,6 +1154,7 @@ impl Ctx {
                 skip -= 1;
                 continue;
             }
+            self.cur = i; // blame this op if the arm below bails (see `cant`)
             match self.insns[i].op.clone() {
                 // Frame setup/teardown carry no value. `cbw`/`cwd` are sign
                 // promotions the accumulator already reflects — `cbw` is the
@@ -1172,13 +1207,13 @@ impl Ctx {
                 // register push supplies a variable directly.
                 LoOp::Arg { src: Place::Reg(Reg::Ax) } => match acc.take() {
                     Some(e) => pending_args.push(e),
-                    None => self.complete = false,
+                    None => self.cant(),
                 },
                 LoOp::Arg { src } => {
                     flush_call(&mut acc, out);
                     match self.operand(src) {
                         Some(e) => pending_args.push(e),
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1205,7 +1240,7 @@ impl Ctx {
                 // `pop ax` — restore the spilled left operand of a binary op.
                 LoOp::Pop { dst: Place::Reg(Reg::Ax) } => match pending_args.pop() {
                     Some(e) => acc = Some(e),
-                    None => self.complete = false,
+                    None => self.cant(),
                 },
 
                 LoOp::Ret { .. } => {
@@ -1232,7 +1267,7 @@ impl Ctx {
                             self.note_char_array_base(&ptr);
                             acc = Some(Expr::Deref(Box::new(ptr)));
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1242,7 +1277,7 @@ impl Ctx {
                 LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::DerefDisp(Reg::Bx, 2) } => {
                     long_deref.clone_from(&bx);
                     if long_deref.is_none() {
-                        self.complete = false;
+                        self.cant();
                     }
                 }
 
@@ -1271,7 +1306,7 @@ impl Ctx {
                             }
                             acc = Some(Expr::Deref(Box::new(ptr)));
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1311,7 +1346,7 @@ impl Ctx {
                             }
                             acc = Some(Self::deref_at(ptr, disp / 2));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1326,7 +1361,7 @@ impl Ctx {
                             }
                             acc = Some(Self::deref_at(ptr, disp));
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1376,7 +1411,7 @@ impl Ctx {
                     flush_call(&mut acc, out);
                     bx = self.operand(src);
                     if bx.is_none() {
-                        self.complete = false;
+                        self.cant();
                     }
                 }
 
@@ -1394,7 +1429,7 @@ impl Ctx {
                     Some(e) => {
                         bx = Some(Expr::Binary(BinOp::Shl, Box::new(e), Box::new(Expr::Const(s))));
                     }
-                    None => self.complete = false,
+                    None => self.cant(),
                 },
 
                 // `add bx, ax` — index by a *variable*. Two shapes, told apart by
@@ -1429,7 +1464,7 @@ impl Ctx {
                         let (idx, _) = strip_scale(index);
                         bx = Some(Expr::Binary(BinOp::Add, Box::new(Expr::Var(p)), Box::new(idx)));
                     }
-                    _ => self.complete = false,
+                    _ => self.cant(),
                 },
 
                 // `lea ax, [bp+disp]` — the address of a variable (`&x`).
@@ -1440,7 +1475,7 @@ impl Ctx {
                             self.note(v);
                             acc = Some(Expr::AddrOf(v));
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1476,7 +1511,7 @@ impl Ctx {
                             acc = Some(Expr::Var(v));
                             acc_long = true;
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1513,14 +1548,14 @@ impl Ctx {
                                 acc = Some(Expr::Var(v));
                                 acc_long = true;
                             } else {
-                                self.complete = false;
+                                self.cant();
                                 acc = None;
                             }
                         }
                         (_, src) => {
                             acc = self.operand(src);
                             if acc.is_none() {
-                                self.complete = false;
+                                self.cant();
                             }
                         }
                     }
@@ -1544,7 +1579,7 @@ impl Ctx {
                         other => self.char_operand(other),
                     };
                     if acc.is_none() {
-                        self.complete = false;
+                        self.cant();
                     }
                 }
 
@@ -1567,7 +1602,7 @@ impl Ctx {
                         other => self.operand(other),
                     };
                     if cl.is_none() {
-                        self.complete = false;
+                        self.cant();
                     }
                 }
 
@@ -1588,7 +1623,7 @@ impl Ctx {
                     };
                     match (self.char_dest(Place::Byte(r)), val) {
                         (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1621,7 +1656,7 @@ impl Ctx {
                     };
                     match (self.dest(Place::Reg(r)), val) {
                         (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1638,7 +1673,7 @@ impl Ctx {
                         }
                         acc = Some(Expr::Binary(op, Box::new(l), Box::new(Expr::Deref(Box::new(ptr)))));
                     }
-                    _ => self.complete = false,
+                    _ => self.cant(),
                 },
 
                 // `<op> ax, dx` — combine the restored left operand (in `ax`)
@@ -1651,7 +1686,7 @@ impl Ctx {
                         (Some(l), Some(r)) => {
                             acc = Some(Expr::Binary(op, Box::new(l), Box::new(r)));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1691,9 +1726,9 @@ impl Ctx {
                             };
                             acc = Some(Expr::Binary(op, Box::new(l), Box::new(r)));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     },
-                    None => self.complete = false,
+                    None => self.cant(),
                 },
 
                 LoOp::Bin { dst: Place::Reg(Reg::Ax), op, lhs: Place::Reg(Reg::Ax), rhs }
@@ -1719,7 +1754,7 @@ impl Ctx {
                             // make the intermediate signed (`sar` not `shr`).
                             acc = Some(combine_shift(op, l, r));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1741,7 +1776,7 @@ impl Ctx {
                         (Some(l), Some(r)) => {
                             acc = Some(Expr::Binary(BinOp::Imul, Box::new(l), Box::new(r)));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1761,7 +1796,7 @@ impl Ctx {
                             dx_rem = Some((l.clone(), r.clone()));
                             acc = Some(Expr::Binary(BinOp::Idiv, Box::new(l), Box::new(r)));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1771,7 +1806,7 @@ impl Ctx {
                 {
                     match self.dest(Place::Reg(r)) {
                         Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(0))),
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1806,7 +1841,7 @@ impl Ctx {
                             skip = 2;
                         }
                         Some(e) => acc = Some(Expr::Unary(UnaryOp::Neg, Box::new(e))),
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1818,7 +1853,7 @@ impl Ctx {
                     operand: Place::Byte(ByteReg::Al),
                 } => match acc.take() {
                     Some(e) => acc = Some(Expr::Unary(UnaryOp::BitNot, Box::new(e))),
-                    None => self.complete = false,
+                    None => self.cant(),
                 },
 
                 // `inc`/`dec ax` (or byte `inc al`) extends the accumulator by
@@ -1830,7 +1865,7 @@ impl Ctx {
                     let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
                     match acc.take() {
                         Some(e) => acc = Some(Expr::Binary(step, Box::new(e), Box::new(Expr::Const(1)))),
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1845,7 +1880,7 @@ impl Ctx {
                     let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
                     match self.char_dest(Place::Byte(r)) {
                         Some(lv) => out.push(Stmt::Compound(lv, step, Expr::Const(1))),
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1892,7 +1927,7 @@ impl Ctx {
                             self.untype_word_chars(&e);
                             out.push(Stmt::Compound(lv, op, e));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1911,7 +1946,7 @@ impl Ctx {
                     let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
                     match self.dest(dst) {
                         Some(lv) => out.push(Stmt::Compound(lv, step, Expr::Const(1))),
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -1928,7 +1963,7 @@ impl Ctx {
                 {
                     match (self.dest(dst), self.operand(rhs)) {
                         (Some(lv), Some(e)) => out.push(Stmt::Compound(lv, op, e)),
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1944,7 +1979,7 @@ impl Ctx {
                             self.note_char_array_base(&ptr);
                             out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), e));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1966,7 +2001,7 @@ impl Ctx {
                         // A `long` array element store writes only the low word (a
                         // BCC quirk) — not a clean `long` assignment — so decline.
                         (Some(ptr), _) if self.is_long_array_elem(&ptr) => {
-                            self.complete = false;
+                            self.cant();
                         }
                         (Some(ptr), Some(e)) => {
                             if let Expr::Var(v) = ptr {
@@ -1974,7 +2009,7 @@ impl Ctx {
                             }
                             out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), e));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -1990,7 +2025,7 @@ impl Ctx {
                             self.note_char_ptr(v);
                             out.push(Stmt::Assign(LValue::Deref(Box::new(Expr::Var(v))), e));
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -2015,7 +2050,7 @@ impl Ctx {
                             self.note_ptr(v);
                             out.push(Stmt::Assign(LValue::Deref(Box::new(Expr::Var(v))), e));
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -2043,7 +2078,7 @@ impl Ctx {
                             let place = LValue::Deref(Box::new(Self::offset_ptr(ptr, disp / 2)));
                             out.push(Stmt::Assign(place, e));
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -2073,7 +2108,7 @@ impl Ctx {
                                 LValue::Deref(Box::new(Self::offset_ptr(Expr::Var(v), disp / 2)));
                             out.push(Stmt::Assign(place, e));
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -2093,14 +2128,14 @@ impl Ctx {
                             out.push(Stmt::Assign(LValue::Var(v), e));
                             skip = 1;
                         }
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
                 LoOp::Store { dst, src: Place::Reg(Reg::Ax) } => {
                     match (self.dest(dst), acc.take()) {
                         (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -2108,7 +2143,7 @@ impl Ctx {
                 LoOp::Store { dst, src: Place::Byte(_) } => {
                     match (self.char_dest(dst), acc.take()) {
                         (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
-                        _ => self.complete = false,
+                        _ => self.cant(),
                     }
                 }
 
@@ -2140,7 +2175,7 @@ impl Ctx {
                         }
                         None => match self.dest(Place::Local(hi)) {
                             Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(imm_hi))),
-                            None => self.complete = false,
+                            None => self.cant(),
                         },
                     }
                 }
@@ -2149,7 +2184,7 @@ impl Ctx {
                     flush_call(&mut acc, out);
                     match self.dest(dst) {
                         Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(v))),
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -2164,7 +2199,7 @@ impl Ctx {
                             }
                             out.push(Stmt::Assign(LValue::Deref(Box::new(ptr)), Expr::Const(imm)));
                         }
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
@@ -2186,17 +2221,17 @@ impl Ctx {
                     flush_call(&mut acc, out);
                     match self.char_dest(dst) {
                         Some(lv) => out.push(Stmt::Assign(lv, Expr::Const(imm))),
-                        None => self.complete = false,
+                        None => self.cant(),
                     }
                 }
 
-                _ => self.complete = false,
+                _ => self.cant(),
             }
         }
         // A discarded call at the run's end (a trailing `g(x);`) still happened.
         flush_call(&mut acc, out);
         if !pending_args.is_empty() {
-            self.complete = false; // args pushed with no call to consume them
+            self.cant(); // args pushed with no call to consume them
         }
         acc
     }
@@ -2685,7 +2720,7 @@ impl Ctx {
                     // `cmp` feeding it is the previous instruction; everything
                     // before that is a straight-line run.
                     if i == 0 {
-                        self.complete = false;
+                        self.cant_for("structure:if-at-start");
                         i += 1;
                         continue;
                     }
@@ -2702,7 +2737,7 @@ impl Ctx {
                         {
                             self.emit_switch(&mut stmts, scrutinee, &cases, def_idx, hi)
                         } else {
-                            self.complete = false;
+                            self.cant_for("structure:switch-scrutinee");
                             def_idx
                         };
                         i = resume;
@@ -2721,7 +2756,7 @@ impl Ctx {
                                 }
                                 self.emit_switch(&mut stmts, scrutinee, &cases, def_idx, hi)
                             } else {
-                                self.complete = false;
+                                self.cant_for("structure:jumptable-scrutinee");
                                 def_idx
                             };
                             i = resume;
@@ -2729,7 +2764,7 @@ impl Ctx {
                             continue;
                         }
                         // A jump table we can't fully read (out-of-order layout).
-                        self.complete = false;
+                        self.cant_for("structure:jumptable-layout");
                         i += 1;
                         continue;
                     }
@@ -2739,7 +2774,7 @@ impl Ctx {
                     // condition needs to read a register operand.
                     let cond_acc = self.fold_linear(linear_start, cmp_idx, &mut stmts);
                     let Some(tb) = self.idx_of(target) else {
-                        self.complete = false;
+                        self.cant_for("structure:branch-target");
                         i += 1;
                         continue;
                     };
@@ -2810,7 +2845,7 @@ impl Ctx {
                         i += 1;
                         linear_start = i;
                     } else {
-                        self.complete = false;
+                        self.cant_for("structure:control-flow");
                         i += 1;
                     }
                 }
@@ -2933,6 +2968,8 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         returns_long: false,
         returns_char: false,
         pending_acc: None,
+        cur: 0,
+        reason: None,
     };
     // Structure up to the last `ret` — a jump-table `switch` appends its offset
     // table after the epilogue, and that data isn't code.
@@ -2948,15 +2985,16 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
     // recovered as a separate variable (e.g. a `long` local's paired stores read
     // as two `int` stores), the layout is double-counted — bail rather than emit
     // it. (This guards the deferred `long`-local store-pairing case.)
-    for &lv in &ctx.long_vars {
+    let double_counted = ctx.long_vars.iter().any(|&lv| {
         let high = match lv {
             Var::Slot(lo) => Some(Var::Slot(lo + 2)),
             Var::Param(lo) => Some(Var::Param(lo + 2)),
             _ => None,
         };
-        if high.is_some_and(|h| ctx.vars.contains(&h)) {
-            ctx.complete = false;
-        }
+        high.is_some_and(|h| ctx.vars.contains(&h))
+    });
+    if double_counted {
+        ctx.cant_for("long-high-slot-double-count");
     }
     let ret = if ctx.returns_long {
         Type::Long
@@ -2973,8 +3011,12 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
     // bail rather than emit it. (Happens for a `long` array that also has a
     // constant-index store-pair, which isn't folded into the array yet.)
     let covered = |base: i16| arrays.iter().any(|a| a.base == base);
-    let complete = ctx.complete
-        && ctx.char_array_bases.iter().chain(&ctx.long_array_bases).all(|&b| covered(b));
+    let dangling_array =
+        !ctx.char_array_bases.iter().chain(&ctx.long_array_bases).all(|&b| covered(b));
+    let complete = ctx.complete && !dangling_array;
+    let bail_reason = ctx
+        .reason
+        .or_else(|| dangling_array.then(|| "dangling-array".to_string()));
     Function {
         ret,
         vars: ctx.vars,
@@ -2986,7 +3028,58 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         arrays,
         body,
         complete,
+        bail_reason,
         start,
+    }
+}
+
+/// A short, stable signature of a lo-IR op for bail-reason triage — the variant
+/// plus just enough operand shape to cluster the long tail (which `Bin`, whether
+/// a `Load`/`Store` touches a deref/global, …). Not exhaustive; tuned to separate
+/// the recovery gaps worth chasing.
+fn op_sig(op: &LoOp) -> &'static str {
+    match op {
+        LoOp::Asm { .. } => "Asm(unlifted)",
+        LoOp::Bin { op, .. } => match op {
+            BinOp::Add => "Bin:Add",
+            BinOp::Sub => "Bin:Sub",
+            BinOp::And => "Bin:And",
+            BinOp::Or => "Bin:Or",
+            BinOp::Xor => "Bin:Xor",
+            BinOp::Mul | BinOp::Imul => "Bin:Mul",
+            BinOp::Idiv | BinOp::Div => "Bin:Div",
+            BinOp::Shl => "Bin:Shl",
+            BinOp::Shr | BinOp::Sar => "Bin:Shr",
+            BinOp::Adc => "Bin:Adc",
+            BinOp::Sbb => "Bin:Sbb",
+            BinOp::Cmp => "Bin:Cmp",
+            _ => "Bin:other",
+        },
+        LoOp::Un { op, .. } => match op {
+            UnOp::Inc => "Un:Inc",
+            UnOp::Dec => "Un:Dec",
+            UnOp::Neg => "Un:Neg",
+            UnOp::Not => "Un:Not",
+        },
+        LoOp::Load { src: Place::Deref(_) | Place::DerefDisp(..), .. } => "Load:deref",
+        LoOp::Load { src: Place::Global(_), .. } => "Load:global",
+        LoOp::Load { .. } => "Load",
+        LoOp::Store { dst: Place::Deref(_) | Place::DerefDisp(..), .. } => "Store:deref",
+        LoOp::Store { dst: Place::Global(_), .. } => "Store:global",
+        LoOp::Store { .. } => "Store",
+        LoOp::StoreImmByte { .. } => "StoreImmByte",
+        LoOp::CmpByte { .. } => "CmpByte",
+        LoOp::Lea { .. } => "Lea",
+        LoOp::Arg { .. } => "Arg",
+        LoOp::Call { .. } => "Call",
+        LoOp::Cleanup { .. } => "Cleanup",
+        LoOp::Branch { .. } => "Branch",
+        LoOp::Jump { .. } => "Jump",
+        LoOp::IndirectJump { .. } => "IndirectJump",
+        LoOp::Pop { .. } => "Pop",
+        LoOp::Promote { .. } => "Promote",
+        LoOp::Enter { .. } | LoOp::Leave | LoOp::Ret { .. } => "frame",
+        LoOp::SaveReg { .. } | LoOp::RestoreReg { .. } => "regsave",
     }
 }
 
