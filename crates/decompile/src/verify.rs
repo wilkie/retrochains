@@ -198,18 +198,27 @@ pub fn render_idiomatic_with(
     recompile: impl Fn(&str, &CompileOpts) -> Result<Vec<u8>, HarnessError>,
 ) -> Option<String> {
     let func = crate::hi_ir::recover(code);
-    for form in [crate::AccessForm::Subscript, crate::AccessForm::PointerArith] {
-        let Some(candidate) = crate::to_c_with_form(&func, form) else {
-            return None; // incomplete — no form will render it
-        };
-        // The backend is the oracle. Tolerate a build that panics on an
-        // unsupported shape (a known compiler gap): a crash is just a rejection.
-        let matched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            matches!(verify_with(&candidate, opts, code, &recompile), Ok(Outcome::Match))
-        }))
-        .unwrap_or(false);
-        if matched {
-            return Some(candidate);
+    // Two presentation axes, each gated by the recompile oracle. Initializer
+    // folding (`<type> v = expr;`) is preferred over split decl-then-store, and
+    // within that the subscript access form over pointer arithmetic — so the
+    // first match is the most idiomatic rendering that still reproduces the bytes.
+    // Folding here is `Aggressive`: the oracle below rejects any fold that isn't
+    // byte-exact, so it can attempt globals/derefs/narrowing the unverified path
+    // declines.
+    for mode in [crate::emit::FoldMode::Aggressive, crate::emit::FoldMode::None] {
+        for form in [crate::AccessForm::Subscript, crate::AccessForm::PointerArith] {
+            let Some(candidate) = crate::emit::to_c_full(&func, form, mode) else {
+                return None; // incomplete — no form will render it
+            };
+            // The backend is the oracle. Tolerate a build that panics on an
+            // unsupported shape (a known compiler gap): a crash is just a rejection.
+            let matched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                matches!(verify_with(&candidate, opts, code, &recompile), Ok(Outcome::Match))
+            }))
+            .unwrap_or(false);
+            if matched {
+                return Some(candidate);
+            }
         }
     }
     None

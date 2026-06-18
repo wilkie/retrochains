@@ -226,38 +226,57 @@ impl Names {
     }
 
     /// The local-variable declarations (parameters and globals excluded — those
-    /// are the signature and file scope respectively), each typed.
+    /// are the signature and file scope respectively), each typed and paired with
+    /// the scalar [`Var`] it declares (`None` for an array decl, which names no
+    /// single foldable scalar).
     ///
     /// Order matters: BCC lays out locals in declaration order top-down from
     /// `bp`, so the recompiled offsets only match if stack locals are declared
     /// closest-to-`bp` (least-negative base) first. Register variables (no stack
     /// base) lead; then arrays and scalars are interleaved by base. A slot that
-    /// lands on an array is an element, declared via the array, not a scalar.
-    fn local_decls(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
+    /// lands on an array is an element, declared via the array, not a scalar. The
+    /// initialization-folding pass ([`fold_leading_inits`]) keys on the scalar
+    /// `Var`s to attach an `= init` to the right line without reordering.
+    fn local_decl_entries(&self) -> Vec<(Option<Var>, String)> {
+        let mut out: Vec<(Option<Var>, String)> = Vec::new();
         // Register variables first — they don't occupy the stack frame.
         for (v, n) in &self.bindings {
             if matches!(v, Var::Reg(_) | Var::ByteReg(_)) {
-                out.push(self.decl(*v, n));
+                out.push((Some(*v), self.decl(*v, n)));
             }
         }
         // Stack locals (arrays + scalars), ordered top-down by base offset.
-        let mut stack: Vec<(i16, String)> = self
+        let mut stack: Vec<(i16, Option<Var>, String)> = self
             .arrays
             .iter()
             .enumerate()
-            .map(|(i, a)| (a.base, format!("{} a{}[{}]", a.c_type(), i + 1, a.len)))
+            .map(|(i, a)| (a.base, None, format!("{} a{}[{}]", a.c_type(), i + 1, a.len)))
             .collect();
         for (v, n) in &self.bindings {
             if let Var::Slot(off) = v
                 && self.array_index(*off).is_none()
             {
-                stack.push((*off, self.decl(*v, n)));
+                stack.push((*off, Some(*v), self.decl(*v, n)));
             }
         }
-        stack.sort_by_key(|&(base, _)| std::cmp::Reverse(base)); // closest to bp first
-        out.extend(stack.into_iter().map(|(_, d)| d));
+        stack.sort_by_key(|&(base, _, _)| std::cmp::Reverse(base)); // closest to bp first
+        out.extend(stack.into_iter().map(|(_, v, d)| (v, d)));
         out
+    }
+
+    /// The scalar [`Type`] a local is *declared* as — `Char`, `Long`, or `Int`
+    /// (the default). `None` for a pointer, whose declared type is not one of the
+    /// scalar cast targets, so no initializer cast is ever redundant against it.
+    fn declared_scalar_type(&self, v: Var) -> Option<Type> {
+        if self.char_ptrs.contains(&v) || self.ptrs.contains(&v) {
+            None
+        } else if self.longs.contains(&v) {
+            Some(Type::Long)
+        } else if self.chars.contains(&v) {
+            Some(Type::Char)
+        } else {
+            Some(Type::Int)
+        }
     }
 
     /// Render a variable reference — a reconstructed array element spells `aN[k]`,
@@ -270,6 +289,205 @@ impl Names {
         }
         self.of(v).to_string()
     }
+}
+
+/// How aggressively to fold leading `v = expr;` stores into `<type> v = expr;`
+/// initializers — a presentation choice gated by *who checks the result*.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FoldMode {
+    /// Never fold — the byte-exact split form (`int v; … v = …;`).
+    None,
+    /// Fold only the provably-safe subset (same width, side-effect/memory-free
+    /// RHS). For the *unverified* [`decompile`] path, whose output is taken on
+    /// faith; this subset round-trips byte-exactly without an oracle.
+    Conservative,
+    /// Fold every order- and scope-safe store and let the recompile verifier
+    /// reject any that aren't byte-exact. For [`crate::render_idiomatic`], which
+    /// has a compiler oracle behind it.
+    Aggressive,
+}
+
+/// Is `e` safe to fold into an initializer *without* a recompile oracle? True for
+/// constants, parameters, and (earlier) locals combined with pure operators — no
+/// global read, dereference, post-inc-deref, or call, since those can code
+/// differently on initialization than on assignment (a global `char` init even
+/// panics the recompiler).
+fn expr_is_fold_safe_unverified(e: &Expr) -> bool {
+    match e {
+        Expr::Const(_) | Expr::LongConst(_) => true,
+        Expr::Var(v) | Expr::AddrOf(v) => !matches!(v, Var::Global(_)),
+        Expr::Cast(_, a) | Expr::Not(a) | Expr::Unary(_, a) => expr_is_fold_safe_unverified(a),
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            expr_is_fold_safe_unverified(a) && expr_is_fold_safe_unverified(b)
+        }
+        Expr::Ternary(a, b, c) => {
+            expr_is_fold_safe_unverified(a)
+                && expr_is_fold_safe_unverified(b)
+                && expr_is_fold_safe_unverified(c)
+        }
+        // Memory loads and side effects: leave split unless a verifier vouches.
+        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) => false,
+    }
+}
+
+/// The storage width (bytes) of a declared local: `char` is 1, `long` is 4,
+/// everything else (`int`, `unsigned`, any pointer) is 2.
+fn var_width(v: Var, names: &Names) -> u8 {
+    if names.longs.contains(&v) {
+        4
+    } else if names.chars.contains(&v) {
+        1
+    } else {
+        2
+    }
+}
+
+/// The natural width (bytes) of an expression's value — used to spot a folded
+/// initializer that would carry an implicit conversion (a width change). Deref
+/// and call results are conservatively word-width; a genuine byte value reaches
+/// a `char` target through a `Cast`/`char` variable, which this reports as 1.
+fn expr_width(e: &Expr, names: &Names) -> u8 {
+    match e {
+        Expr::LongConst(_) => 4,
+        Expr::Var(v) => var_width(*v, names),
+        Expr::Cast(ty, _) => match ty {
+            Type::Char => 1,
+            Type::Long => 4,
+            _ => 2,
+        },
+        Expr::PostIncDeref(v, _) if names.char_ptrs.contains(v) => 1,
+        Expr::Binary(_, a, _) | Expr::Unary(_, a) => expr_width(a, names),
+        Expr::Ternary(_, b, _) => expr_width(b, names),
+        // `Const`, `AddrOf`, `Deref`, `PostIncDeref` (word ptr), `Not`, `Rel`,
+        // `Call` — all word-width in the accumulator.
+        _ => 2,
+    }
+}
+
+/// Fold a leading run of `v = expr;` assignments into their declarations as
+/// `<type> v = expr;` initializers — the form BCC source typically writes, and
+/// the one the user reads more naturally than a bare decl plus a later store.
+///
+/// `decl_order` is the byte-exact frame order of the foldable scalar locals (from
+/// [`Names::local_decl_entries`]). We fold only a *prefix* of `body` whose
+/// assignments name distinct locals in *strictly increasing* `decl_order` index.
+/// That is the exact condition under which moving the stores up to the
+/// declarations (where C runs initializers, in declaration order) preserves both
+/// their relative order and every value read — so the recompiled bytes are
+/// unchanged. We additionally require each initializer to be self-contained: it
+/// must not mention the variable being initialized (no `v = v + 1`) nor any local
+/// declared at or after it (which would be an out-of-scope forward reference).
+///
+/// Returns the `(var, init-expr)` pairs in emission order and the count of leading
+/// statements consumed (always a prefix, so the caller emits `body[consumed..]`).
+fn fold_leading_inits<'a>(
+    body: &'a [Stmt],
+    decl_order: &[Var],
+    names: &Names,
+    mode: FoldMode,
+) -> (Vec<(Var, &'a Expr)>, usize) {
+    let index_of = |v: &Var| decl_order.iter().position(|d| d == v);
+    let mut inits: Vec<(Var, &Expr)> = Vec::new();
+    let mut last_idx: Option<usize> = None;
+    let mut consumed = 0;
+    for stmt in body {
+        let Stmt::Assign(LValue::Var(v), rhs) = stmt else { break };
+        let Some(idx) = index_of(v) else { break }; // not a foldable scalar local
+        if last_idx.is_some_and(|l| idx <= l) {
+            break; // out of declaration order — folding would reorder the stores
+        }
+        // The initializer must read only locals declared strictly before this one
+        // (so they are in scope and already storable) and never the target itself.
+        // This keeps the C valid regardless of mode.
+        if expr_refs_local_at_or_after(rhs, idx, &|v| index_of(v)) {
+            break;
+        }
+        // Conservative mode (the unverified path) additionally requires byte-exact
+        // safety without an oracle: no width-crossing conversion (BCC codes
+        // `char c = anInt;` differently from the split form) and a memory-load-/
+        // side-effect-free RHS. Aggressive mode skips these and lets the verifier
+        // reject any fold that doesn't reproduce the bytes.
+        if mode == FoldMode::Conservative
+            && (var_width(*v, names) != expr_width(rhs, names)
+                || !expr_is_fold_safe_unverified(rhs))
+        {
+            break;
+        }
+        inits.push((*v, rhs));
+        last_idx = Some(idx);
+        consumed += 1;
+    }
+    (inits, consumed)
+}
+
+/// Does `e` read a foldable local whose `decl_order` index is `>= idx`? Such a
+/// reference would be a forward reference (declared later, hence out of scope at
+/// this initializer) or a self-reference (the variable being initialized) — either
+/// way it blocks folding. `pos(v)` is the local's index, or `None` if it isn't a
+/// foldable scalar local (params/globals/array elements never block).
+fn expr_refs_local_at_or_after(e: &Expr, idx: usize, pos: &dyn Fn(&Var) -> Option<usize>) -> bool {
+    let blocks = |v: &Var| pos(v).is_some_and(|ridx| ridx >= idx);
+    match e {
+        Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => blocks(v),
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            expr_refs_local_at_or_after(a, idx, pos) || expr_refs_local_at_or_after(b, idx, pos)
+        }
+        Expr::Ternary(a, b, c) => {
+            expr_refs_local_at_or_after(a, idx, pos)
+                || expr_refs_local_at_or_after(b, idx, pos)
+                || expr_refs_local_at_or_after(c, idx, pos)
+        }
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => {
+            expr_refs_local_at_or_after(a, idx, pos)
+        }
+        Expr::Call(_, args) => args.iter().any(|a| expr_refs_local_at_or_after(a, idx, pos)),
+        Expr::Const(_) | Expr::LongConst(_) => false,
+    }
+}
+
+/// Emit the local declarations (with leading initializers folded in when
+/// `mode`) followed by the function body. Shared by the program path
+/// ([`emit_function`]) and the single-function path ([`to_c_full`]).
+fn emit_decls_and_body(names: &Names, body: &[Stmt], mode: FoldMode, out: &mut String) {
+    let entries = names.local_decl_entries();
+    let decl_order: Vec<Var> = entries.iter().filter_map(|&(v, _)| v).collect();
+    let (inits, consumed) = if mode == FoldMode::None {
+        (Vec::new(), 0)
+    } else {
+        fold_leading_inits(body, &decl_order, names, mode)
+    };
+
+    for (v, decl) in &entries {
+        match v.and_then(|vv| inits.iter().find(|(iv, _)| *iv == vv)) {
+            Some((var, init)) => {
+                // In `T v = (T)e`, the cast is implied by the declared type — the
+                // *initializer* applies that conversion whether or not it is
+                // written, and (because the recovery's cast and the declaration
+                // narrow to the same width) the bytes are identical either way. So
+                // drop a redundant cast-to-own-type: it is the spelling the source
+                // actually used (`char c = x`, not `char c = (char)x`). A *store*
+                // keeps its cast — there it forces the byte load and is not
+                // redundant — but stores are not folded here.
+                let shown = strip_redundant_init_cast(init, *var, names);
+                let _ = writeln!(out, "  {decl} = {};", expr_str(shown, names));
+            }
+            None => {
+                let _ = writeln!(out, "  {decl};");
+            }
+        }
+    }
+    emit_block(&body[consumed..], 1, true, names, out);
+}
+
+/// Strip a cast that the declaration already implies: `(T)e` initializing a
+/// `T`-typed local renders as `e`. Returns `init` unchanged otherwise.
+fn strip_redundant_init_cast<'a>(init: &'a Expr, var: Var, names: &Names) -> &'a Expr {
+    if let Expr::Cast(ty, inner) = init
+        && names.declared_scalar_type(var) == Some(*ty)
+    {
+        return inner;
+    }
+    init
 }
 
 /// Decompile `_TEXT` bytes to C, or `None` if it isn't fully recovered yet (some
@@ -324,18 +542,20 @@ fn emit_program(funcs: &[Function]) -> Option<String> {
         s.push_str("extern int g0();\n");
     }
     for (i, f) in funcs.iter().enumerate() {
-        emit_function(f, &format!("f{i}"), &callees, AccessForm::Subscript, &mut s)?;
+        emit_function(f, &format!("f{i}"), &callees, AccessForm::Subscript, FoldMode::Conservative, &mut s)?;
     }
     Some(s)
 }
 
 /// Emit one function of a program into `out` under `name`, resolving local calls
-/// via `callees`. Returns `None` if the function isn't complete.
+/// via `callees`. Returns `None` if the function isn't complete. `mode` selects
+/// how leading `v = expr;` stores fold into `<type> v = expr;` declarations.
 fn emit_function(
     f: &Function,
     name: &str,
     callees: &[(usize, String)],
     form: AccessForm,
+    mode: FoldMode,
     out: &mut String,
 ) -> Option<()> {
     if !f.complete {
@@ -354,10 +574,7 @@ fn emit_function(
     names.form = form;
     names.callees = callees.to_vec();
     let _ = writeln!(out, "{ret} {name}({}) {{", names.signature());
-    for decl in names.local_decls() {
-        let _ = writeln!(out, "  {decl};");
-    }
-    emit_block(&f.body, 1, true, &names, out);
+    emit_decls_and_body(&names, &f.body, mode, out);
     out.push_str("}\n");
     Some(())
 }
@@ -377,6 +594,16 @@ pub fn to_c(f: &Function) -> Option<String> {
 /// the verifier gates the choice.
 #[must_use]
 pub fn to_c_with_form(f: &Function, form: AccessForm) -> Option<String> {
+    to_c_full(f, form, FoldMode::Conservative)
+}
+
+/// Render a recovered function, choosing both the access [`form`](AccessForm) and
+/// the initializer-folding [`mode`](FoldMode). [`crate::render_idiomatic`] sweeps
+/// these axes and the recompile verifier gates the choice (so it can fold
+/// [`Aggressive`](FoldMode::Aggressive)ly); the unverified [`to_c_with_form`]
+/// defaults to the [`Conservative`](FoldMode::Conservative) byte-exact subset.
+#[must_use]
+pub(crate) fn to_c_full(f: &Function, form: AccessForm, mode: FoldMode) -> Option<String> {
     if !f.complete {
         return None;
     }
@@ -404,11 +631,7 @@ pub fn to_c_with_form(f: &Function, form: AccessForm) -> Option<String> {
         let _ = writeln!(s, "{g};");
     }
     let _ = writeln!(s, "{ret} f({}) {{", names.signature());
-    for decl in names.local_decls() {
-        let _ = writeln!(s, "  {decl};");
-    }
-
-    emit_block(&f.body, 1, true, &names, &mut s);
+    emit_decls_and_body(&names, &f.body, mode, &mut s);
     s.push_str("}\n");
     Some(s)
 }
@@ -762,6 +985,58 @@ mod tests {
 
     fn assert_roundtrips(src: &str) {
         assert_roundtrips_with(src, &CompileOpts::default());
+    }
+
+    /// Compile, decompile, and return the recovered C (no verify) — for asserting
+    /// on the *rendering* (e.g. that an initializer folded).
+    fn recover_c(src: &str) -> String {
+        let code = recompile_text(src, &CompileOpts::default()).expect("compiles");
+        decompile(&code).unwrap_or_else(|| panic!("not recovered: {src:?}"))
+    }
+
+    #[test]
+    fn leading_assignment_folds_into_its_declaration() {
+        // A same-width leading store becomes an initializer on the decl line —
+        // no bare `int v;` followed by a separate `v = …;`.
+        let c = recover_c("int f() { int x; x = 5; return x; }\n");
+        assert!(c.contains("= 5;"), "initializer folded into decl:\n{c}");
+        assert!(!c.contains("int v1;\n"), "no split bare declaration:\n{c}");
+        assert_roundtrips("int f() { int x; x = 5; return x; }\n");
+    }
+
+    #[test]
+    fn a_run_of_leading_assignments_all_fold() {
+        let c = recover_c("int f() { int x; int y; x = 5; y = x + 3; return y; }\n");
+        // Both decls carry their initializer; neither is left bare.
+        assert!(!c.contains("int v1;\n") && !c.contains("int v2;\n"), "both fold:\n{c}");
+        assert!(c.contains("= 5;") && c.contains("+ 3)"), "inits present:\n{c}");
+    }
+
+    #[test]
+    fn char_initializer_idiom_recovers_without_redundant_cast() {
+        // The init form (`char c = x`) compiles to a *byte* load — distinct from
+        // the store form's word load — so the decompiler folds it AND drops the
+        // declaration-implied cast, recovering the source's own spelling. And it
+        // still round-trips byte-exactly.
+        let c = recover_c("int f(){ int x=300; char c=x; return c; }\n");
+        assert!(c.contains("char v2 = v1;"), "clean folded init:\n{c}");
+        assert!(!c.contains("(char)"), "no redundant cast in the initializer:\n{c}");
+        assert_roundtrips("int f(){ int x=300; char c=x; return c; }\n");
+    }
+
+    #[test]
+    fn narrowing_initializer_is_not_folded() {
+        // `char c = anInt;` codes the truncation differently from `c = anInt;`,
+        // so the width-crossing store must stay a separate statement (else the
+        // round-trip would not be byte-exact). Verified end-to-end below.
+        let c = recover_c("int f(){ int x; char c; x=300; c=x; return c; }\n");
+        assert!(c.contains("= 300;"), "the int init still folds:\n{c}");
+        // The char target keeps its bare declaration and a following store.
+        assert!(c.contains("char v2;\n"), "narrowing store stays split:\n{c}");
+        assert_roundtrips_with(
+            "int f(){ int x; char c; x=300; c=x; return c; }\n",
+            &CompileOpts::default(),
+        );
     }
 
     /// Stack-local options — control flow this increment recovers uses stack
