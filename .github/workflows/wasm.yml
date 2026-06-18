@@ -68,5 +68,13 @@ jobs:
       - name: Build TypeScript + smoke tests
         run: |
           pnpm install
-          pnpm -r run build:ts
-          pnpm -r run test
+          pnpm --filter "./packages/*" run build:ts
+          pnpm --filter "./packages/*" run test
+
+      - name: Corpus explorer — manifest, typecheck, unit + integration tests, build
+        run: |
+          node scripts/gen-fixture-manifest.mjs
+          pnpm --filter @retrochains/explorer run typecheck
+          pnpm --filter @retrochains/explorer run test
+          pnpm --filter @retrochains/explorer run test:integration
+          pnpm --filter @retrochains/explorer run build

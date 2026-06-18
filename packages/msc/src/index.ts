@@ -14,7 +14,8 @@ async function ensure(): Promise<void> {
     const url = new URL("../wasm/msc_wasm_bg.wasm", import.meta.url);
     const isNode = typeof process !== "undefined" && process.versions?.node != null;
     if (isNode) {
-      const { readFile } = await import("node:fs/promises");
+      const fsmod = "node:fs/promises";
+      const { readFile } = await import(/* @vite-ignore */ fsmod);
       ready = init({ module_or_path: await readFile(url) }).then(() => undefined);
     } else {
       ready = init({ module_or_path: url }).then(() => undefined);
