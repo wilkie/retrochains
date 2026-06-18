@@ -343,9 +343,12 @@ fn var_width(v: Var, names: &Names) -> u8 {
 }
 
 /// The natural width (bytes) of an expression's value — used to spot a folded
-/// initializer that would carry an implicit conversion (a width change). Deref
-/// and call results are conservatively word-width; a genuine byte value reaches
-/// a `char` target through a `Cast`/`char` variable, which this reports as 1.
+/// initializer that would *narrow* (a wider value into a narrower slot), which is
+/// where BCC's init and store codegen diverge. Binary/ternary results take the
+/// wider operand (C's usual arithmetic conversions), so a `long` on either side
+/// is not under-counted. Deref and call results are conservatively word-width; a
+/// genuine byte value reaches a `char` target through a `Cast`/`char` variable,
+/// which this reports as 1.
 fn expr_width(e: &Expr, names: &Names) -> u8 {
     match e {
         Expr::LongConst(_) => 4,
@@ -356,8 +359,9 @@ fn expr_width(e: &Expr, names: &Names) -> u8 {
             _ => 2,
         },
         Expr::PostIncDeref(v, _) if names.char_ptrs.contains(v) => 1,
-        Expr::Binary(_, a, _) | Expr::Unary(_, a) => expr_width(a, names),
-        Expr::Ternary(_, b, _) => expr_width(b, names),
+        Expr::Unary(_, a) => expr_width(a, names),
+        Expr::Binary(_, a, b) => expr_width(a, names).max(expr_width(b, names)),
+        Expr::Ternary(_, b, c) => expr_width(b, names).max(expr_width(c, names)),
         // `Const`, `AddrOf`, `Deref`, `PostIncDeref` (word ptr), `Not`, `Rel`,
         // `Call` — all word-width in the accumulator.
         _ => 2,
@@ -403,12 +407,15 @@ fn fold_leading_inits<'a>(
             break;
         }
         // Conservative mode (the unverified path) additionally requires byte-exact
-        // safety without an oracle: no width-crossing conversion (BCC codes
-        // `char c = anInt;` differently from the split form) and a memory-load-/
-        // side-effect-free RHS. Aggressive mode skips these and lets the verifier
-        // reject any fold that doesn't reproduce the bytes.
+        // safety without an oracle: no *narrowing* store and a memory-load-/
+        // side-effect-free RHS. Narrowing — a wider RHS into a narrower slot
+        // (`char c = anInt;`) — is where BCC's init and store diverge: the init
+        // byte-loads, the store word-loads-then-stores-low. Widening (`long r =
+        // anInt;`) applies the same mandatory extension either way, so it stays
+        // byte-identical and folds. Aggressive mode skips these and lets the
+        // verifier reject any fold that doesn't reproduce the bytes.
         if mode == FoldMode::Conservative
-            && (var_width(*v, names) != expr_width(rhs, names)
+            && (expr_width(rhs, names) > var_width(*v, names)
                 || !expr_is_fold_safe_unverified(rhs))
         {
             break;
@@ -1022,6 +1029,17 @@ mod tests {
         assert!(c.contains("char v2 = v1;"), "clean folded init:\n{c}");
         assert!(!c.contains("(char)"), "no redundant cast in the initializer:\n{c}");
         assert_roundtrips("int f(){ int x=300; char c=x; return c; }\n");
+    }
+
+    #[test]
+    fn widening_initializer_folds() {
+        // `long r = i + 1;` widens an int to a long — a *mandatory* extension BCC
+        // codes identically on init and store, so it's byte-safe to fold (unlike
+        // a narrowing). Fixture 1642's shape.
+        let c = recover_c("int main(void){ int i=5; long r=i+1; return (int)r; }\n");
+        assert!(c.contains("long v2 = (v1 + 1);"), "long init folds:\n{c}");
+        assert!(!c.contains("long v2;\n"), "no split long declaration:\n{c}");
+        assert_roundtrips("int main(void){ int i=5; long r=i+1; return (int)r; }\n");
     }
 
     #[test]
