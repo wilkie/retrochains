@@ -116,9 +116,16 @@ pub(crate) fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AndSiPtrByteImm8 { imm: imm as u8 });
         }
     }
-    // `and word ptr [si], ax` — int `*p &= y` through SI.
-    if lhs == "word ptr [si]" && rhs == "ax" {
-        return Ok(Instr::AndSiPtrAx);
+    // `and word ptr [si], imm16` — int `*p &= K` through SI. BCC uses the
+    // imm16 form even for small bitwise constants (fixture 4289).
+    if lhs == "word ptr [si]" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AndSiPtrImm16 { imm: imm as u16 });
+        }
+        // `and word ptr [si], ax` — int `*p &= y` through SI.
+        if rhs == "ax" {
+            return Ok(Instr::AndSiPtrAx);
+        }
     }
     // `and word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
@@ -342,9 +349,15 @@ pub(crate) fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrSiPtrByteImm8 { imm: imm as u8 });
         }
     }
-    // `or word ptr [si], ax` — int `*p |= y` through SI.
-    if lhs == "word ptr [si]" && rhs == "ax" {
-        return Ok(Instr::OrSiPtrAx);
+    // `or word ptr [si], K|ax` — int `*p |= …` through SI (imm16 even for
+    // small constants, fixture 4288).
+    if lhs == "word ptr [si]" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::OrSiPtrImm16 { imm: imm as u16 });
+        }
+        if rhs == "ax" {
+            return Ok(Instr::OrSiPtrAx);
+        }
     }
     // `or word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
@@ -544,9 +557,15 @@ pub(crate) fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::XorSiPtrByteImm8 { imm: imm as u8 });
         }
     }
-    // `xor word ptr [si], ax` — int `*p ^= y` through SI.
-    if lhs == "word ptr [si]" && rhs == "ax" {
-        return Ok(Instr::XorSiPtrAx);
+    // `xor word ptr [si], K|ax` — int `*p ^= …` through SI (imm16 even for
+    // small constants, fixture 4290).
+    if lhs == "word ptr [si]" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::XorSiPtrImm16 { imm: imm as u16 });
+        }
+        if rhs == "ax" {
+            return Ok(Instr::XorSiPtrAx);
+        }
     }
     // `xor word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).

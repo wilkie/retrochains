@@ -1823,6 +1823,16 @@ pub enum Instr {
         offset: i16,
         imm: u16,
     },
+    /// `sub word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
+    /// r/m16,imm16 with /5=SUB (`81 2E lo hi imm_lo imm_hi`, 6 bytes).
+    /// The imm16 partner of `SubGroupSymImm8Sx`: BCC uses the wide form
+    /// when the constant doesn't fit imm8sx (`g -= 2000`, fixture 4287).
+    SubGroupSymImm16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u16,
+    },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,
@@ -2162,6 +2172,16 @@ pub enum Instr {
     OrSiPtrByteImm8 { imm: u8 },
     /// `xor byte ptr [si], imm8` — `80 34 ii`. Sibling for `^=`.
     XorSiPtrByteImm8 { imm: u8 },
+    /// `<op> word ptr [si], imm16` — Grp1 r/m16,imm16, mod=00 r/m=100
+    /// (`81 <modrm> imm_lo imm_hi`, 4 bytes). An in-place RMW through a
+    /// register-variable pointer, `*p op= K`. BCC uses the imm16 form even
+    /// for small bitwise constants (fixtures 4288–4290), and for `sub` once
+    /// the constant exceeds imm8sx (fixture 4291). modrm: /1=OR 0x0C,
+    /// /4=AND 0x24, /5=SUB 0x2C, /6=XOR 0x34.
+    OrSiPtrImm16 { imm: u16 },
+    AndSiPtrImm16 { imm: u16 },
+    XorSiPtrImm16 { imm: u16 },
+    SubSiPtrImm16 { imm: u16 },
     /// `and byte ptr [bp+<offset>], imm8` — `80 (mod=01 /4 r/m=110)
     /// dd ii` = `80 66 dd ii`. Grp1 r/m8 imm8 against a stack
     /// local. Char-local-array bitwise compound (fixture 720:

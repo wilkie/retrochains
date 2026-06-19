@@ -310,13 +310,18 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         Instr::AndGroupSymImm16 { .. }
         | Instr::OrGroupSymImm16 { .. }
         | Instr::XorGroupSymImm16 { .. }
+        | Instr::SubGroupSymImm16 { .. }
         | Instr::CmpGroupSymImm16 { .. } => 6,
         Instr::CmpGroupSymReg16 { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { offset, .. } => 1 + bp_rel_modrm_size(*offset),
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } | Instr::MovDiPtrImm { .. } => 4,
         Instr::MovBxPtrImm8 { .. } => 3,
-        Instr::AddSiPtrImm16 { .. } => 4,
+        Instr::AddSiPtrImm16 { .. }
+        | Instr::OrSiPtrImm16 { .. }
+        | Instr::AndSiPtrImm16 { .. }
+        | Instr::XorSiPtrImm16 { .. }
+        | Instr::SubSiPtrImm16 { .. } => 4,
         Instr::XorDiPtrReg16 { .. } => 2,
         Instr::MovBxPtrAl | Instr::MovBxPtrAx => 2,
         Instr::MovBxPtrReg16 { .. } => 2,

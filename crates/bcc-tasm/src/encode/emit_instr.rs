@@ -2326,6 +2326,33 @@ pub(crate) fn emit_instr(
             emit_group_sym_lea(&[0x81, 0x36], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.extend_from_slice(&imm.to_le_bytes());
         }
+        Instr::SubGroupSymImm16 { group, symbol, offset, imm } => {
+            // `sub word ptr <group>:<sym>[+N], imm16` → 81 2E lo hi imm_lo imm_hi.
+            // Grp1 r/m16,imm16 with /5=SUB (the imm16 partner of SubGroupSymImm8Sx,
+            // fixture 4287's `g -= 2000`).
+            emit_group_sym_lea(&[0x81, 0x2E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::OrSiPtrImm16 { imm } => {
+            // `or word ptr [si], imm16` → 81 0C imm_lo imm_hi (mod=00 /1 r/m=100).
+            out.extend_from_slice(&[0x81, 0x0C]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AndSiPtrImm16 { imm } => {
+            // `and word ptr [si], imm16` → 81 24 imm_lo imm_hi (mod=00 /4 r/m=100).
+            out.extend_from_slice(&[0x81, 0x24]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::XorSiPtrImm16 { imm } => {
+            // `xor word ptr [si], imm16` → 81 34 imm_lo imm_hi (mod=00 /6 r/m=100).
+            out.extend_from_slice(&[0x81, 0x34]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::SubSiPtrImm16 { imm } => {
+            // `sub word ptr [si], imm16` → 81 2C imm_lo imm_hi (mod=00 /5 r/m=100).
+            out.extend_from_slice(&[0x81, 0x2C]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {
             // `lea r16, word ptr [bp+disp]` → 8D /<dst> [bp+disp].

@@ -162,9 +162,19 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     // `sub word ptr <group>:<sym>[+N], imm8sx` — read-modify-write
     // on a data-segment global (low-half of long `g--`, fixture 250).
     if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
         if let Some(imm) = parse_imm8_signed(rhs) {
-            let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::SubGroupSymImm8Sx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
+        }
+        // `sub word ptr <group>:<sym>, imm16` — the wide form when the
+        // constant doesn't fit imm8sx (`g -= 2000`, fixture 4287).
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SubGroupSymImm16 {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,
@@ -219,6 +229,11 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "word ptr [si]" {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::SubSiPtrImm8 { imm });
+        }
+        // Wide-immediate sibling for constants outside imm8sx (`*p -= 2000`,
+        // fixture 4291).
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SubSiPtrImm16 { imm: imm as u16 });
         }
         if rhs == "ax" {
             return Ok(Instr::SubSiPtrAx);
