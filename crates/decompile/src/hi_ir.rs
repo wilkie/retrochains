@@ -791,6 +791,11 @@ struct Ctx {
     char_array_bases: Vec<i16>,
     /// Local-array bases dereferenced as a `dx:ax` word pair — `long` arrays.
     long_array_bases: Vec<i16>,
+    /// `true` until the first non-frame op — distinguishes a prologue register
+    /// save (`push si`/`push di`, balanced by the epilogue) from a mid-body
+    /// `push si/di`, which (since si/di are callee-saved) is never a save in the
+    /// caller and is therefore a CALL ARGUMENT.
+    in_prologue: bool,
     complete: bool,
     returns_value: bool,
     returns_long: bool,
@@ -1476,6 +1481,12 @@ impl Ctx {
                 continue;
             }
             self.cur = i; // blame this op if the arm below bails (see `cant`)
+            // The prologue is `Enter` + the register saves; the first other op
+            // ends it. After that a `push si/di` can't be a save (si/di are
+            // callee-saved) — it's a call argument (see the `SaveReg` arm).
+            if !matches!(self.insns[i].op, LoOp::Enter { .. } | LoOp::SaveReg { .. }) {
+                self.in_prologue = false;
+            }
             match self.insns[i].op.clone() {
                 // Frame setup/teardown carry no value. `cbw`/`cwd` are sign
                 // promotions the accumulator already reflects — `cbw` is the
@@ -1483,10 +1494,23 @@ impl Ctx {
                 // dividend (the fold's accumulator is that dividend).
                 LoOp::Enter { .. }
                 | LoOp::Leave
-                | LoOp::SaveReg { .. }
                 | LoOp::RestoreReg { .. }
                 | LoOp::Cleanup { .. }
                 | LoOp::Promote { kind: Promote::Cbw } => {}
+
+                // A prologue `push si/di` is a register save (no value). The same
+                // op MID-BODY is a call ARGUMENT — si/di are callee-saved, so the
+                // caller never pushes them to survive a call; it only pushes them
+                // to pass them. Recover it as an arg (`f(a++)` etc. with the
+                // variable in a register), which the lift can't tell from a save.
+                LoOp::SaveReg { reg } => {
+                    if !self.in_prologue {
+                        match self.operand(Place::Reg(reg)) {
+                            Some(e) => pending_args.push(e),
+                            None => self.cant(),
+                        }
+                    }
+                }
 
                 // `cwd` sign-extends `ax` into `dx:ax`. Feeding an `idiv` it just
                 // sets up the dividend (a no-op — the accumulator already is it);
@@ -3778,6 +3802,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         bitfield_globals: std::collections::HashMap::new(),
         char_array_bases: Vec::new(),
         long_array_bases: Vec::new(),
+        in_prologue: true,
         complete: true,
         returns_value: false,
         returns_long: false,
