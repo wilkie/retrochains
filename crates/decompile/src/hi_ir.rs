@@ -1075,7 +1075,7 @@ impl Ctx {
     /// (the shifts and the and). The mask must be exactly `2^w-1` (a low-bit
     /// mask); the absence of a `cbw`/`mov ah,0` between the load and the shift/and
     /// is what distinguishes this from a scalar `char & K`.
-    fn bitfield_read_at(&self, i: usize, _g: u16) -> Option<(u8, u8, usize)> {
+    fn bitfield_read_at(&self, i: usize, addr: u16) -> Option<(u8, u8, usize)> {
         let is_shr1 = |op: &LoOp| {
             matches!(
                 op,
@@ -1114,6 +1114,11 @@ impl Ctx {
         if bit_off + width > 8 {
             return None;
         }
+        // `bit_off` so far is the shift within the LOADED byte. Promote it to the
+        // 2-byte UNIT: a load at an odd address (`mov al,[g+1]`) is byte 1 of the
+        // unit at `g & ~1`, so the field's unit bit offset gains 8 (`b.z` after
+        // `x:4;y:4` is bit 8). `bit_off + width <= 16` always holds.
+        let bit_off = (u8::try_from(addr & 1).unwrap()) * 8 + bit_off;
         Some((bit_off, width, j - i))
     }
 
@@ -1140,15 +1145,17 @@ impl Ctx {
         if field_mask == 0 {
             return None;
         }
-        let bit_off = field_mask.trailing_zeros() as u8;
+        let bit_in_byte = field_mask.trailing_zeros() as u8;
         let width = field_mask.count_ones() as u8;
         // Contiguous?  And the OR value must sit entirely within the field.
-        let expected = ((u16::from((1u16 << width) - 1)) << bit_off) as u8;
+        let expected = ((u16::from((1u16 << width) - 1)) << bit_in_byte) as u8;
         let ob = (o as u32) as u8;
         if field_mask != expected || (ob & !field_mask) != 0 {
             return None;
         }
-        Some((bit_off, width, i32::from(ob >> bit_off)))
+        // Promote to the 2-byte unit: a write to an odd address is byte 1.
+        let bit_off = (u8::try_from(g & 1).unwrap()) * 8 + bit_in_byte;
+        Some((bit_off, width, i32::from(ob >> bit_in_byte)))
     }
 
     /// A byte-width destination: note the variable as `char` and return it.
@@ -1798,17 +1805,18 @@ impl Ctx {
                 // no scalar `char`/`int` form reproduces it. Recover `g.fK`;
                 // record the field so the emitter synthesizes the struct. The
                 // global must NOT also be accessed raw (checked post-recovery).
-                // Even offset only: the `gvN`↔offset naming is word-spaced, so an
-                // odd load address (a field in a higher byte of a multi-byte
-                // struct, e.g. `z` after `x:4;y:4`) would mis-map — those need the
-                // struct-base-vs-field-offset model (a later slice); decline them.
+                // A load at an odd address is a field in byte 1 of the 2-byte
+                // unit at `g & ~1` (`b.z` after `x:4;y:4`); `bitfield_read_at`
+                // returns the unit-relative bit offset, and the struct is keyed
+                // by the (even) unit base.
                 LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::Global(g) }
-                    if g % 2 == 0 && self.bitfield_read_at(i, g).is_some() =>
+                    if self.bitfield_read_at(i, g).is_some() =>
                 {
                     flush_call(&mut acc, out);
                     let (bit_off, width, consumed) = self.bitfield_read_at(i, g).unwrap();
-                    self.bitfield_globals.entry(g).or_default().insert((bit_off, width));
-                    acc = Some(Expr::Bitfield { global: g, bit_off, width });
+                    let unit = g & !1;
+                    self.bitfield_globals.entry(unit).or_default().insert((bit_off, width));
+                    acc = Some(Expr::Bitfield { global: unit, bit_off, width });
                     skip = consumed;
                 }
 
@@ -2312,22 +2320,24 @@ impl Ctx {
                 // (array-vs-scalars); a byte register goes via `Bin` (Place::Byte
                 // is already char).
                 // Bit-field WRITE: the clear+set pair `and byte[g],~mask; or
-                // byte[g],v<<off` → `gvN.fK = v`. Even global only (the gvN
-                // naming is word-spaced). Recovering it (instead of the raw
-                // `gv &= ~m; gv |= v`) is what lets a global that is ALSO read as
-                // a bit-field stay consistent — both sides become struct ops and
-                // the mixed-access guard doesn't fire.
+                // byte[g],v<<off` → `gvN.fK = v`. Recovering it (instead of the
+                // raw `gv &= ~m; gv |= v`) is what lets a global that is ALSO read
+                // as a bit-field stay consistent — both sides become struct ops
+                // and the mixed-access guard doesn't fire. An odd address is byte
+                // 1 of the unit at `g & ~1` (`bitfield_write_pair_at` returns the
+                // unit-relative bit offset).
                 LoOp::BinByte {
                     dst: Place::Global(g),
                     op: BinOp::And,
                     lhs: Place::Global(lg),
                     rhs: Place::Imm(_),
-                } if g == lg && g % 2 == 0 && self.bitfield_write_pair_at(i).is_some() => {
+                } if g == lg && self.bitfield_write_pair_at(i).is_some() => {
                     flush_call(&mut acc, out);
                     let (bit_off, width, value) = self.bitfield_write_pair_at(i).unwrap();
-                    self.bitfield_globals.entry(g).or_default().insert((bit_off, width));
+                    let unit = g & !1;
+                    self.bitfield_globals.entry(unit).or_default().insert((bit_off, width));
                     out.push(Stmt::Assign(
-                        LValue::Bitfield { global: g, bit_off, width },
+                        LValue::Bitfield { global: unit, bit_off, width },
                         Expr::Const(value),
                     ));
                     skip = 1; // the paired `or`
