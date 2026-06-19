@@ -1558,6 +1558,17 @@ mod tests {
     }
 
     #[test]
+    fn reg_source_plain_deref_compound_roundtrips() {
+        // `*p op= v` with a variable RHS through a register-resident pointer — the
+        // mem-dest ALU `<op> [si],ax`. An offset-0 struct field reads the same.
+        assert_roundtrips(
+            "struct S{int x;int y;}; int main(){ int y; struct S *p; struct S a; \
+             y = 5; p = &a; p->x += y; return 0; }\n",
+        );
+        assert_roundtrips("int main(){ int x; int *p; int y; p = &x; y = 3; *p ^= y; return 0; }\n");
+    }
+
+    #[test]
     fn global_address_and_reg_source_field_compound_roundtrip() {
         // A pointer assigned a global's address (`p = &g`) — the immediate is the
         // data-segment offset, recovered as `&g` (a 3-byte `mov`, not `xor`/0).

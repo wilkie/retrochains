@@ -483,6 +483,26 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluMemReg, pat: &[L(0x21), DISP16, A, A] },
     Def { idiom: Idiom::AluMemReg, pat: &[L(0x31), DISP16, A, A] },
     Def { idiom: Idiom::AluMemReg, pat: &[L(0x39), DISP16, A, A] },
+    // `op [si/di/bx], reg` — reg-source plain-deref compound `*p op= v`
+    // (mod=00, no displacement). Offset-0 struct field reads the same.
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x01), M(0xc7, 0x04)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x01), M(0xc7, 0x05)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x01), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x29), M(0xc7, 0x04)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x29), M(0xc7, 0x05)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x29), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x09), M(0xc7, 0x04)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x09), M(0xc7, 0x05)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x09), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x21), M(0xc7, 0x04)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x21), M(0xc7, 0x05)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x21), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x31), M(0xc7, 0x04)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x31), M(0xc7, 0x05)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x31), M(0xc7, 0x07)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x39), M(0xc7, 0x04)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x39), M(0xc7, 0x05)] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x39), M(0xc7, 0x07)] },
     // `op [si/di/bx + disp8], reg` — mem-dest RMW at a constant offset
     // (struct field / element compound with a variable RHS, `s->y += v`).
     Def { idiom: Idiom::AluMemReg, pat: &[L(0x01), M(0xc7, 0x44), A] },

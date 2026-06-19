@@ -413,6 +413,8 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let op = alu_op(bytes[0] | 0x02);
             let place = match m & 0xc7 {
                 0x06 => Global(u16_at(bytes, 2)),
+                // `[si]/[di]/[bx]` (mod=00) — a plain-deref dest `*p op= reg`.
+                0x04 | 0x05 | 0x07 => Deref(deref_base(m)),
                 0x44 | 0x45 | 0x47 => DerefDisp(deref_base(m), disp8_at(bytes, 2)),
                 _ => Local(disp8_at(bytes, 2)),
             };
