@@ -5071,6 +5071,24 @@ pub(crate) fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: 
         }
         return;
     }
+    // `*gp op= K` bitwise compound (`|=`/`&=`/`^=`) → in-place `<op> [bx],K` with
+    // the same byte/word/imm rules as a direct local (small ≤0xFF uses the byte
+    // form). Fixtures 4299-4301. Reuses the shared `[bx]` bitwise emitter; the
+    // ModR/M's reg field selects the op (/1 OR, /4 AND, /6 XOR).
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::DerefWord { ptr } if matches!(ptr.as_ref(), Expr::Global(g) if *g == global_idx))
+        && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let reg = match op {
+            BinOp::BitOr => 1u8,
+            BinOp::BitAnd => 4u8,
+            BinOp::BitXor => 6u8,
+            _ => unreachable!(),
+        };
+        emit_bitwise_inplace_bx(*op, 0x46 | (reg << 3), k, false, out);
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         // `c7 07 imm16` — mov word ptr [bx], imm16.

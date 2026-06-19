@@ -2374,6 +2374,34 @@ pub(crate) fn emit_instr(
             out.extend_from_slice(&[0x81, 0x2D]);
             out.extend_from_slice(&imm.to_le_bytes());
         }
+        Instr::AddDiPtrImm8 { imm } => {
+            // `add word ptr [di], imm8sx` → 83 05 ii (mod=00 /0 r/m=101).
+            out.extend_from_slice(&[0x83, 0x05, *imm as u8]);
+        }
+        Instr::SubDiPtrImm8 { imm } => {
+            // `sub word ptr [di], imm8sx` → 83 2D ii (mod=00 /5 r/m=101).
+            out.extend_from_slice(&[0x83, 0x2D, *imm as u8]);
+        }
+        // `<op> word ptr [bx], imm` — mod=00 r/m=111.
+        Instr::OrBxPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x0F]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AndBxPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x27]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::XorBxPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x37]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::SubBxPtrImm8 { imm } => {
+            out.extend_from_slice(&[0x83, 0x2F, *imm as u8]);
+        }
+        Instr::SubBxPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x2F]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {
             // `lea r16, word ptr [bp+disp]` → 8D /<dst> [bp+disp].

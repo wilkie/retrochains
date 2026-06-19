@@ -326,7 +326,11 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         | Instr::OrDiPtrImm16 { .. }
         | Instr::AndDiPtrImm16 { .. }
         | Instr::XorDiPtrImm16 { .. }
-        | Instr::SubDiPtrImm16 { .. } => 4,
+        | Instr::SubDiPtrImm16 { .. }
+        | Instr::OrBxPtrImm16 { .. }
+        | Instr::AndBxPtrImm16 { .. }
+        | Instr::XorBxPtrImm16 { .. }
+        | Instr::SubBxPtrImm16 { .. } => 4,
         Instr::XorDiPtrReg16 { .. } => 2,
         Instr::MovBxPtrAl | Instr::MovBxPtrAx => 2,
         Instr::MovBxPtrReg16 { .. } => 2,
@@ -342,7 +346,8 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16FromDiPtr { .. } => 2,
         Instr::MovReg16DiDisp { .. } => 3,
         Instr::MovReg16FromBxPtr { .. } => 2,
-        Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } | Instr::SubSiPtrImm8 { .. } => 3,
+        Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } | Instr::SubSiPtrImm8 { .. }
+        | Instr::AddDiPtrImm8 { .. } | Instr::SubDiPtrImm8 { .. } | Instr::SubBxPtrImm8 { .. } => 3,
         Instr::AndSiPtrByteImm8 { .. }
         | Instr::OrSiPtrByteImm8 { .. }
         | Instr::XorSiPtrByteImm8 { .. } => 3,

@@ -1,0 +1,5 @@
+description = "Two-pointer deref compound -= small const (si + di imm8). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
+inputs = ["HELLO.C"]

@@ -2191,6 +2191,21 @@ pub enum Instr {
     AndDiPtrImm16 { imm: u16 },
     XorDiPtrImm16 { imm: u16 },
     SubDiPtrImm16 { imm: u16 },
+    /// `add`/`sub word ptr [di], imm8sx` — the small-constant imm8sx forms
+    /// (`83 05 ii` / `83 2D ii`), siblings of `AddSiPtrImm8`/`SubSiPtrImm8`
+    /// (fixtures 4297/4298: `*q += 3` / `*q -= 5` through a DI pointer).
+    AddDiPtrImm8 { imm: i8 },
+    SubDiPtrImm8 { imm: i8 },
+    /// `<op> word ptr [bx], imm` — deref through a pointer loaded into BX (e.g. a
+    /// global pointer `*gp op= K` = `mov bx,[gp]; op [bx],K`, fixtures 4299-4302).
+    /// modrm rm=111: /1=OR 0x0F, /4=AND 0x27, /5=SUB 0x2F, /6=XOR 0x37. Bitwise is
+    /// always imm16; `sub` is imm8sx (`83 2F ii`) or imm16. (`add [bx]` already
+    /// exists as `AddBxPtrImm8`/`AddBxPtrImm16`.)
+    OrBxPtrImm16 { imm: u16 },
+    AndBxPtrImm16 { imm: u16 },
+    XorBxPtrImm16 { imm: u16 },
+    SubBxPtrImm8 { imm: i8 },
+    SubBxPtrImm16 { imm: u16 },
     /// `and byte ptr [bp+<offset>], imm8` — `80 (mod=01 /4 r/m=110)
     /// dd ii` = `80 66 dd ii`. Grp1 r/m8 imm8 against a stack
     /// local. Char-local-array bitwise compound (fixture 720:

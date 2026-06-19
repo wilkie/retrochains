@@ -239,11 +239,24 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SubSiPtrAx);
         }
     }
-    // `sub word ptr [di], imm16` — `*q -= K` (wide const) through a DI pointer
-    // (fixture 4295); small consts use imm8sx.
-    if lhs == "word ptr [di]" && parse_imm8_signed(rhs).is_none() {
+    // `sub word ptr [di], imm` — `*q -= K` through a DI pointer: imm8sx form
+    // (`83 2D ii`, fixture 4298) or the wide imm16 (fixture 4295).
+    if lhs == "word ptr [di]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SubDiPtrImm8 { imm });
+        }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::SubDiPtrImm16 { imm: imm as u16 });
+        }
+    }
+    // `sub word ptr [bx], imm` — `*gp -= K` through a pointer in BX (fixture
+    // 4302): imm8sx (`83 2F ii`) or the wide imm16.
+    if lhs == "word ptr [bx]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SubBxPtrImm8 { imm });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SubBxPtrImm16 { imm: imm as u16 });
         }
     }
     // `sub word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
@@ -779,9 +792,12 @@ pub(crate) fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AddSiPtrAx);
         }
     }
-    // `add word ptr [di], imm16` — `*q += K` through a DI pointer (a second
-    // pointer, fixture 4296). Wide form only; small consts use imm8sx (83).
-    if lhs == "word ptr [di]" && parse_imm8_signed(rhs).is_none() {
+    // `add word ptr [di], imm` — `*q += K` through a DI pointer (a second
+    // pointer): imm8sx form (`83 05 ii`, fixture 4297) or the wide imm16.
+    if lhs == "word ptr [di]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AddDiPtrImm8 { imm });
+        }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddDiPtrImm16 { imm: imm as u16 });
         }
