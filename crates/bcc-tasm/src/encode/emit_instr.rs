@@ -375,6 +375,12 @@ pub(crate) fn emit_instr(
             out.push(0x03);
             out.push(0x05);
         }
+        Instr::AddAxFromBxSi => {
+            // `add ax,word ptr [bx+si]` → 03 00. ModR/M 00 = mod=00
+            // reg=AX r/m=000 ([bx+si]).
+            out.push(0x03);
+            out.push(0x00);
+        }
         Instr::AddReg16FromBxPtr { reg } => {
             // `add <reg16>, word ptr [bx]` → 03 (mod=00 reg=<r>
             // r/m=111). Memory-direct add through BX to any
@@ -1464,6 +1470,10 @@ pub(crate) fn emit_instr(
         Instr::MovAlFromBxSi => {
             // `mov al,byte ptr [bx+si]` → 8A 00.
             out.push(0x8A); out.push(0x00);
+        }
+        Instr::MovAxFromBxSi => {
+            // `mov ax,word ptr [bx+si]` → 8B 00.
+            out.push(0x8B); out.push(0x00);
         }
         Instr::MovAlFromBxDi => {
             // `mov al,byte ptr [bx+di]` → 8A 01.

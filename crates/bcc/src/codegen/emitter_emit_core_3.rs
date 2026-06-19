@@ -206,6 +206,32 @@ impl<'a> super::FunctionEmitter<'a> {
                 panic!("`*p` as right operand of a binary op only supported for register-resident local pointers (no fixture for {:?})", inner.kind)
             }
             ExprKind::ArrayIndex { array, index } => {
+                // `<reg-ptr>-><array-field>[i]` with a variable index
+                // as a binary operand — scale the index into BX, then
+                // read through the two-register `[bx+si+field_off]`
+                // form (the pointer is enregistered in SI). Mirrors the
+                // rvalue read in emit_array_index_to_ax. Probe fixture
+                // 9001 (`s->a[i] + s->a[i]`).
+                if let ExprKind::Member {
+                    base, field, kind: crate::ast::MemberKind::Arrow,
+                } = &array.kind
+                    && let ExprKind::Ident(p_name) = &base.kind
+                    && self.locals.has(p_name)
+                    && let LocalLocation::Reg(p_reg) = self.locals.location_of(p_name)
+                    && let Some(pointee) = self.locals.type_of(p_name).pointee()
+                    && let Some((field_off, field_ty)) = pointee.field(field)
+                    && let Some(elem_ty) = field_ty.array_elem()
+                    && try_const_eval(index).is_none()
+                {
+                    let elem_ty = elem_ty.clone();
+                    let field_off = i16::try_from(field_off).unwrap_or(i16::MAX);
+                    self.emit_index_into_bx(index, &elem_ty);
+                    return OperandSource::TwoRegOffset {
+                        base: crate::codegen::locals::Reg::Bx,
+                        index: p_reg,
+                        offset: field_off,
+                    };
+                }
                 // `g[K]` where `g` is a file-scope array — fold to
                 // `word ptr DGROUP:_g+(K*stride)`. Fixture 189 emits
                 // `add ax, word ptr DGROUP:_a+2` for `a[1]`.

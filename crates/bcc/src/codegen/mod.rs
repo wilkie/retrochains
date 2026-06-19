@@ -402,6 +402,20 @@ fn bp_addr(off: i16) -> String {
     }
 }
 
+/// Two-register addressing `[base+index{+disp}]`, e.g. `[bx+si+4]`.
+/// Used for struct-pointer array-field access where the scaled index
+/// is in `base` and the enregistered pointer is in `index`.
+fn two_reg_addr(base: Reg, index: Reg, disp: i32) -> String {
+    let (b, i) = (base.name(), index.name());
+    if disp == 0 {
+        format!("[{b}+{i}]")
+    } else if disp > 0 {
+        format!("[{b}+{i}+{disp}]")
+    } else {
+        format!("[{b}+{i}-{}]", -disp)
+    }
+}
+
 /// Flatten an aggregate initializer to its little-endian byte image,
 /// matching what BCC would place in the `s@` block / `_DATA` segment
 /// for a stack array init.
@@ -1636,6 +1650,12 @@ enum OperandSource {
     /// `K` is constant — addressed as `<width> ptr [<reg>+<off>]`.
     /// Fixture 1472 (`sum`: `add ax, [si+2]` for `p[1]`).
     DerefRegOffset { reg: Reg, offset: i16 },
+    /// Two-register `<width> ptr [<base>+<index>+<off>]` — used for
+    /// `<reg-ptr>-><array-field>[i]` where the scaled index sits in
+    /// `base` (BX) and the enregistered pointer in `index` (SI). The
+    /// caller emits the index scaling before reading the operand.
+    /// Probe fixture 9001 (`s->a[i] + s->a[i]`).
+    TwoRegOffset { base: Reg, index: Reg, offset: i16 },
     /// Operand value has already been emitted into AX. Used when the
     /// resolver had to compute a non-trivial address (e.g. `lea ax,
     /// [bp+N]` for `<local_arr> + <const>`). Fixture 1814.
@@ -1676,6 +1696,9 @@ impl OperandSource {
                 } else {
                     format!("word ptr [{}-{}]", reg.name(), -offset)
                 }
+            }
+            Self::TwoRegOffset { base, index, offset } => {
+                format!("word ptr {}", two_reg_addr(*base, *index, i32::from(*offset)))
             }
             Self::Ax => "ax".to_owned(),
         }
@@ -1722,6 +1745,9 @@ impl OperandSource {
                 } else {
                     format!("byte ptr [{}-{}]", reg.name(), -offset)
                 }
+            }
+            Self::TwoRegOffset { base, index, offset } => {
+                format!("byte ptr {}", two_reg_addr(*base, *index, i32::from(*offset)))
             }
             Self::Ax => "al".to_owned(),
         }

@@ -172,6 +172,120 @@ impl<'a> super::FunctionEmitter<'a> {
         }
         self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
     }
+    /// `add bx, <index>` for a stride-1 (char) struct-ptr array-field
+    /// subscript, where BX already holds the base pointer. BCC adds
+    /// the index operand straight from its home — `add bx,word ptr
+    /// [bp+i]` for a stack int, `add bx,<reg>` for an enregistered
+    /// one. Falls back to AX for anything more complex.
+    fn emit_add_bx_index(&mut self, idx: &Expr) {
+        if let Some(src) = self.int_lvalue_src(idx) {
+            if is_reg16_name(&src) {
+                let _ = write!(self.out, "\tadd\tbx,{src}\r\n");
+            } else {
+                let _ = write!(self.out, "\tadd\tbx,word ptr {src}\r\n");
+            }
+            return;
+        }
+        // General index: materialize into AX, then fold into BX.
+        self.emit_expr_to_ax(idx);
+        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+    }
+    /// Emit the effective-address setup for `<ptr>-><array-field>[i]`
+    /// with a variable index, leaving the element reachable through
+    /// the returned addressing string. Shared by the rvalue read and
+    /// the `= v` store so the two never diverge.
+    ///
+    ///   - pointer enregistered in SI (multi-use): scale the index
+    ///     into BX → `[bx+si+field_off]`.
+    ///   - pointer on the stack (single-use): combine `ptr + i*stride`
+    ///     into BX. An int field scales the index through AX
+    ///     (`mov ax,<i>; shl ax,1; mov bx,<ptr>; add bx,ax`); a char
+    ///     field adds the index operand straight (`mov bx,<ptr>; add
+    ///     bx,<i>`). Address → `[bx+field_off]`.
+    pub(crate) fn emit_sptr_array_field_addr(
+        &mut self,
+        p_name: &str,
+        field_off: i32,
+        elem_ty: &Type,
+        index: &Expr,
+    ) -> String {
+        match self.locals.location_of(p_name) {
+            LocalLocation::Reg(p_reg) => {
+                self.emit_index_into_bx(index, elem_ty);
+                two_reg_addr(Reg::Bx, p_reg, field_off)
+            }
+            LocalLocation::Stack(ptr_off) => {
+                let stride = elem_ty.size_bytes();
+                if stride == 1 {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(ptr_off));
+                    self.emit_add_bx_index(index);
+                } else {
+                    let shifts = match stride {
+                        2 => 1,
+                        4 => 2,
+                        _ => panic!("unsupported struct-ptr array-field stride {stride}"),
+                    };
+                    self.emit_expr_to_ax(index);
+                    for _ in 0..shifts {
+                        self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                    }
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(ptr_off));
+                    self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                }
+                if field_off == 0 {
+                    "[bx]".to_owned()
+                } else if field_off > 0 {
+                    format!("[bx+{field_off}]")
+                } else {
+                    format!("[bx-{}]", -field_off)
+                }
+            }
+        }
+    }
+    /// `<ptr>-><array-field>[i] = v` — store into an array-field
+    /// element reached through a struct pointer with a variable index.
+    /// Computes the element address (shared helper) then stores the
+    /// value: an int field through AX, a char field through AL (low
+    /// byte loaded straight, matching real BCC). Probe fixture 9001.
+    pub(crate) fn emit_sptr_array_field_assign(
+        &mut self,
+        p_name: &str,
+        field: &str,
+        index: &Expr,
+        value: &Expr,
+    ) {
+        let pointee = self
+            .locals
+            .type_of(p_name)
+            .pointee()
+            .expect("struct-ptr array-field assign on non-pointer")
+            .clone();
+        let (field_off, field_ty) = pointee
+            .field(field)
+            .unwrap_or_else(|| panic!("`{p_name}->{field}[i] = v`: no such field"));
+        let elem_ty = field_ty
+            .array_elem()
+            .expect("struct-ptr array-field assign field is not an array")
+            .clone();
+        let field_off = i32::from(field_off);
+        let addr = self.emit_sptr_array_field_addr(p_name, field_off, &elem_ty, index);
+        if elem_ty.is_char_like() {
+            if let Some(v) = try_const_eval(value) {
+                let _ = write!(self.out, "\tmov\tbyte ptr {addr},{}\r\n", v & 0xFF);
+            } else if let Some(rhs_byte) = self.rhs_byte_addr(&value.kind) {
+                let _ = write!(self.out, "\tmov\tal,{rhs_byte}\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr {addr},al\r\n");
+            } else {
+                self.emit_expr_to_ax(value);
+                let _ = write!(self.out, "\tmov\tbyte ptr {addr},al\r\n");
+            }
+        } else if let Some(v) = try_const_eval(value) {
+            let _ = write!(self.out, "\tmov\tword ptr {addr},{}\r\n", v & 0xFFFF);
+        } else {
+            self.emit_expr_to_ax(value);
+            let _ = write!(self.out, "\tmov\tword ptr {addr},ax\r\n");
+        }
+    }
     /// `a[<index>]` in rvalue position. The `array` side can be:
     /// - An ident referencing a local array (077, 078, 082, 079).
     ///   Constant index → direct `[bp-K]` load; variable index → the
@@ -462,6 +576,32 @@ impl<'a> super::FunctionEmitter<'a> {
                 self.emit_widen_al(&elem_ty);
             } else {
                 let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
+        // `<ptr>-><array-field>[i]` with a VARIABLE index — subscript
+        // of an array field reached through a struct pointer. Element
+        // address = ptr + field_off + i*stride. Two shapes depending
+        // on whether the pointer enregisters (multi-use → SI, the
+        // two-register `[bx+si+K]` form) or stays on the stack
+        // (single-use → combine the scaled index into BX). Probe
+        // fixture 9001; reg form mirrors fixture 2208's `pts[i].x`.
+        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Arrow } = &array.kind
+            && let ExprKind::Ident(p_name) = &base.kind
+            && self.locals.has(p_name)
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+            && let Some((field_off, field_ty)) = pointee.field(field)
+            && let Some(elem_ty) = field_ty.array_elem()
+            && try_const_eval(index).is_none()
+        {
+            let elem_ty = elem_ty.clone();
+            let field_off = i32::from(field_off);
+            let addr = self.emit_sptr_array_field_addr(p_name, field_off, &elem_ty, index);
+            if elem_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.emit_widen_al(&elem_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
             }
             return;
         }

@@ -188,6 +188,9 @@ pub(crate) fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "word ptr [bx]" {
             return Ok(Instr::MovAxFromBxPtr);
         }
+        if rhs == "word ptr [bx+si]" {
+            return Ok(Instr::MovAxFromBxSi);
+        }
         // `mov ax,word ptr [si+disp8]` — high-half read of `*p`
         // for `p: long *` (fixture 309).
         if let Some(disp) = parse_word_si_disp(rhs) {

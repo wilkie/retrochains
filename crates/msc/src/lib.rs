@@ -1104,6 +1104,14 @@ pub enum AssignTarget {
     /// pointer parameter. Codegen: `mov bx, [bp+pdisp];
     /// c7 47 off imm16` (word) / `c6 47 off imm8` (byte).
     DerefParamField { ptr_param: usize, byte_off: u16, size: u8 },
+    /// `s->a[i] = v;` — store into an ARRAY field reached through a struct
+    /// pointer PARAM with a RUNTIME index. Mirrors
+    /// [`crate::Expr::DerefParamArrayField`]'s addressing (register roles swap by
+    /// `field_off`). Probe fixture 9001.
+    DerefParamArrayField { ptr_param: usize, field_off: u16, elem_size: u8, index: Box<Expr> },
+    /// `s->a[i] = v;` for a struct-pointer LOCAL. Sibling of
+    /// [`AssignTarget::DerefParamArrayField`].
+    DerefLocalArrayField { ptr_local: usize, field_off: u16, elem_size: u8, index: Box<Expr> },
     /// `<struct-ptr-global>-><field> = <expr>;` — store via a
     /// struct-pointer global. Loads `[global]` into BX, then
     /// `c7 47 off imm16` / `c6 47 off imm8`.
@@ -1452,6 +1460,15 @@ pub enum Expr {
     /// [si+field_off]`. Const-prop folds to a plain `DerefParamField` when `i`
     /// is known. Fixture 2208.
     ParamStructArrayField { param: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
+    /// `s->a[i]` read where `s` is a struct-POINTER PARAM and `a` is an ARRAY
+    /// field, with a RUNTIME index. Element address = `s + field_off + i*elem`.
+    /// MSC swaps register roles by `field_off`: offset 0 → index in BX (scaled),
+    /// ptr in SI, `[bx][si]`; offset K → ptr in BX, index in SI (scaled),
+    /// `[bx+K][si]`. Probe fixture 9001.
+    DerefParamArrayField { ptr_param: usize, field_off: u16, elem_size: u8, unsigned: bool, index: Box<Expr> },
+    /// `s->a[i]` read for a struct-POINTER LOCAL. Same shape as
+    /// [`Expr::DerefParamArrayField`] but the pointer loads off a frame slot.
+    DerefLocalArrayField { ptr_local: usize, field_off: u16, elem_size: u8, unsigned: bool, index: Box<Expr> },
     /// `argv[i][j]` on a double-pointer PARAM (`char **argv`, `int **pp`): load
     /// the param into BX, the element pointer at `[bx+2*index]` into BX, then read
     /// `elem_size` bytes at `[bx + inner*elem_size]`. `mov bx,[bp+p]; mov bx,
@@ -1567,6 +1584,7 @@ impl Expr {
             Expr::PtrChainField { .. } => None,
             Expr::StructArrayField { .. } | Expr::LocalStructArrayField { .. }
             | Expr::ParamStructArrayField { .. } | Expr::ParamPtrArrayDeref { .. } => None,
+            Expr::DerefParamArrayField { .. } | Expr::DerefLocalArrayField { .. } => None,
             Expr::Index2D { .. } | Expr::Param2D { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
@@ -1754,6 +1772,17 @@ struct Parser<'a> {
     /// of a plain field access; `is_unsigned` seeds the BitField's effective
     /// signedness (an `(int)` cast later flips it to signed).
     last_field_bits: Option<(u8, u8, bool)>,
+    /// When set, [`parse_field_lookup`] accepts a runtime (non-constant) array
+    /// subscript on a struct array field (`s->a[i]`) and stashes its index +
+    /// element-signedness in `runtime_field_index` instead of erroring. Only the
+    /// member-access sites that build a `DerefParamArrayField` / its siblings opt
+    /// in; everywhere else the runtime index stays unsupported. Probe fixture
+    /// 9001.
+    allow_runtime_field_index: bool,
+    /// Stash for the runtime array-field subscript: `(index_expr, elem_unsigned)`.
+    /// Set by [`parse_field_lookup`] when `allow_runtime_field_index` is on and a
+    /// non-constant array index is seen; the caller `take()`s it.
+    runtime_field_index: Option<(Expr, bool)>,
     /// Strings interned across the whole translation unit. New
     /// string literals append; duplicates currently get distinct
     /// entries (no dedup yet — no fixture exercises a repeated

@@ -390,6 +390,12 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::DerefLocalOffset { local, byte_off, is_byte } => {
             return emit_assign_deref_local_offset(local, byte_off, is_byte, value, locals, out, fixups);
         }
+        AssignTarget::DerefParamArrayField { ptr_param, field_off, elem_size, index } => {
+            return emit_sptr_arr_field_store(param_disp(ptr_param), field_off, elem_size, &index, value, locals, out, fixups);
+        }
+        AssignTarget::DerefLocalArrayField { ptr_local, field_off, elem_size, index } => {
+            return emit_sptr_arr_field_store(locals.disp(ptr_local), field_off, elem_size, &index, value, locals, out, fixups);
+        }
         AssignTarget::DerefExpr { ptr, is_byte } => {
             // `*<expr> = <value>;` — evaluate the pointer first (`call ...; mov
             // bx,ax`), then store the value at `[bx]`. A constant value uses the
@@ -4418,6 +4424,32 @@ pub(crate) fn emit_assign_deref_global_field(ptr_global: usize, byte_off: u16, s
             out.extend_from_slice(&[0x89, 0x47, byte_off as u8]);
         }
     }
+}
+/// `<struct-ptr>-><array-field>[i] = v` store with a runtime index. Computes the
+/// two-register element address (register roles swap by `field_off`), then stores
+/// the value: a word field through AX (`89 /0`), a char field through AL (`88
+/// /0`, byte RHS). Probe fixture 9001.
+pub(crate) fn emit_sptr_arr_field_store(
+    ptr_bp_disp: i16,
+    field_off: u16,
+    elem_size: u8,
+    index: &Expr,
+    value: &Expr,
+    locals: &Locals<'_>,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    let (modrm, disp) = crate::codegen::expr::emit_sptr_arr_field_addr(
+        ptr_bp_disp, field_off, elem_size, index, locals, out, fixups);
+    if elem_size == 1 {
+        emit_byte_rhs_to_al(value, locals, out, fixups);
+        out.push(0x88);
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(0x89);
+    }
+    out.push(modrm);
+    out.extend_from_slice(&disp);
 }
 pub(crate) fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let p_disp = param_disp(ptr_param);

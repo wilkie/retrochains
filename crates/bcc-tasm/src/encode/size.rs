@@ -194,7 +194,7 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         | Instr::OrAxImm16 { .. }
         | Instr::XorAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr | Instr::MovAlFromDiPtr => 2,
-        Instr::MovAlFromBxSi | Instr::MovAlFromBxDi => 2,
+        Instr::MovAlFromBxSi | Instr::MovAlFromBxDi | Instr::MovAxFromBxSi => 2,
         Instr::MovBxSiPtrImm8 { .. } | Instr::MovBxDiPtrImm8 { .. } => 3,
         Instr::ImulReg16 { .. } | Instr::IdivReg16 { .. } | Instr::DivReg16 { .. } => 2,
         Instr::AddAxOffsetGroupSym { .. } => 3,
@@ -432,6 +432,7 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         | Instr::SubAxFromDiPtr
         | Instr::AddAxFromSiPtr
         | Instr::AddAxFromDiPtr
+        | Instr::AddAxFromBxSi
         | Instr::AddReg16FromBxPtr { .. }
         | Instr::AddReg16FromDiPtr { .. }
         | Instr::AddReg16FromSiPtr { .. } => 2,

@@ -4028,7 +4028,22 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             // `b.data[i] = v;` / `o.in.vals[i] = v;` — same shape as
             // ArrayAssign over the root struct's storage. Fixtures 497,
             // 4212.
-            if let Some(root) = chain_root_ident(lvalue) {
+            if let ExprKind::Member {
+                base, kind: crate::ast::MemberKind::Arrow, ..
+            } = &lvalue.kind
+                && let ExprKind::Ident(p_name) = &base.kind
+                && indices.len() == 1
+            {
+                // `p->a[i] = v` is a pointer subscript: the pointer
+                // earns the same const/variable bonus as `p[i]` would
+                // — a constant index folds into a displacement
+                // (direct-deref +2), a variable index needs BX setup
+                // (+1). The +1 keeps a single-use store pointer on the
+                // stack rather than enregistering it (probe fixture
+                // 9001 wr_int/wr_char).
+                let bonus = if try_const_eval(&indices[0]).is_some() { 2 } else { 1 };
+                *counts.entry(p_name.clone()).or_insert(0) += bonus;
+            } else if let Some(root) = chain_root_ident(lvalue) {
                 *counts.entry(root.to_owned()).or_insert(0) += 2;
             } else {
                 count_uses_expr(lvalue, counts);
@@ -4173,6 +4188,22 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             if let ExprKind::Ident(name) = &array.kind {
                 let bonus = if const_idx { 2 } else { 1 };
                 *counts.entry(name.clone()).or_insert(0) += bonus;
+            } else if let ExprKind::Member {
+                base, kind: crate::ast::MemberKind::Arrow, ..
+            } = &array.kind
+                && let ExprKind::Ident(p_name) = &base.kind
+            {
+                // `<ptr>-><array-field>[i]` — the pointer base earns the
+                // same const/variable bonus as a bare `p[i]` would: a
+                // constant index folds into a baked-in displacement
+                // (direct-deref +2), but a variable index needs BX setup
+                // regardless of where the pointer lives, so it only
+                // counts +1. Without this the Member-Arrow recursion
+                // below would hand it a flat +2 and enregister a
+                // single-use subscript pointer that real BCC keeps on the
+                // stack (probe fixture 9001).
+                let bonus = if const_idx { 2 } else { 1 };
+                *counts.entry(p_name.clone()).or_insert(0) += bonus;
             } else {
                 count_uses_expr(array, counts);
             }

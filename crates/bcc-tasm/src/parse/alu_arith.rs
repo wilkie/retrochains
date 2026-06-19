@@ -605,6 +605,9 @@ pub(crate) fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "word ptr [di]" {
             return Ok(Instr::AddAxFromDiPtr);
         }
+        if rhs == "word ptr [bx+si]" {
+            return Ok(Instr::AddAxFromBxSi);
+        }
         if let Some(disp) = parse_word_si_disp(rhs) {
             return Ok(Instr::AddAxSiDisp { disp });
         }

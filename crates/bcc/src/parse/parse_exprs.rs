@@ -246,6 +246,22 @@ impl Parser {
                             value,
                         }
                     }
+                    // `<ptr>-><array-field>[i] = v` — the root is an
+                    // arrow member whose base is the struct pointer.
+                    // Carried through MemberArrayAssign; codegen folds
+                    // the element address through the pointer (probe
+                    // fixture 9001).
+                    ExprKind::Member {
+                        kind: crate::ast::MemberKind::Arrow,
+                        base,
+                        ..
+                    } if matches!(base.kind, ExprKind::Ident(_)) => {
+                        StmtKind::MemberArrayAssign {
+                            lvalue: root_lvalue,
+                            indices,
+                            value,
+                        }
+                    }
                     _ => return Err(ParseError::Unsupported { offset: lv_span_start }),
                 }
             }

@@ -1,0 +1,5 @@
+description = "Probe: struct-pointer variable-index array field (s->a[i])."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
+inputs = ["HELLO.C"]

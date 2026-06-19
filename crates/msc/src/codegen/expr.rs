@@ -248,6 +248,67 @@ pub(crate) fn emit_si_field_read(disp: i16, size: u8, out: &mut Vec<u8>) {
     }
     if size == 1 { out.push(0x98); } // cbw
 }
+/// Emit the register setup for `<struct-ptr>-><array-field>[i]` with a runtime
+/// index and return the `[bx+si{+field_off}]` ModR/M byte (reg field 000, so
+/// AX/AL is the data register) plus its displacement bytes. MSC swaps register
+/// roles by `field_off`: offset 0 → index in BX (scaled by element size), ptr in
+/// SI, `[bx][si]`; offset K → ptr in BX, index in SI (scaled), `[bx+K][si]`.
+/// `ptr_bp_disp` is the pointer param/local's frame displacement. Probe fixture
+/// 9001.
+pub(crate) fn emit_sptr_arr_field_addr(
+    ptr_bp_disp: i16,
+    field_off: u16,
+    elem_size: u8,
+    index: &Expr,
+    locals: &Locals<'_>,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> (u8, Vec<u8>) {
+    if field_off == 0 {
+        emit_load_bx(index, locals, out, fixups);
+        scale_bx(out, elem_size as usize);
+        // mov si,[bp+ptr]
+        out.push(0x8B);
+        out.push(bp_modrm(0x76, ptr_bp_disp));
+        push_bp_disp(out, ptr_bp_disp);
+        (0x00, Vec::new())
+    } else {
+        emit_load_si(index, locals, out, fixups);
+        scale_si(out, elem_size as usize);
+        // mov bx,[bp+ptr]
+        out.push(0x8B);
+        out.push(bp_modrm(0x5E, ptr_bp_disp));
+        push_bp_disp(out, ptr_bp_disp);
+        let disp = field_off as i16;
+        if let Ok(d8) = i8::try_from(disp) {
+            (0x40, vec![d8 as u8])
+        } else {
+            (0x80, disp.to_le_bytes().to_vec())
+        }
+    }
+}
+/// Read `<struct-ptr>-><array-field>[i]` into AX/AL (+widen for a char field).
+fn emit_sptr_arr_field_read(
+    ptr_bp_disp: i16,
+    field_off: u16,
+    elem_size: u8,
+    unsigned: bool,
+    index: &Expr,
+    locals: &Locals<'_>,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    let (modrm, disp) = emit_sptr_arr_field_addr(ptr_bp_disp, field_off, elem_size, index, locals, out, fixups);
+    let op = if elem_size == 1 { 0x8Au8 } else { 0x8B };
+    out.push(op);
+    out.push(modrm);
+    out.extend_from_slice(&disp);
+    if elem_size == 1 {
+        // Widen the byte: zero-extend an unsigned char (`sub ah,ah`),
+        // sign-extend a signed one (`cbw`).
+        if unsigned { out.extend_from_slice(&[0x2A, 0xE4]); } else { out.push(0x98); }
+    }
+}
 /// `op ax,[si+disp]` (op = 0x03 add / 0x2B sub / ...) reading a word struct
 /// field off the SI row base. Uses the no-disp `[si]` form when disp == 0.
 fn emit_si_field_word_op(opc: u8, disp: i16, out: &mut Vec<u8>) {
@@ -1351,6 +1412,12 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
         Expr::ParamStructArrayField { param, index, stride, field_off, size } => {
             emit_param_struct_row_si(index, *stride, *param, locals, out, fixups);
             emit_si_field_read(*field_off as i16, *size, out);
+        }
+        Expr::DerefParamArrayField { ptr_param, field_off, elem_size, unsigned, index } => {
+            emit_sptr_arr_field_read(param_disp(*ptr_param), *field_off, *elem_size, *unsigned, index, locals, out, fixups);
+        }
+        Expr::DerefLocalArrayField { ptr_local, field_off, elem_size, unsigned, index } => {
+            emit_sptr_arr_field_read(locals.disp(*ptr_local), *field_off, *elem_size, *unsigned, index, locals, out, fixups);
         }
         Expr::ParamPtrArrayDeref { param, index, inner, elem_size } => {
             // `argv[i][j]`: load argv into BX, the element pointer at [bx+2i] into
@@ -3559,6 +3626,26 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         for &fo in offs[..offs.len() - 1].iter().rev() {
             emit_si_field_word_op(0x03, fo as i16, out); // add ax,[si+fk]
         }
+        return;
+    }
+    // `s->a[i] + s->a[j]` — two runtime subscripts of the SAME word array field
+    // (field offset 0) through one struct-pointer param. MSC loads the pointer
+    // into SI once, then reads each element via `[bx][si]` reloading only the
+    // scaled index in BX: `mov bx,i; shl bx,1; mov si,s; mov ax,[bx][si]; mov
+    // bx,j; shl bx,1; add ax,[bx][si]`. Probe fixture 9001.
+    if matches!(op, BinOp::Add)
+        && let Expr::DerefParamArrayField { ptr_param: pa, field_off: 0, elem_size: 2, index: ia, .. } = left
+        && let Expr::DerefParamArrayField { ptr_param: pb, field_off: 0, elem_size: 2, index: ib, .. } = right
+        && pa == pb
+    {
+        emit_load_bx(ia, locals, out, fixups);
+        scale_bx(out, 2);
+        let pd = param_disp(*pa);
+        out.push(0x8B); out.push(bp_modrm(0x76, pd)); push_bp_disp(out, pd); // mov si,[bp+p]
+        out.extend_from_slice(&[0x8B, 0x00]); // mov ax,[bx][si]
+        emit_load_bx(ib, locals, out, fixups);
+        scale_bx(out, 2);
+        out.extend_from_slice(&[0x03, 0x00]); // add ax,[bx][si]
         return;
     }
     // Chain of 3+ word `p->field` reads of the SAME struct-pointer param joined

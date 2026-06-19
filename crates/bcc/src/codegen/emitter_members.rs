@@ -1318,6 +1318,22 @@ impl<'a> super::FunctionEmitter<'a> {
         indices: &[Expr],
         value: &Expr,
     ) {
+        // `<ptr>-><array-field>[i] = v` with a variable index — the
+        // element is reached through the struct pointer, not a
+        // constant address. Route to the dedicated store. Probe
+        // fixture 9001.
+        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Arrow } = &lvalue.kind
+            && let ExprKind::Ident(p_name) = &base.kind
+            && self.locals.has(p_name)
+            && indices.len() == 1
+            && try_const_eval(&indices[0]).is_none()
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+            && let Some((_, field_ty)) = pointee.field(field)
+            && field_ty.array_elem().is_some()
+        {
+            self.emit_sptr_array_field_assign(p_name, field, &indices[0], value);
+            return;
+        }
         // Fold the `.`-chain (`b.data`, `o.in.vals`, …) to the root
         // ident, the accumulated byte offset of the array field, and
         // the array's type. Then apply the constant subscripts.

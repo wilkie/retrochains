@@ -463,6 +463,11 @@ pub enum Instr {
     /// for the second pointer-local when BCC enregisters two ptrs
     /// (fixture 625's `*p + *q` with p in SI and q in DI).
     AddAxFromDiPtr,
+    /// `add ax,word ptr [bx+si]` — 03 00. ModR/M 00 = mod=00 reg=AX
+    /// r/m=000 ([bx+si]). Folds a `<reg-ptr>-><int-array-field>[i]`
+    /// operand (scaled index in BX, pointer in SI) into the add.
+    /// Probe fixture 9001 (`s->a[i] + s->a[i]`).
+    AddAxFromBxSi,
     /// `add <reg16>, word ptr [bx]` — `03 (mod=00 reg=<r> r/m=111)`.
     /// Memory-direct add through BX to any non-AX register dest.
     /// Used for `sum += a[i]` after the address compute lands in BX
@@ -1107,6 +1112,12 @@ pub enum Instr {
     /// Fixture 1420 (`t += s[i]` for char* s, i in SI — BCC folds
     /// the index-add into the memory operand).
     MovAlFromBxSi,
+    /// `mov ax,word ptr [bx+si]` — 8B 00. Word sibling of
+    /// [`MovAlFromBxSi`]: ModR/M 00 = mod=00 reg=AX r/m=000 ([bx+si]).
+    /// Indexed word load for `<reg-ptr>-><int-array-field>[i]` where
+    /// the scaled index is in BX and the enregistered pointer in SI.
+    /// Probe fixture 9001 (`s->a[i] + s->a[i]`).
+    MovAxFromBxSi,
     /// `mov al,byte ptr [bx+di]` — 8A 01. Sibling for the DI index.
     MovAlFromBxDi,
     /// `mov byte ptr [bx+si], imm8` — C6 00 ii. Indexed byte store.

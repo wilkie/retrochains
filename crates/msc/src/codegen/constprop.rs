@@ -3377,6 +3377,23 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 *e = Expr::DerefParamField { ptr_param: *param, byte_off, size: *size };
             }
         }
+        Expr::DerefParamArrayField { ptr_param, field_off, elem_size, index, .. } => {
+            prop_expr(index, cp);
+            // Index now constant → fold to the constant-offset DerefParamField.
+            if let Expr::IntLit(k) = index.as_ref()
+                && let Ok(byte_off) = u16::try_from(*k as i64 * *elem_size as i64 + *field_off as i64)
+            {
+                *e = Expr::DerefParamField { ptr_param: *ptr_param, byte_off, size: *elem_size };
+            }
+        }
+        Expr::DerefLocalArrayField { ptr_local, field_off, elem_size, index, .. } => {
+            prop_expr(index, cp);
+            if let Expr::IntLit(k) = index.as_ref()
+                && let Ok(byte_off) = u16::try_from(*k as i64 * *elem_size as i64 + *field_off as i64)
+            {
+                *e = Expr::DerefLocalField { ptr_local: *ptr_local, byte_off, size: *elem_size };
+            }
+        }
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
         // Bit-field post-mutate: a self-contained RMW, no sub-expressions to fold.
         Expr::BitFieldPostMutate { .. } => {}

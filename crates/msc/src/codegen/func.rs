@@ -58,7 +58,11 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     // runtime local struct-array store `a[i].f = v` (a folded
                     // constant index became a plain LocalField in const-prop, so
                     // any surviving target here has a runtime index → SI).
-                    | AssignTarget::LocalStructArrayField { .. })
+                    | AssignTarget::LocalStructArrayField { .. }
+                    // `s->a[i] = v` (runtime subscript of a struct-ptr array
+                    // field) stores through the two-register `[bx][si]` form.
+                    | AssignTarget::DerefParamArrayField { .. }
+                    | AssignTarget::DerefLocalArrayField { .. })
                     || matches!(target, AssignTarget::ParamIndexStore { index, .. } if index.fold(inits).is_none())
                     // `arr[i] = arr[j]` / `arr[i] ± arr[j]` (runtime indices): the
                     // RHS array read uses SI so the LHS index in BX survives.
@@ -138,6 +142,9 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             Expr::LocalStructArrayField { .. } => true,
             // runtime struct-ptr-param field read `pts[i].f` scales i into SI.
             Expr::ParamStructArrayField { .. } => true,
+            // `s->a[i]` (runtime subscript of a struct-ptr array field) always
+            // uses the two-register `[bx][si]` form. Probe fixture 9001.
+            Expr::DerefParamArrayField { .. } | Expr::DerefLocalArrayField { .. } => true,
             // `*(ptr + i)` (and the nested `*(p + i + j)`) with a runtime index on
             // a pointer param/local uses SI (`mov si,[p]; mov ax,[bx+si]`); a
             // decayed global array uses BX only. add_deref_uses_si peels the

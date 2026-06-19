@@ -30,6 +30,8 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         param_dims: std::collections::HashMap::new(),
         structs: Vec::new(),
         last_field_bits: None,
+        allow_runtime_field_index: false,
+        runtime_field_index: None,
         strings: Vec::new(),
         enum_consts: std::collections::HashMap::new(),
         typedefs: std::collections::HashMap::new(),
@@ -3873,8 +3875,19 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 && let Some(Some(sidx)) = p.param_struct_idxs.get(param_idx).cloned()
             {
                 p.bump();
+                let saved = p.allow_runtime_field_index;
+                p.allow_runtime_field_index = true;
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                let target = AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size };
+                p.allow_runtime_field_index = saved;
+                // `s->a[i] = v` — runtime subscript of an array field.
+                let target = if let Some((index, _)) = p.runtime_field_index.take() {
+                    AssignTarget::DerefParamArrayField {
+                        ptr_param: param_idx, field_off: byte_off, elem_size: size,
+                        index: Box::new(index),
+                    }
+                } else {
+                    AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size }
+                };
                 if let Some(value) = parse_compound_rhs(p, &target)? {
                     p.eat(&Tok::Semi)?;
                     return Ok(Stmt::Assign { target, value });
@@ -5055,6 +5068,7 @@ pub(crate) fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16
     // struct POINTER field also carries struct_idx but must NOT recurse inline.
     let inner = if field.is_pointer { None } else { field.struct_idx };
     let (byte_off, size) = (field.byte_off, field.size);
+    let field_unsigned = field.is_unsigned;
     let leaf_bits = (field.bit_off, field.bit_width, field.is_unsigned);
     p.last_field_bits = None;
     // Multi-level access `o.inner.a`: recurse into the nested struct, summing
@@ -5077,8 +5091,19 @@ pub(crate) fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16
         let idx = parse_expr(p)?;
         p.eat(&Tok::RBrack)?;
         let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
-        let k = idx.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
-            "non-constant struct array-field index not yet supported".to_owned()))?;
+        let Some(k) = idx.fold(&init_view) else {
+            // Runtime (non-constant) index. The opt-in member-access sites stash
+            // it and build a DerefParamArrayField (or sibling); everywhere else
+            // it stays unsupported. The returned `(byte_off, size)` is the field
+            // base offset + element size — the runtime `i*size` is applied in
+            // codegen. Probe fixture 9001.
+            if p.allow_runtime_field_index {
+                p.runtime_field_index = Some((idx, field_unsigned));
+                return Ok((byte_off, size));
+            }
+            return Err(EmitError::Unsupported(
+                "non-constant struct array-field index not yet supported".to_owned()));
+        };
         let off = u16::try_from(byte_off as i64 + k as i64 * size as i64)
             .expect("struct array-field offset fits");
         return Ok((off, size));
@@ -6608,7 +6633,16 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     && let Some(sidx) = p.local_specs[idx].struct_idx
                 {
                     p.bump();
+                    let saved = p.allow_runtime_field_index;
+                    p.allow_runtime_field_index = true;
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    p.allow_runtime_field_index = saved;
+                    if let Some((index, unsigned)) = p.runtime_field_index.take() {
+                        return Ok(Expr::DerefLocalArrayField {
+                            ptr_local: idx, field_off: byte_off, elem_size: size,
+                            unsigned, index: Box::new(index),
+                        });
+                    }
                     return Ok(Expr::DerefLocalField { ptr_local: idx, byte_off, size });
                 }
                 // Postfix `++`/`--` on a local — yields the OLD value
@@ -6725,7 +6759,18 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         return Ok(chain);
                     }
                     p.bump();
+                    let saved = p.allow_runtime_field_index;
+                    p.allow_runtime_field_index = true;
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    p.allow_runtime_field_index = saved;
+                    // `s->a[i]` — runtime subscript of an array field. `byte_off`
+                    // is the field's base offset, `size` the element size.
+                    if let Some((index, unsigned)) = p.runtime_field_index.take() {
+                        return Ok(Expr::DerefParamArrayField {
+                            ptr_param: idx, field_off: byte_off, elem_size: size,
+                            unsigned, index: Box::new(index),
+                        });
+                    }
                     if let Some((bit_off, bit_width, unsigned)) = p.last_field_bits {
                         return Ok(Expr::BitField { base: BitBase::DerefParam(idx), byte_off, bit_off, bit_width, unsigned });
                     }
