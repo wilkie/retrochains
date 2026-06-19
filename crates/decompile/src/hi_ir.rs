@@ -1066,7 +1066,7 @@ impl Ctx {
     /// `(lo, hi, count)`. `_TEXT` can't distinguish shl/shr/sar: the direction
     /// lives in the call's relocation symbol (`N_LXLSH@`/`N_LXRSH@`/`N_LXURSH@`),
     /// not the `e8 00 00` placeholder, so all three round-trip as `<<`.
-    fn long_shift_at(&self, i: usize) -> Option<(Place, Place, i32)> {
+    fn long_shift_at(&self, i: usize) -> Option<(Place, Place, Place)> {
         let LoOp::Load { dst: Place::Reg(Reg::Dx), src: hi } = self.insns.get(i)?.op else {
             return None;
         };
@@ -1080,11 +1080,15 @@ impl Ctx {
         if h != l + 2 {
             return None;
         }
-        let LoOp::Load { dst: Place::Byte(ByteReg::Cl), src: Place::Imm(n) } =
-            self.insns.get(i + 2)?.op
+        // The shift count in `cl` — a constant (`mov cl,N`) or a variable
+        // (`mov cl,[n]`, for `a << n`).
+        let LoOp::Load { dst: Place::Byte(ByteReg::Cl), src: count } = self.insns.get(i + 2)?.op
         else {
             return None;
         };
+        if !matches!(count, Place::Imm(_) | Place::Local(_)) {
+            return None;
+        }
         let LoOp::Call { target, .. } = self.insns.get(i + 3)?.op else {
             return None;
         };
@@ -1095,7 +1099,7 @@ impl Ctx {
         if target != call_end {
             return None;
         }
-        Some((lo, hi, n))
+        Some((lo, hi, count))
     }
 
     /// A byte-width source operand: note the variable as `char` and return it.
@@ -1505,10 +1509,15 @@ impl Ctx {
                 // the operand setup (recovered 10 vs target 18 bytes).
                 LoOp::Load { dst: Place::Reg(Reg::Dx), .. } if self.long_shift_at(i).is_some() => {
                     flush_call(&mut acc, out);
-                    let (lo, hi, n) = self.long_shift_at(i).unwrap();
+                    let (lo, hi, count) = self.long_shift_at(i).unwrap();
+                    let count_expr = match count {
+                        Place::Imm(n) => Some(Expr::Const(n)),
+                        other => self.operand(other),
+                    };
                     acc = self
                         .long_operand(lo, hi)
-                        .map(|o| Expr::Binary(BinOp::Shl, Box::new(o), Box::new(Expr::Const(n))));
+                        .zip(count_expr)
+                        .map(|(o, c)| Expr::Binary(BinOp::Shl, Box::new(o), Box::new(c)));
                     if acc.is_none() {
                         self.cant();
                     }
