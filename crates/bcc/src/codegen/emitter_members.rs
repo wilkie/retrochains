@@ -1097,6 +1097,35 @@ impl<'a> super::FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr {addr},ax\r\n");
             }
             return;
+        } else if let ExprKind::ArrayIndex { array, index } = &base.kind
+            && matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::Ident(pname) = &array.kind
+            && self.locals.has(pname)
+            && let Some(k) = try_const_eval(index)
+            && let Some((stride, field_off, fty)) =
+                self.locals.type_of(pname).pointee().and_then(|pe| {
+                    pe.field(field)
+                        .map(|(fo, ft)| (i32::from(pe.size_bytes()), fo, ft.clone()))
+                })
+        {
+            // `p[K].field = v` — store into a struct-pointer element field. The
+            // element is at `p + K*stride`; the dest is `[reg + K*stride +
+            // field_off]` (loading p into BX if not reg-resident). Counterpart to
+            // the `p[K].field` rvalue path; flows to the shared value store below.
+            let total = (k as i32) * stride + i32::from(field_off);
+            let reg_name = match self.locals.location_of(pname) {
+                LocalLocation::Reg(reg) => reg.name().to_string(),
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    "bx".to_string()
+                }
+            };
+            let dest = if total == 0 {
+                format!("[{reg_name}]")
+            } else {
+                format!("[{reg_name}+{total}]")
+            };
+            (dest, fty)
         } else {
             // Arrow (or a Dot whose base isn't a const-chain lvalue).
             let ExprKind::Ident(name) = &base.kind else {

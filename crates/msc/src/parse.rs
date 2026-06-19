@@ -3770,6 +3770,29 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 let index = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
                 let elem = p.param_pointee_sizes[param_idx];
+                // `p[K].field = v` — a field of a struct-pointer element. The
+                // element is at `p + K*elem`; flatten to a DerefParamField at
+                // `K*elem + field_off`, which the store/compound paths handle.
+                if matches!(p.peek(), Some(Tok::Dot))
+                    && let Some(Some(sidx)) = p.param_struct_idxs.get(param_idx).cloned()
+                    && let Expr::IntLit(k) = &index
+                {
+                    let k = *k;
+                    p.bump(); // .
+                    let (field_off, size) = parse_field_lookup(p, sidx)?;
+                    let byte_off =
+                        (k as u16).wrapping_mul(elem as u16).wrapping_add(field_off);
+                    let target =
+                        AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size };
+                    if let Some(value) = parse_compound_rhs(p, &target)? {
+                        p.eat(&Tok::Semi)?;
+                        return Ok(Stmt::Assign { target, value });
+                    }
+                    p.eat(&Tok::Assign)?;
+                    let value = parse_expr(p)?;
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
                 let target = AssignTarget::ParamIndexStore {
                     param: param_idx,
                     index: Box::new(index),

@@ -5,20 +5,20 @@ stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85
 
 [[outputs]]
 name = "HELLO.ASM"
-size = 1106
-sha256 = "710392896533629d4570f2c289df537ceb3d888fd5dfca4c99baf3e3e5dc4406"
+size = 1557
+sha256 = "cc6161f21825b06ea0d75cde76113ed35481545add645d1e8169b81319fe8573"
 mtime = "1987-10-15T12:00:00Z"
 
 [[outputs]]
 name = "HELLO.EXE"
-size = 2359
-sha256 = "50a30e3d21cc7177621aeaa82d325fee660b7ed2f8c70e9a60cd7530f3ebce1d"
+size = 2391
+sha256 = "945c10101c55da289e0fef2aa2b68f36490e90407c4739476e01b6cd6cd4cba0"
 mtime = "1987-10-15T12:00:00Z"
 
 [[outputs]]
 name = "HELLO.OBJ"
-size = 361
-sha256 = "98efb31f6c34043616f6d5f92d5b0a1d6d1debc2d123c91b4cb71531246d9a53"
+size = 441
+sha256 = "171dac260ddc978c60c568db8d1bc8efd224e3b6d867c493349b8b8db5eb8d5c"
 mtime = "1987-10-15T12:00:00Z"
 
 [oracle]
