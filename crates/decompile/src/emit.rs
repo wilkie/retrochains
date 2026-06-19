@@ -367,7 +367,7 @@ fn expr_is_fold_safe_unverified(e: &Expr) -> bool {
         }
         // Memory loads and side effects: leave split unless a verifier vouches.
         // A bit-field read is a global memory access — not fold-safe.
-        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => false,
+        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } | Expr::StrLit => false,
     }
 }
 
@@ -478,6 +478,7 @@ fn expr_refs_local_at_or_after(e: &Expr, idx: usize, pos: &dyn Fn(&Var) -> Optio
     match e {
         Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => blocks(v),
         Expr::IncDec { var, .. } => blocks(var),
+        Expr::StrLit => false,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_refs_local_at_or_after(a, idx, pos) || expr_refs_local_at_or_after(b, idx, pos)
         }
@@ -749,7 +750,7 @@ fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_external_call(a, callees),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
-        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => false,
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } | Expr::StrLit => false,
     }
 }
 
@@ -783,7 +784,7 @@ fn expr_has_call(e: &Expr) -> bool {
         Expr::Ternary(a, b, c) => expr_has_call(a) || expr_has_call(b) || expr_has_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
-        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => false,
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } | Expr::StrLit => false,
     }
 }
 
@@ -1006,6 +1007,7 @@ fn expr_str(e: &Expr, names: &Names) -> String {
                 format!("({v}{op})")
             }
         }
+        Expr::StrLit => "\"\"".to_string(),
     }
 }
 

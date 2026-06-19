@@ -142,6 +142,12 @@ pub enum Expr {
     /// v`), a prefix steps before reading (`inc v; mov ax,v`). `prefix` and `dec`
     /// select the four forms.
     IncDec { var: Var, prefix: bool, dec: bool },
+    /// `""` — a string-literal (or data-address) argument. Recovered from `mov
+    /// ax,offset @str; push ax` (`b8 0000` — a RELOCATABLE address, which BCC
+    /// emits even for offset 0, where a literal `0` would be `xor ax,ax`). Only
+    /// the relocation matters to `_TEXT`, not the bytes, so any string at the same
+    /// offset reproduces it; recovered as the empty literal.
+    StrLit,
     /// `gvN.fK` — read an unsigned bit-field of a global modelled as a synthesized
     /// struct. Recovered from the extraction `mov al,[g]; shr ax,1 ×bit_off; and
     /// ax,(2^width-1)`. `global` is the data-segment offset; the global's whole
@@ -158,7 +164,7 @@ fn contains_call(e: &Expr) -> bool {
         Expr::Ternary(a, b, c) => contains_call(a) || contains_call(b) || contains_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => contains_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
-        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => false,
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } | Expr::StrLit => false,
     }
 }
 
@@ -170,7 +176,7 @@ fn contains_call(e: &Expr) -> bool {
 fn is_simple_compound_rhs(e: &Expr) -> bool {
     match e {
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
-        | Expr::Bitfield { .. } => true,
+        | Expr::Bitfield { .. } | Expr::StrLit => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             is_simple_compound_rhs(a) && is_simple_compound_rhs(b)
         }
@@ -178,7 +184,7 @@ fn is_simple_compound_rhs(e: &Expr) -> bool {
             is_simple_compound_rhs(a) && is_simple_compound_rhs(b) && is_simple_compound_rhs(c)
         }
         Expr::Not(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => is_simple_compound_rhs(a),
-        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::IncDec { .. } => false,
+        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::IncDec { .. } | Expr::StrLit => false,
     }
 }
 
@@ -280,6 +286,7 @@ fn expr_mentions(expr: &Expr, var: Var) -> bool {
     match expr {
         Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => *v == var,
         Expr::IncDec { var: v, .. } => *v == var,
+        Expr::StrLit => false,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_mentions(a, var) || expr_mentions(b, var)
         }
@@ -351,6 +358,7 @@ fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
     match e {
         Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => f(v),
         Expr::IncDec { var, .. } => f(var),
+        Expr::StrLit => {}
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             walk_vars_expr(a, f);
             walk_vars_expr(b, f);
@@ -1040,7 +1048,7 @@ impl Ctx {
             }
             Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => self.mark_unsigned(a),
             Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..)
-            | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => {}
+            | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } | Expr::StrLit => {}
         }
     }
 
@@ -1979,6 +1987,26 @@ impl Ctx {
                 // `mov ax, …` starts a fresh accumulator value, discarding any
                 // call result the previous statement left unused. With `dx` set
                 // up, the value is a `long` (its high word in `dx`).
+                // `mov ax,offset @str; push ax; call` — a string-literal argument
+                // that is the call's FIRST C parameter (cdecl pushes it LAST, so
+                // the push is immediately before the call). `mov ax,0` in the `b8`
+                // form is a relocatable offset there — a literal 0 first-arg would
+                // be `xor ax,ax`. Recovered as `""` (only the relocation, not the
+                // bytes, is in `_TEXT`). Requiring the `Call` to follow the push
+                // excludes a literal-0 pushed as a LATER arg (`memset(a,0,n)`,
+                // `outp(p,0)`), which BCC also emits in the `b8` form.
+                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Imm(0) }
+                    if self.insns[i].span.len == 3
+                        && matches!(
+                            self.insns.get(i + 1).map(|n| &n.op),
+                            Some(LoOp::Arg { src: Place::Reg(Reg::Ax) })
+                        ) =>
+                {
+                    flush_call(&mut acc, out);
+                    acc = Some(Expr::StrLit);
+                    acc_long = false;
+                }
+
                 // `mov ax,v; inc/dec v` — a postfix `v++`/`v--` whose OLD value is
                 // in `ax`. Recover the post-increment as a VALUE; a separate
                 // `v++` statement would leave `acc` a plain reference and the
