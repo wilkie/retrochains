@@ -603,6 +603,19 @@ pub(crate) fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::MovByteSiDispImm8 { disp: i16::from(disp), imm: imm as u8 });
     }
+    // LHS `byte ptr [si+disp]`, reg8 source — writeback of a `char` field/element
+    // compound through an SI pointer at a non-zero offset (`s->c op= K`).
+    if let Some(disp) = parse_byte_si_disp(lhs)
+        && let Some(src) = Reg8::parse(rhs)
+    {
+        return Ok(Instr::MovByteSiDispReg8 { disp: i16::from(disp), src });
+    }
+    // LHS `byte ptr [di+disp]`, reg8 source — DI sibling of the above.
+    if let Some(disp) = parse_byte_di_disp(lhs)
+        && let Some(src) = Reg8::parse(rhs)
+    {
+        return Ok(Instr::MovByteDiDispReg8 { disp: i16::from(disp), src });
+    }
     // RHS `byte ptr [si+disp]` — byte load through SI pointer into an
     // 8-bit register (fixture 1019: char-pointer subscript read).
     if let Some(reg) = Reg8::parse(lhs)

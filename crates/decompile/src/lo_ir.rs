@@ -643,10 +643,14 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         }
         // `mov [bx+disp8],r16` — store a word through a pointer at a constant
         // offset (`p[K] = r16` / `*(p+K) = r16`).
-        Idiom::PointerStoreDisp8 => vec![LoOp::Store {
-            dst: Place::DerefDisp(deref_base(modrm(1)), disp8_at(bytes, 2)),
-            src: R(reg_of(1)),
-        }],
+        Idiom::PointerStoreDisp8 => {
+            // 0x88 = byte store (`mov [si+d], r8`), 0x89 = word (`mov [si+d], r16`).
+            let src = if bytes[0] == 0x88 { Byte(byte_reg_of(1)) } else { R(reg_of(1)) };
+            vec![LoOp::Store {
+                dst: Place::DerefDisp(deref_base(modrm(1)), disp8_at(bytes, 2)),
+                src,
+            }]
+        }
         // `mov word ptr [si/di/bx+disp8],imm16` — store a word immediate at an offset.
         Idiom::StoreImmDispDeref => vec![LoOp::Store {
             dst: Place::DerefDisp(deref_base(modrm(1)), disp8_at(bytes, 2)),

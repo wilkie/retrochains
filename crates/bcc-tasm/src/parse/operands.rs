@@ -398,6 +398,17 @@ pub(crate) fn parse_byte_si_disp(s: &str) -> Option<i8> {
     let signed: i32 = rest.parse().ok()?;
     i8::try_from(signed).ok()
 }
+/// DI sibling of [`parse_byte_si_disp`] — `byte ptr [di]` / `[di+disp]`.
+pub(crate) fn parse_byte_di_disp(s: &str) -> Option<i8> {
+    let s = s.trim().strip_prefix("byte ptr ")?;
+    let inside = s.strip_prefix('[')?.strip_suffix(']')?;
+    if inside == "di" {
+        return Some(0);
+    }
+    let rest = inside.strip_prefix("di")?;
+    let signed: i32 = rest.parse().ok()?;
+    i8::try_from(signed).ok()
+}
 /// Same as [`parse_bp_relative`] but requires an explicit `word ptr`
 /// prefix. Used on LHS stack-store opcodes where the width prefix
 /// chooses the opcode (C6 vs C7).

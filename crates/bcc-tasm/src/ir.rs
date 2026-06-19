@@ -805,6 +805,16 @@ pub enum Instr {
     /// pointer: `p[K] = 'B'` lowers to a memory-direct byte store
     /// through SI. Fixture 1016.
     MovByteSiDispImm8 { disp: i16, imm: u8 },
+    /// `mov byte ptr [si+<disp>],<reg8>` — 88 (mod reg=<src> r/m=100).
+    /// disp=0 → mod=00 (`88 xx04`, 2 bytes); disp8 → mod=01 (`88 xx44 dd`,
+    /// 3 bytes); disp16 → mod=10 (`88 xx84 dd dd`). The reg-source sibling of
+    /// [`MovByteSiDispImm8`] — the writeback of a `char` field/element compound
+    /// through an SI pointer at a non-zero offset (`s->c op= K` for `c` past the
+    /// first field). `MovDiByteDispReg8` is the DI sibling (r/m=101).
+    MovByteSiDispReg8 { disp: i16, src: Reg8 },
+    /// `mov byte ptr [di+<disp>],<reg8>` — DI sibling of
+    /// [`MovByteSiDispReg8`] (r/m=101).
+    MovByteDiDispReg8 { disp: i16, src: Reg8 },
     /// `mov <reg8>,byte ptr [si+<disp>]` — 8A (mod reg r/m=100).
     /// disp=0 → `8A xx04` (mod=00, 2 bytes total); disp!=0 fitting
     /// i8 → `8A xx44 dd` (mod=01, 3 bytes). Char-pointer subscript

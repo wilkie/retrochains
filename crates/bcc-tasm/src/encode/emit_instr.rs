@@ -592,6 +592,29 @@ pub(crate) fn emit_instr(
             }
             out.push(*imm);
         }
+        Instr::MovByteSiDispReg8 { disp, src } => {
+            // `mov byte ptr [si+disp],<reg8>` — 88 (mod reg=<src> r/m=100).
+            // disp=0 → mod=00 (0x04); disp8 → mod=01 (0x44) + disp.
+            out.push(0x88);
+            if *disp == 0 {
+                out.push(0x04 | (src.code() << 3));
+            } else {
+                let d = i8::try_from(*disp).expect("si-rel disp fits in i8");
+                out.push(0x44 | (src.code() << 3));
+                out.push(d as u8);
+            }
+        }
+        Instr::MovByteDiDispReg8 { disp, src } => {
+            // `mov byte ptr [di+disp],<reg8>` — 88 (mod reg=<src> r/m=101).
+            out.push(0x88);
+            if *disp == 0 {
+                out.push(0x05 | (src.code() << 3));
+            } else {
+                let d = i8::try_from(*disp).expect("di-rel disp fits in i8");
+                out.push(0x45 | (src.code() << 3));
+                out.push(d as u8);
+            }
+        }
         Instr::IncReg8 { reg } => {
             // `inc <reg8>` → FE C0+rc. FE = Grp4 r/m8. ModR/M mod=11
             // /0 r/m=<reg-code>.

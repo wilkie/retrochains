@@ -145,6 +145,9 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg8Reg8 { .. } => 2,
         Instr::MovBpRelImm8 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 1,
         Instr::MovByteSiDispImm8 { disp, .. } => if *disp == 0 { 3 } else { 4 },
+        Instr::MovByteSiDispReg8 { disp, .. } | Instr::MovByteDiDispReg8 { disp, .. } => {
+            if *disp == 0 { 2 } else { 3 }
+        }
         Instr::MovReg8ByteSiDisp { disp, .. } => if *disp == 0 { 2 } else { 3 },
         Instr::IncReg8 { .. } | Instr::DecReg8 { .. } => 2,
         Instr::CmpReg8Imm8 { .. } => 3,

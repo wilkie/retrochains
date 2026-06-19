@@ -1451,6 +1451,13 @@ impl Ctx {
                 LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::DerefDisp(r, disp) }
                     if is_reg_var(r) =>
                 {
+                    // NB: the char field/element compound `*(p+disp) op= K` (`mov
+                    // al,[si+d]; <op> al,K; mov [si+d],al`) is NOT recovered here.
+                    // The decompiler loses the struct type, so it would emit
+                    // `p[disp] op= K` over a `char *` — which our bcc currently
+                    // panics on (emitter_arrays_2.rs: char-pointer param subscript
+                    // compound, reg-resident pointer; the byte sibling of the word
+                    // fix in commit 6f4d6b00). Recover it once that bcc gap closes.
                     flush_call(&mut acc, out);
                     let v = Var::Reg(r);
                     self.note(v);

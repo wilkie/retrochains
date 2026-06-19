@@ -415,6 +415,12 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x47), A] },
     Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x44), A] },
     Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x45), A] },
+    // `mov byte ptr [si/di/bx+disp8],r8` — the byte sibling (op 0x88). The
+    // writeback of a `char` field/element compound through a pointer at an offset
+    // (`s->c op= K`). The decode picks byte vs word from the opcode.
+    Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x88), M(0xc7, 0x47), A] },
+    Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x88), M(0xc7, 0x44), A] },
+    Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x88), M(0xc7, 0x45), A] },
     Def { idiom: Idiom::StoreImmDispDeref, pat: &[L(0xc7), M(0xc7, 0x47), A, A, A] },
     // word disp-deref store through [si+disp]/[di+disp] — `c7 44/45 disp iw`.
     Def { idiom: Idiom::StoreImmDispDeref, pat: &[L(0xc7), M(0xc7, 0x44), A, A, A] },
