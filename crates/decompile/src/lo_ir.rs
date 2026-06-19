@@ -493,7 +493,7 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         // negative constant. `cmp al,imm` sets flags → CmpByte.
         Idiom::AluByteAccImm => {
             let op = group1_op(bytes[0] >> 3);
-            let imm = i32::from((bytes[1] as i8));
+            let imm = i32::from(bytes[1] as i8);
             if op == BinOp::Cmp {
                 vec![LoOp::CmpByte { lhs: Byte(ByteReg::Al), rhs: Imm(imm) }]
             } else {

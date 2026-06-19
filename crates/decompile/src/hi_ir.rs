@@ -1366,11 +1366,39 @@ impl Ctx {
                 LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::Deref(r) }
                     if is_reg_var(r) =>
                 {
-                    flush_call(&mut acc, out);
-                    let v = Var::Reg(r);
-                    self.note(v);
-                    self.note_char_ptr(v);
-                    acc = Some(Expr::Deref(Box::new(Expr::Var(v))));
+                    // `*p op= K` — char deref compound (AL-through): `mov al,[si];
+                    // <op> al,K; mov [si],al`. Recover as a Compound, NOT the
+                    // load-op-store Assign `*p = *p op K` (which would double the
+                    // deref and mis-recompile). Constant rhs only.
+                    if acc.is_none()
+                        && let Some(LoOp::Bin {
+                            dst: Place::Byte(ByteReg::Al),
+                            op,
+                            lhs: Place::Byte(ByteReg::Al),
+                            rhs: Place::Imm(v),
+                        }) = self.insns.get(i + 1).map(|n| n.op.clone())
+                        && Self::is_compound_op(op)
+                        && matches!(
+                            self.insns.get(i + 2).map(|n| &n.op),
+                            Some(LoOp::Store { dst: Place::Deref(r2), src: Place::Byte(_) }) if *r2 == r
+                        )
+                    {
+                        let p = Var::Reg(r);
+                        self.note(p);
+                        self.note_char_ptr(p);
+                        out.push(Stmt::Compound(
+                            LValue::Deref(Box::new(Expr::Var(p))),
+                            op,
+                            Expr::Const(v),
+                        ));
+                        skip = 2;
+                    } else {
+                        flush_call(&mut acc, out);
+                        let v = Var::Reg(r);
+                        self.note(v);
+                        self.note_char_ptr(v);
+                        acc = Some(Expr::Deref(Box::new(Expr::Var(v))));
+                    }
                 }
 
                 // `mov ax, [bx+disp]` — deref an `int *` at a constant byte
