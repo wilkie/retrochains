@@ -2019,15 +2019,7 @@ impl Ctx {
                 // address); `[si]`/`[di]` is a register-variable pointer. Distinct
                 // from the load-op-store `*p = *p op Y`, so it recovers as `*p op= Y`.
                 LoOp::Bin { dst: Place::Deref(dreg), op, lhs, rhs }
-                    if Place::Deref(dreg) == lhs
-                        && Self::is_compound_op(op)
-                        // A *variable*-RHS plain-deref compound through BX
-                        // (`*gp op= v`) is usually a global pointer whose value is a
-                        // global-array address (`gp = a`) — which the data-segment
-                        // model can't yet represent (recovers as 0) and which our bcc
-                        // back end can't recompile either. Decline; reg-var pointers
-                        // (`[si]`/`[di]`) and the immediate form are unaffected.
-                        && !(matches!(rhs, Place::Reg(_)) && dreg == Reg::Bx) =>
+                    if Place::Deref(dreg) == lhs && Self::is_compound_op(op) =>
                 {
                     let ptr = match dreg {
                         Reg::Bx => bx.clone(),

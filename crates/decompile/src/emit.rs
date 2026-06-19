@@ -1566,6 +1566,9 @@ mod tests {
              y = 5; p = &a; p->x += y; return 0; }\n",
         );
         assert_roundtrips("int main(){ int x; int *p; int y; p = &x; y = 3; *p ^= y; return 0; }\n");
+        // Through a global pointer (`*gp op= v` via BX) — bcc now compiles this, so
+        // the recovery no longer needs to decline it. Fixture 879.
+        assert_roundtrips("int a[3]; int *p; int main(){ int y; p = a; y = 7; p[0] += y; return 0; }\n");
     }
 
     #[test]
