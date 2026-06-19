@@ -487,6 +487,19 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let dst = if op == BinOp::Cmp { Place::Flags } else { R(Reg::Ax) };
             vec![LoOp::Bin { dst, op, lhs: R(Reg::Ax), rhs: Imm(imm) }]
         }
+        // `<op> al, imm8` (04/0c/.../3c) — byte accumulator short form. The op is
+        // in opcode bits 5-3 (same map as the word AluAxImm). The imm8 is
+        // sign-extended so a `g -= 3` encoded `add al,-3` (`04 fd`) recovers the
+        // negative constant. `cmp al,imm` sets flags → CmpByte.
+        Idiom::AluByteAccImm => {
+            let op = group1_op(bytes[0] >> 3);
+            let imm = i32::from((bytes[1] as i8));
+            if op == BinOp::Cmp {
+                vec![LoOp::CmpByte { lhs: Byte(ByteReg::Al), rhs: Imm(imm) }]
+            } else {
+                vec![LoOp::Bin { dst: Byte(ByteReg::Al), op, lhs: Byte(ByteReg::Al), rhs: Imm(imm) }]
+            }
+        }
         Idiom::AluImm => {
             // group 1 against a local (`46 disp`), a global (`06 disp16`), an
             // `[si]`/`[di]` deref (`04`/`05`), or a register — with the immediate
