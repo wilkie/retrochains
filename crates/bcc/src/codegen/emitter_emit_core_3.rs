@@ -568,6 +568,27 @@ impl<'a> super::FunctionEmitter<'a> {
                         }
                     }
                 }
+                // Arrow-rooted Dot chain (`b->a.x`) as a right operand: flatten
+                // the field offsets and address the leaf as `[reg + total_off]`,
+                // loading the pointer into BX first if it isn't reg-resident.
+                // Mirrors the rvalue/store paths.
+                if let Some((ptr_name, arrow_off, _ty)) = self.try_arrow_chain_addr(base, field)
+                    && let Ok(off16) = i16::try_from(arrow_off)
+                {
+                    let reg = if self.locals.has(&ptr_name) {
+                        match self.locals.location_of(&ptr_name) {
+                            LocalLocation::Reg(reg) => reg,
+                            LocalLocation::Stack(o) => {
+                                let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(o));
+                                crate::codegen::locals::Reg::Bx
+                            }
+                        }
+                    } else {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{ptr_name}\r\n");
+                        crate::codegen::locals::Reg::Bx
+                    };
+                    return OperandSource::DerefRegOffset { reg, offset: off16 };
+                }
                 // `a.x` / `pts[1].x` / `a.b.c` / global `g.x` as a
                 // right operand: walk the lvalue chain. Local chain
                 // → `[bp-N]`; global chain → `DGROUP:_<name>+K`.

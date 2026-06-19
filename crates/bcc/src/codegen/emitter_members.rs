@@ -594,6 +594,38 @@ impl<'a> super::FunctionEmitter<'a> {
                 return;
             }
         }
+        // `<ptr>->f.g[.h…]` rvalue — a Dot chain rooted at a Member-Arrow
+        // through a named pointer (`b->a.x`). Flatten the accumulated field
+        // offsets into one displacement off the pointer register and read
+        // through it. Mirrors the matching store path (try_arrow_chain_addr).
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let Some((ptr_name, total_off, leaf_ty)) = self.try_arrow_chain_addr(base, field)
+        {
+            let r = if self.locals.has(&ptr_name) {
+                match self.locals.location_of(&ptr_name) {
+                    LocalLocation::Reg(reg) => reg.name().to_string(),
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                        "bx".to_string()
+                    }
+                }
+            } else {
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{ptr_name}\r\n");
+                "bx".to_string()
+            };
+            let addr = if total_off == 0 {
+                format!("[{r}]")
+            } else {
+                format!("[{r}+{total_off}]")
+            };
+            if leaf_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.emit_widen_al(&leaf_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+            return;
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
