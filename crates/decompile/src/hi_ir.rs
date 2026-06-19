@@ -855,10 +855,41 @@ impl Ctx {
         self.insns.iter().any(|n| {
             let place = match &n.op {
                 LoOp::Load { src, .. } => Some(src),
-                LoOp::Store { dst, .. } => Some(dst),
+                // `Store`/`Bin` both dereference via `dst` — the latter is an
+                // in-place compound (`add [si+disp],ax` = `*p op= y`).
+                LoOp::Store { dst, .. } | LoOp::Bin { dst, .. } => Some(dst),
                 _ => None,
             };
             matches!(place, Some(Place::Deref(d) | Place::DerefDisp(d, _)) if *d == r)
+        })
+    }
+
+    /// Is this reg-var a pointer *parameter*? Loaded from a positive `[bp+N]`
+    /// slot (parameters sit above the saved BP/return address), as opposed to an
+    /// immediate (`&global`) or a negative local slot. Used to decline the
+    /// reg-source subscript compound `p[k] op= v` for params — our bcc back end
+    /// routes that through the local-array path and panics.
+    fn reg_loaded_from_param(&self, r: Reg) -> bool {
+        self.insns.iter().any(|n| {
+            matches!(&n.op, LoOp::Load { dst: Place::Reg(d), src: Place::Local(off) } if *d == r && *off > 0)
+        })
+    }
+
+    /// Is a stack-local pointer? Its value is loaded into `bx` (`mov bx,[bp-slot]`)
+    /// and `bx` is then dereferenced — the way BCC reads through a spilled `int *`.
+    /// Distinguishes a slot assigned `&global` (a pointer) from one assigned a
+    /// literal, so the address load recovers as `&g` rather than the bare offset.
+    fn slot_is_dereferenced(&self, slot: i16) -> bool {
+        let loaded_to_bx = self.insns.iter().any(|n| {
+            matches!(&n.op, LoOp::Load { dst: Place::Reg(Reg::Bx), src: Place::Local(s) } if *s == slot)
+        });
+        loaded_to_bx && self.insns.iter().any(|n| {
+            let place = match &n.op {
+                LoOp::Load { src, .. } => Some(src),
+                LoOp::Store { dst, .. } | LoOp::Bin { dst, .. } => Some(dst),
+                _ => None,
+            };
+            matches!(place, Some(Place::Deref(Reg::Bx) | Place::DerefDisp(Reg::Bx, _)))
         })
     }
 
@@ -1571,6 +1602,30 @@ impl Ctx {
                                 acc = None;
                             }
                         }
+                        // `mov ax, imm; mov [ptr-slot], ax` — the immediate is the
+                        // address of a global (`p = &g` / `p = a` for a global
+                        // array), not a literal: a stack-local pointer assigned a
+                        // data-segment offset. A 3-byte `mov` of an even, non-
+                        // negative value into a slot that is later loaded into `bx`
+                        // and dereferenced is the address (a null pointer is `xor` /
+                        // a direct immediate store). Mirrors the reg-var `mov si,imm`
+                        // arm; without it the address reads as `0` and recompiles to
+                        // `xor` (a byte short).
+                        (_, Place::Imm(v))
+                            if v >= 0
+                                && v % 2 == 0
+                                && matches!(
+                                    self.insns.get(i + 1).map(|n| &n.op),
+                                    Some(LoOp::Store {
+                                        dst: Place::Local(slot),
+                                        src: Place::Reg(Reg::Ax),
+                                    }) if self.slot_is_dereferenced(*slot)
+                                ) =>
+                        {
+                            let g = Var::Global(u16::try_from(v).unwrap_or(0));
+                            self.note(g);
+                            acc = Some(Expr::AddrOf(g));
+                        }
                         (_, src) => {
                             acc = self.operand(src);
                             if acc.is_none() {
@@ -2029,7 +2084,14 @@ impl Ctx {
                             self.insns.get(i + 1).map(|n| &n.op),
                             Some(LoOp::Bin { dst: Place::DerefDisp(r2, d2), op: o2, .. })
                                 if *r2 == dreg && *d2 == disp + 2 && *o2 == op
-                        ) =>
+                        )
+                        // A *variable*-RHS subscript compound through a pointer
+                        // PARAMETER (`p->f += v`) recovers fine, but our bcc back
+                        // end can't recompile `paramptr[k] op= v` (it routes through
+                        // the local-array path and panics). Decline so it stays
+                        // incomplete rather than emitting unrecompilable C; the
+                        // immediate form and local/`&global` pointers are unaffected.
+                        && !(matches!(rhs, Place::Reg(_)) && self.reg_loaded_from_param(dreg)) =>
                 {
                     let ptr = match dreg {
                         Reg::Bx => bx.clone(),

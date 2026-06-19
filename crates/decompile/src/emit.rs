@@ -1558,6 +1558,19 @@ mod tests {
     }
 
     #[test]
+    fn global_address_and_reg_source_field_compound_roundtrip() {
+        // A pointer assigned a global's address (`p = &g`) — the immediate is the
+        // data-segment offset, recovered as `&g` (a 3-byte `mov`, not `xor`/0).
+        assert_roundtrips("int g; int *p; int main(){ p = &g; *p = 5; return 0; }\n");
+        // Reg-source field compound through a local struct pointer (`p->y += v`),
+        // lifted via the `[reg+disp8]` mem-dest ALU + recovered as `p[k] op= v`.
+        assert_roundtrips(
+            "struct S{int x;int y;}; int main(){ struct S a; struct S *p; int v; \
+             p = &a; v = 3; p->y += v; return p->y; }\n",
+        );
+    }
+
+    #[test]
     fn compound_with_call_or_deref_rhs_stays_declined() {
         // A call RHS hits the `push si` arg/save ambiguity, a deref RHS is the
         // later deref stage — both expose unrelated gaps when they complete the

@@ -411,10 +411,10 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             // the source. For `cmp` it's a comparison (`dst = Flags`).
             let m = modrm(1);
             let op = alu_op(bytes[0] | 0x02);
-            let place = if m & 0xc7 == 0x06 {
-                Global(u16_at(bytes, 2))
-            } else {
-                Local(disp8_at(bytes, 2))
+            let place = match m & 0xc7 {
+                0x06 => Global(u16_at(bytes, 2)),
+                0x44 | 0x45 | 0x47 => DerefDisp(deref_base(m), disp8_at(bytes, 2)),
+                _ => Local(disp8_at(bytes, 2)),
             };
             let dst = if op == BinOp::Cmp { Place::Flags } else { place };
             vec![LoOp::Bin { dst, op, lhs: place, rhs: R(reg_of(1)) }]
