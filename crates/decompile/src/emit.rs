@@ -367,7 +367,7 @@ fn expr_is_fold_safe_unverified(e: &Expr) -> bool {
         }
         // Memory loads and side effects: leave split unless a verifier vouches.
         // A bit-field read is a global memory access — not fold-safe.
-        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::Bitfield { .. } => false,
+        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => false,
     }
 }
 
@@ -477,6 +477,7 @@ fn expr_refs_local_at_or_after(e: &Expr, idx: usize, pos: &dyn Fn(&Var) -> Optio
     let blocks = |v: &Var| pos(v).is_some_and(|ridx| ridx >= idx);
     match e {
         Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => blocks(v),
+        Expr::IncDec { var, .. } => blocks(var),
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_refs_local_at_or_after(a, idx, pos) || expr_refs_local_at_or_after(b, idx, pos)
         }
@@ -748,7 +749,7 @@ fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_external_call(a, callees),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
-        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } => false,
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => false,
     }
 }
 
@@ -782,7 +783,7 @@ fn expr_has_call(e: &Expr) -> bool {
         Expr::Ternary(a, b, c) => expr_has_call(a) || expr_has_call(b) || expr_has_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
-        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } => false,
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => false,
     }
 }
 
@@ -995,6 +996,15 @@ fn expr_str(e: &Expr, names: &Names) -> String {
         ),
         Expr::PostIncDeref(v, dec) => {
             format!("*{}{}", names.var_str(*v), if *dec { "--" } else { "++" })
+        }
+        Expr::IncDec { var, prefix, dec } => {
+            let op = if *dec { "--" } else { "++" };
+            let v = names.var_str(*var);
+            if *prefix {
+                format!("{op}{v}")
+            } else {
+                format!("({v}{op})")
+            }
         }
     }
 }

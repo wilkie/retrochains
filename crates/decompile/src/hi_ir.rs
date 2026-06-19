@@ -136,6 +136,12 @@ pub enum Expr {
     /// (the old pointer saved in `bx`, advanced in place, then deref'd). `true`
     /// is the decrement form.
     PostIncDeref(Var, bool),
+    /// `v++` / `++v` / `v--` / `--v` as a VALUE (with its side effect) — recovered
+    /// when a variable's inc/dec is fused into an expression (e.g. a call argument
+    /// `f(a++)`): a postfix saves the old value before stepping (`mov ax,v; inc
+    /// v`), a prefix steps before reading (`inc v; mov ax,v`). `prefix` and `dec`
+    /// select the four forms.
+    IncDec { var: Var, prefix: bool, dec: bool },
     /// `gvN.fK` — read an unsigned bit-field of a global modelled as a synthesized
     /// struct. Recovered from the extraction `mov al,[g]; shr ax,1 ×bit_off; and
     /// ax,(2^width-1)`. `global` is the data-segment offset; the global's whole
@@ -152,7 +158,7 @@ fn contains_call(e: &Expr) -> bool {
         Expr::Ternary(a, b, c) => contains_call(a) || contains_call(b) || contains_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => contains_call(a),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
-        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } => false,
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => false,
     }
 }
 
@@ -172,7 +178,7 @@ fn is_simple_compound_rhs(e: &Expr) -> bool {
             is_simple_compound_rhs(a) && is_simple_compound_rhs(b) && is_simple_compound_rhs(c)
         }
         Expr::Not(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => is_simple_compound_rhs(a),
-        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) => false,
+        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::IncDec { .. } => false,
     }
 }
 
@@ -273,6 +279,7 @@ pub enum Stmt {
 fn expr_mentions(expr: &Expr, var: Var) -> bool {
     match expr {
         Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => *v == var,
+        Expr::IncDec { var: v, .. } => *v == var,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             expr_mentions(a, var) || expr_mentions(b, var)
         }
@@ -343,6 +350,7 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
 fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
     match e {
         Expr::Var(v) | Expr::AddrOf(v) | Expr::PostIncDeref(v, _) => f(v),
+        Expr::IncDec { var, .. } => f(var),
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             walk_vars_expr(a, f);
             walk_vars_expr(b, f);
@@ -1027,7 +1035,7 @@ impl Ctx {
             }
             Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => self.mark_unsigned(a),
             Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..)
-            | Expr::PostIncDeref(..) | Expr::Bitfield { .. } => {}
+            | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } => {}
         }
     }
 
@@ -1100,6 +1108,49 @@ impl Ctx {
             return None;
         }
         Some((lo, hi, count))
+    }
+
+    /// A postfix `v++`/`v--` as a value: `mov ax,v; inc/dec v` — the OLD value is
+    /// saved in `ax` (a call arg / return) before the register variable steps.
+    /// Returns `(var, is_dec)`. (No store between the two ops, so the saved value
+    /// is used directly — `b=a; a++` would interpose a store.)
+    fn reg_postinc_at(&self, i: usize) -> Option<(Var, bool)> {
+        let LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Reg(r) } = self.insns.get(i)?.op
+        else {
+            return None;
+        };
+        let var = Self::var_of(Place::Reg(r))?;
+        let LoOp::Un { dst: Place::Reg(d), op, operand: Place::Reg(o) } =
+            self.insns.get(i + 1)?.op
+        else {
+            return None;
+        };
+        if d != r || o != r || !matches!(op, UnOp::Inc | UnOp::Dec) {
+            return None;
+        }
+        Some((var, matches!(op, UnOp::Dec)))
+    }
+
+    /// A prefix `++v`/`--v` as a value: `inc/dec v; mov ax,v` — the register
+    /// variable steps, then its NEW value is read into `ax`. Returns
+    /// `(var, is_dec)`.
+    fn reg_preinc_at(&self, i: usize) -> Option<(Var, bool)> {
+        let LoOp::Un { dst: Place::Reg(d), op, operand: Place::Reg(o) } = self.insns.get(i)?.op
+        else {
+            return None;
+        };
+        if d != o || !matches!(op, UnOp::Inc | UnOp::Dec) {
+            return None;
+        }
+        let var = Self::var_of(Place::Reg(d))?;
+        let LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Reg(r) } = self.insns.get(i + 1)?.op
+        else {
+            return None;
+        };
+        if r != d {
+            return None;
+        }
+        Some((var, matches!(op, UnOp::Dec)))
     }
 
     /// A byte-width source operand: note the variable as `char` and return it.
@@ -1904,6 +1955,21 @@ impl Ctx {
                 // `mov ax, …` starts a fresh accumulator value, discarding any
                 // call result the previous statement left unused. With `dx` set
                 // up, the value is a `long` (its high word in `dx`).
+                // `mov ax,v; inc/dec v` — a postfix `v++`/`v--` whose OLD value is
+                // in `ax`. Recover the post-increment as a VALUE; a separate
+                // `v++` statement would leave `acc` a plain reference and the
+                // recompile would re-read the stepped value (mis-recompile).
+                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Reg(_) }
+                    if i + 1 < hi && self.reg_postinc_at(i).is_some() =>
+                {
+                    flush_call(&mut acc, out);
+                    let (var, dec) = self.reg_postinc_at(i).unwrap();
+                    self.note(var);
+                    acc = Some(Expr::IncDec { var, prefix: false, dec });
+                    acc_long = false;
+                    skip = 1; // the inc/dec
+                }
+
                 LoOp::Load { dst: Place::Reg(Reg::Ax), src } => {
                     flush_call(&mut acc, out);
                     acc_long = false;
@@ -2394,6 +2460,19 @@ impl Ctx {
                 // `x = x ± 1` (which routes through the accumulator above). The
                 // `char` byte form is handled just above; the accumulator `inc
                 // ax`/`inc al` extends the expression and is handled earlier.
+                // `inc/dec v; mov ax,v` — a prefix `++v`/`--v` whose NEW value is
+                // read into `ax` (a call arg / return). Recover it as a value
+                // rather than a standalone `v += 1` statement.
+                LoOp::Un { dst: Place::Reg(_), .. }
+                    if i + 1 < hi && self.reg_preinc_at(i).is_some() =>
+                {
+                    flush_call(&mut acc, out);
+                    let (var, dec) = self.reg_preinc_at(i).unwrap();
+                    self.note(var);
+                    acc = Some(Expr::IncDec { var, prefix: true, dec });
+                    skip = 1; // the `mov ax, v`
+                }
+
                 LoOp::Un { dst, op, operand }
                     if dst == operand
                         && matches!(op, UnOp::Inc | UnOp::Dec)
