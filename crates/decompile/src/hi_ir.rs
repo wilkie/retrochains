@@ -1060,6 +1060,44 @@ impl Ctx {
         }
     }
 
+    /// Match a `long` shift via a runtime helper at instruction `i`:
+    /// `mov dx,[hi]; mov ax,[lo]; mov cl,N; call <extern>` — the 32-bit operand
+    /// in `dx:ax`, the count in `cl`, the helper an opaque external. Returns
+    /// `(lo, hi, count)`. `_TEXT` can't distinguish shl/shr/sar: the direction
+    /// lives in the call's relocation symbol (`N_LXLSH@`/`N_LXRSH@`/`N_LXURSH@`),
+    /// not the `e8 00 00` placeholder, so all three round-trip as `<<`.
+    fn long_shift_at(&self, i: usize) -> Option<(Place, Place, i32)> {
+        let LoOp::Load { dst: Place::Reg(Reg::Dx), src: hi } = self.insns.get(i)?.op else {
+            return None;
+        };
+        let LoOp::Load { dst: Place::Reg(Reg::Ax), src: lo } = self.insns.get(i + 1)?.op else {
+            return None;
+        };
+        // A `long` pair on the frame: lo at disp, hi at disp+2.
+        let (Place::Local(l), Place::Local(h)) = (lo, hi) else {
+            return None;
+        };
+        if h != l + 2 {
+            return None;
+        }
+        let LoOp::Load { dst: Place::Byte(ByteReg::Cl), src: Place::Imm(n) } =
+            self.insns.get(i + 2)?.op
+        else {
+            return None;
+        };
+        let LoOp::Call { target, .. } = self.insns.get(i + 3)?.op else {
+            return None;
+        };
+        // The call must be an opaque external — a `e8 00 00` placeholder whose
+        // target is the instruction right after it (a local callee would carry a
+        // real offset). That placeholder is the long-shift helper.
+        let call_end = self.insns[i + 3].span.start + self.insns[i + 3].span.len;
+        if target != call_end {
+            return None;
+        }
+        Some((lo, hi, n))
+    }
+
     /// A byte-width source operand: note the variable as `char` and return it.
     fn char_operand(&mut self, place: Place) -> Option<Expr> {
         let var = Self::var_of(place)?;
@@ -1457,6 +1495,25 @@ impl Ctx {
                     // `long` shift via a runtime helper) declines rather than
                     // folding a stale value.
                     acc_long = false;
+                }
+
+                // `long` shift via a runtime helper: `mov dx,[hi]; mov ax,[lo];
+                // mov cl,N; call __lxlsh` → `(operand) << N` (a `long`). The
+                // helper direction (shl/shr/sar) is in the call's reloc symbol,
+                // not the `e8 00 00` _TEXT, so `<<` reproduces the bytes for all
+                // three. Without this the helper folds to a bare `g0()`, dropping
+                // the operand setup (recovered 10 vs target 18 bytes).
+                LoOp::Load { dst: Place::Reg(Reg::Dx), .. } if self.long_shift_at(i).is_some() => {
+                    flush_call(&mut acc, out);
+                    let (lo, hi, n) = self.long_shift_at(i).unwrap();
+                    acc = self
+                        .long_operand(lo, hi)
+                        .map(|o| Expr::Binary(BinOp::Shl, Box::new(o), Box::new(Expr::Const(n))));
+                    if acc.is_none() {
+                        self.cant();
+                    }
+                    acc_long = true;
+                    skip = 3; // the `mov ax`, `mov cl`, and the call
                 }
 
                 // `mov dx, ax` — save the accumulator (a binary op's right
