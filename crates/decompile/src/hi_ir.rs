@@ -864,17 +864,6 @@ impl Ctx {
         })
     }
 
-    /// Is this reg-var a pointer *parameter*? Loaded from a positive `[bp+N]`
-    /// slot (parameters sit above the saved BP/return address), as opposed to an
-    /// immediate (`&global`) or a negative local slot. Used to decline the
-    /// reg-source subscript compound `p[k] op= v` for params — our bcc back end
-    /// routes that through the local-array path and panics.
-    fn reg_loaded_from_param(&self, r: Reg) -> bool {
-        self.insns.iter().any(|n| {
-            matches!(&n.op, LoOp::Load { dst: Place::Reg(d), src: Place::Local(off) } if *d == r && *off > 0)
-        })
-    }
-
     /// Is a stack-local pointer? Its value is loaded into `bx` (`mov bx,[bp-slot]`)
     /// and `bx` is then dereferenced — the way BCC reads through a spilled `int *`.
     /// Distinguishes a slot assigned `&global` (a pointer) from one assigned a
@@ -2084,14 +2073,7 @@ impl Ctx {
                             self.insns.get(i + 1).map(|n| &n.op),
                             Some(LoOp::Bin { dst: Place::DerefDisp(r2, d2), op: o2, .. })
                                 if *r2 == dreg && *d2 == disp + 2 && *o2 == op
-                        )
-                        // A *variable*-RHS subscript compound through a pointer
-                        // PARAMETER (`p->f += v`) recovers fine, but our bcc back
-                        // end can't recompile `paramptr[k] op= v` (it routes through
-                        // the local-array path and panics). Decline so it stays
-                        // incomplete rather than emitting unrecompilable C; the
-                        // immediate form and local/`&global` pointers are unaffected.
-                        && !(matches!(rhs, Place::Reg(_)) && self.reg_loaded_from_param(dreg)) =>
+                        ) =>
                 {
                     let ptr = match dreg {
                         Reg::Bx => bx.clone(),
