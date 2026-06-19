@@ -503,6 +503,15 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x04), A, A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x05), A, A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x07), A, A] },
+    // `alu [si/di/bx + disp8], imm` — a struct field / fixed-index compound
+    // through a pointer (`s->y op= K`, mod=01 rm=100/101/111). imm8 (`0x83`) +
+    // imm16 (`0x81`); one extra disp byte vs the no-disp deref forms.
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x44), A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x45), A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x47), A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x44), A, A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x45), A, A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x47), A, A, A] },
     // byte group-1 with imm8 (local / global / register) — `char` operands.
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), BP_DISP8, A, A] },
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), DISP16, A, A, A] },

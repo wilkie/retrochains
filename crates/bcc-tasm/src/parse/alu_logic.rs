@@ -139,6 +139,13 @@ pub(crate) fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AndBxPtrImm16 { imm: imm as u16 });
         }
     }
+    // `and word ptr [si+disp], imm16` — struct field compound.
+    if let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        return Ok(Instr::AndSiDispImm16 { disp, imm: imm as u16 });
+    }
     // `and word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
     if rhs == "ax" && lhs == "word ptr [bx]" {
@@ -383,6 +390,13 @@ pub(crate) fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrBxPtrImm16 { imm: imm as u16 });
         }
     }
+    // `or word ptr [si+disp], imm16` — struct field compound.
+    if let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        return Ok(Instr::OrSiDispImm16 { disp, imm: imm as u16 });
+    }
     // `or word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
     if rhs == "ax" && lhs == "word ptr [bx]" {
@@ -602,6 +616,13 @@ pub(crate) fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::XorBxPtrImm16 { imm: imm as u16 });
         }
+    }
+    // `xor word ptr [si+disp], imm16` — struct field compound.
+    if let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        return Ok(Instr::XorSiDispImm16 { disp, imm: imm as u16 });
     }
     // `xor word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).

@@ -315,7 +315,7 @@ fn group1_op(reg: u8) -> BinOp {
 /// own bytes; `off` its offset in the scanned code (for branch-target math).
 #[allow(clippy::too_many_lines)] // a flat decode table reads better unsplit
 fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
-    use Place::{Byte, Deref, Global, Imm, Local, Reg as R};
+    use Place::{Byte, Deref, DerefDisp, Global, Imm, Local, Reg as R};
 
     // The reg/rm fields of a ModR/M byte at index 1 (the common case).
     let modrm = |i: usize| bytes[i];
@@ -494,6 +494,8 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
                 0x06 => (Global(u16_at(bytes, 2)), 4),
                 // `[si]`/`[di]`/`[bx]` deref (mod=00, rm=100/101/111).
                 0x04 | 0x05 | 0x07 => (Deref(deref_base(m)), 2),
+                // `[si/di/bx + disp8]` deref (mod=01) — a struct field / element.
+                0x44 | 0x45 | 0x47 => (DerefDisp(deref_base(m), disp8_at(bytes, 2)), 3),
                 _ => (R(rm_of(1)), 2),
             };
             // Sign-extend either width to keep the constant a valid 16-bit `int`
@@ -508,10 +510,14 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             // sign-extended `imm8` is a tell: a plain scalar would have used the
             // shorter `0x83`. BCC reaches for the wide form here only in contexts
             // Stage 1 doesn't model — a `long` half (`and [lo],7; and [hi],0`), an
-            // array element, a struct field — where lifting it as a scalar compound
-            // mis-recovers. Leave those opaque (as before) rather than mis-model;
-            // they belong to the later deref/`long` stages.
-            if bytes[0] == 0x81 && i8::try_from(imm).is_ok() {
+            // array element — where lifting it as a scalar compound mis-recovers.
+            // Leave those opaque. A `[reg+disp]` deref, though, is a genuine pointer
+            // field access (`s->y |= 8`) where the imm16 form is normal and the
+            // recovery (`p[k] op= K`) round-trips, so it is exempt.
+            if bytes[0] == 0x81
+                && i8::try_from(imm).is_ok()
+                && !matches!(lhs, DerefDisp(..))
+            {
                 return vec![LoOp::Asm { bytes: bytes.to_vec() }];
             }
             let dst = if op == BinOp::Cmp { Place::Flags } else { lhs };

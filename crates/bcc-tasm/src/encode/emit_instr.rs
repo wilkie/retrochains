@@ -2529,6 +2529,33 @@ pub(crate) fn emit_instr(
             out.push(*disp as u8);
             out.push(*imm as u8);
         }
+        // `<op> word ptr [si+disp8], imm` — mod=01 r/m=100, reg field per op.
+        Instr::AddSiDispImm8 { disp, imm } => {
+            out.extend_from_slice(&[0x83, 0x44, *disp as u8, *imm as u8]);
+        }
+        Instr::SubSiDispImm8 { disp, imm } => {
+            out.extend_from_slice(&[0x83, 0x6C, *disp as u8, *imm as u8]);
+        }
+        Instr::AddSiDispImm16 { disp, imm } => {
+            out.extend_from_slice(&[0x81, 0x44, *disp as u8]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::SubSiDispImm16 { disp, imm } => {
+            out.extend_from_slice(&[0x81, 0x6C, *disp as u8]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::OrSiDispImm16 { disp, imm } => {
+            out.extend_from_slice(&[0x81, 0x4C, *disp as u8]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AndSiDispImm16 { disp, imm } => {
+            out.extend_from_slice(&[0x81, 0x64, *disp as u8]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::XorSiDispImm16 { disp, imm } => {
+            out.extend_from_slice(&[0x81, 0x74, *disp as u8]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
         Instr::AddSiPtrDx => {
             // `add word ptr [si],dx` → 01 14. ModR/M 14 = mod=00
             // reg=DX(010) r/m=100=SI.

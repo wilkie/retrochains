@@ -2015,6 +2015,59 @@ impl Ctx {
                     }
                 }
 
+                // `*(p + K) op= Y` — an in-place compound on a struct field /
+                // fixed-index element through a pointer at a constant offset
+                // (`s->y op= K`, `add [si+disp],imm`). Int stride: K = disp/2.
+                LoOp::Bin { dst: Place::DerefDisp(dreg, disp), op, lhs, rhs }
+                    if Place::DerefDisp(dreg, disp) == lhs
+                        && Self::is_compound_op(op)
+                        && disp % 2 == 0
+                        // A `long` element compound writes two words — this disp then
+                        // disp+2, same op (`and [bx+4],lo; and [bx+6],hi`). That isn't
+                        // an int field; decline (the long stage's job).
+                        && !matches!(
+                            self.insns.get(i + 1).map(|n| &n.op),
+                            Some(LoOp::Bin { dst: Place::DerefDisp(r2, d2), op: o2, .. })
+                                if *r2 == dreg && *d2 == disp + 2 && *o2 == op
+                        ) =>
+                {
+                    let ptr = match dreg {
+                        Reg::Bx => bx.clone(),
+                        r if is_reg_var(r) => {
+                            let v = Var::Reg(r);
+                            self.note(v);
+                            self.note_ptr(v);
+                            Some(Expr::Var(v))
+                        }
+                        _ => None,
+                    };
+                    let rhs_expr = match rhs {
+                        Place::Reg(Reg::Ax) => match acc.take() {
+                            Some(e) if is_simple_compound_rhs(&e) => Some(e),
+                            _ => None,
+                        },
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
+                    };
+                    match (ptr, rhs_expr) {
+                        (Some(p), Some(e)) => {
+                            if let Expr::Var(v) = &p {
+                                self.note_ptr(*v);
+                            }
+                            let place =
+                                LValue::Deref(Box::new(Self::offset_ptr(p, disp / 2)));
+                            out.push(Stmt::Compound(place, op, e));
+                        }
+                        _ => self.cant(),
+                    }
+                }
+
                 // In-place compound modification — `op X, Y` where the
                 // destination is also the left operand and a word variable
                 // (`add si,5`, `add di,si`, `add [g],3`, `sub [bp-4],2`,

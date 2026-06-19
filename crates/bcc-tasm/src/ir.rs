@@ -1923,6 +1923,18 @@ pub enum Instr {
     /// `adc word ptr [si+disp8],<imm8sx>` — `83 54 dd ii`. Carry-
     /// propagation partner for long-pointer `*p += K` (fixture 311).
     AdcSiDispImm8 { disp: i8, imm: i8 },
+    /// `<op> word ptr [si+disp8], imm` — an in-place RMW of a struct field /
+    /// fixed-index element through an SI pointer (`s->y op= K`, `p[k] op= K`),
+    /// fixture 4303. modrm = mod=01 r/m=100 ([si+disp8]) | reg<<3: /0=ADD 0x44,
+    /// /1=OR 0x4C, /4=AND 0x64, /5=SUB 0x6C, /6=XOR 0x74. add/sub take imm8sx
+    /// (`83`) or imm16 (`81`); bitwise is always imm16.
+    AddSiDispImm8 { disp: i8, imm: i8 },
+    AddSiDispImm16 { disp: i8, imm: u16 },
+    SubSiDispImm8 { disp: i8, imm: i8 },
+    SubSiDispImm16 { disp: i8, imm: u16 },
+    OrSiDispImm16 { disp: i8, imm: u16 },
+    AndSiDispImm16 { disp: i8, imm: u16 },
+    XorSiDispImm16 { disp: i8, imm: u16 },
     /// `add word ptr [si],dx` — `01 14`. ADD r/m16,r16 form; ModR/M
     /// `14` = mod=00 reg=DX(010) r/m=100=SI. Low-half memory-dest
     /// add for `*p += y` (variable RHS through a register-resident

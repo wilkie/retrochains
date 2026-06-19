@@ -259,6 +259,18 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SubBxPtrImm16 { imm: imm as u16 });
         }
     }
+    // `sub word ptr [si+disp], imm` — struct field / fixed-index compound
+    // (`s->y -= K`, fixture 4303): imm8sx (`83 6C dd ii`) or imm16.
+    if let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+    {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SubSiDispImm8 { disp, imm });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SubSiDispImm16 { disp, imm: imm as u16 });
+        }
+    }
     // `sub word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
     if rhs == "ax" && lhs == "word ptr [bx]" {
@@ -800,6 +812,18 @@ pub(crate) fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddDiPtrImm16 { imm: imm as u16 });
+        }
+    }
+    // `add word ptr [si+disp], imm` — struct field / fixed-index compound
+    // (`s->y += K`, fixture 4303): imm8sx (`83 44 dd ii`) or imm16 (`81`).
+    if let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+    {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AddSiDispImm8 { disp, imm });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AddSiDispImm16 { disp, imm: imm as u16 });
         }
     }
     // `add word ptr <group>:<sym>[bx], imm/reg` — indexed-element

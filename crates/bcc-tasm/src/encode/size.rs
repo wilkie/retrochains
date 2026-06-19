@@ -357,7 +357,11 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         Instr::AddSiPtrReg8 { .. } | Instr::SubSiPtrReg8 { .. } => 2,
         Instr::IncSiPtrByte | Instr::DecSiPtrByte => 2,
         Instr::IncSiPtrWord | Instr::DecSiPtrWord => 2,
-        Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. } => 4,
+        Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. }
+        | Instr::AddSiDispImm8 { .. } | Instr::SubSiDispImm8 { .. } => 4,
+        Instr::AddSiDispImm16 { .. } | Instr::SubSiDispImm16 { .. }
+        | Instr::OrSiDispImm16 { .. } | Instr::AndSiDispImm16 { .. }
+        | Instr::XorSiDispImm16 { .. } => 5,
         Instr::AddSiPtrDx => 2,
         Instr::AddSiPtrAx
         | Instr::SubSiPtrAx
