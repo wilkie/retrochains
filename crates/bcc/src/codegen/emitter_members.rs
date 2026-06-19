@@ -626,6 +626,42 @@ impl<'a> super::FunctionEmitter<'a> {
             }
             return;
         }
+        // `p[K].field` — a constant-index subscript of a struct *pointer*, then
+        // a field. The element sits at `p + K*stride`; add the field offset and
+        // read `[reg + total]`, loading `p` into BX if it isn't reg-resident.
+        // (A fixed-address array `pts[K].field` goes through the chain helper.)
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(pname) = &array.kind
+            && self.locals.has(pname)
+            && let Some(k) = try_const_eval(index)
+            && let Some((stride, field_off, field_ty)) =
+                self.locals.type_of(pname).pointee().and_then(|pe| {
+                    pe.field(field)
+                        .map(|(fo, ft)| (i32::from(pe.size_bytes()), fo, ft.clone()))
+                })
+        {
+            let total = (k as i32) * stride + i32::from(field_off);
+            let reg_name = match self.locals.location_of(pname) {
+                LocalLocation::Reg(reg) => reg.name().to_string(),
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    "bx".to_string()
+                }
+            };
+            let addr = if total == 0 {
+                format!("[{reg_name}]")
+            } else {
+                format!("[{reg_name}+{total}]")
+            };
+            if field_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.emit_widen_al(&field_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+            return;
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
