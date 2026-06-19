@@ -3387,7 +3387,11 @@ fn detect_local_array(ctx: &Ctx) -> Vec<ArraySpec> {
         return Vec::new(); // an int array can't sit on an odd offset
     }
     // Genuine top-packed scalars: offsets are exactly {-s,-2s,…,-ks} and fill the
-    // frame (a `char` frame is padded up to even). Keep them as scalars.
+    // frame (a `char` frame is padded up to even). Keep them as scalars — merging
+    // them into one `int` array would discard each slot's signedness (an array is a
+    // single element type), which silently changes unsigned div/shift/compare
+    // codegen. (So a constant-index `int a[N]` with no `lea` anchor stays a known
+    // gap; distinguishing it from spilled scalars needs per-slot type evidence.)
     slots.sort_unstable_by(|a, b| b.cmp(a)); // descending toward bp
     let k = i16::try_from(slots.len()).unwrap_or(0);
     let top_packed = slots.iter().enumerate().all(|(j, &o)| o == -stride * (i16::try_from(j).unwrap_or(0) + 1));
