@@ -492,7 +492,8 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let (lhs, imm_off) = match m & 0xc7 {
                 0x46 => (Local(disp8_at(bytes, 2)), 3),
                 0x06 => (Global(u16_at(bytes, 2)), 4),
-                0x04 | 0x05 => (Deref(deref_base(m)), 2),
+                // `[si]`/`[di]`/`[bx]` deref (mod=00, rm=100/101/111).
+                0x04 | 0x05 | 0x07 => (Deref(deref_base(m)), 2),
                 _ => (R(rm_of(1)), 2),
             };
             // Sign-extend either width to keep the constant a valid 16-bit `int`

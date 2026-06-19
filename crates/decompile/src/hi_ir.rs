@@ -1969,6 +1969,52 @@ impl Ctx {
                     }
                 }
 
+                // In-place compound through a pointer — `*p op= Y` (`add [bx],3`,
+                // `or [si],dx`). The destination is a deref: `[bx]` reads whatever
+                // the pointer-tracking holds (a loaded pointer, or a `p+i`/`a[i]`
+                // address); `[si]`/`[di]` is a register-variable pointer. Distinct
+                // from the load-op-store `*p = *p op Y`, so it recovers as `*p op= Y`.
+                LoOp::Bin { dst: Place::Deref(dreg), op, lhs, rhs }
+                    if Place::Deref(dreg) == lhs && Self::is_compound_op(op) =>
+                {
+                    let ptr = match dreg {
+                        Reg::Bx => bx.clone(),
+                        r => {
+                            // `[si]`/`[di]` — the register variable is the pointer.
+                            let v = Var::Reg(r);
+                            self.note(v);
+                            self.note_ptr(v);
+                            Some(Expr::Var(v))
+                        }
+                    };
+                    let rhs_expr = match rhs {
+                        Place::Reg(Reg::Ax) => match acc.take() {
+                            Some(e) if is_simple_compound_rhs(&e) => Some(e),
+                            _ => None,
+                        },
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
+                        }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
+                    };
+                    match (ptr, rhs_expr) {
+                        // A `long` array element only writes its low word — not a
+                        // clean `long` compound — so decline (the long stage's job).
+                        (Some(p), _) if self.is_long_array_elem(&p) => self.cant(),
+                        (Some(p), Some(e)) => {
+                            if let Expr::Var(v) = &p {
+                                self.note_ptr(*v);
+                            }
+                            out.push(Stmt::Compound(LValue::Deref(Box::new(p)), op, e));
+                        }
+                        _ => self.cant(),
+                    }
+                }
+
                 // In-place compound modification — `op X, Y` where the
                 // destination is also the left operand and a word variable
                 // (`add si,5`, `add di,si`, `add [g],3`, `sub [bp-4],2`,

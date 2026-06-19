@@ -1535,6 +1535,17 @@ mod tests {
     }
 
     #[test]
+    fn pointer_deref_compound_roundtrips() {
+        // `*p op= K` — in-place read-modify-write through a pointer (`add [bx],K`
+        // or `add [si],K` for a register-variable pointer), distinct from the
+        // load-op-store `*p = *p op K`. (Only `add [mem],imm` assembles today; the
+        // `or`/`sub`/`and` deref forms are a separate `bcc-tasm` gap.)
+        assert_roundtrips("void f(int *p){ *p += 3; }\n");
+        assert_roundtrips("int f(int *p){ *p += 3; return *p; }\n");
+        assert_roundtrips("void f(int *p){ *p += 1000; }\n"); // wide imm16 through a deref
+    }
+
+    #[test]
     fn compound_with_call_or_deref_rhs_stays_declined() {
         // A call RHS hits the `push si` arg/save ambiguity, a deref RHS is the
         // later deref stage — both expose unrelated gaps when they complete the

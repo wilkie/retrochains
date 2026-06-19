@@ -477,10 +477,12 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), BP_DISP8, A, A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), DISP16, A, A, A] }, // alu [disp16], imm8 (global)
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), REG, A] },
-    // `alu [si]/[di], imm8` (mod=00, rm=si 0x04 / di 0x05) — e.g. `cmp [si],0`
-    // for `*p == 0` in a condition.
+    // `alu [si]/[di]/[bx], imm8` (mod=00, rm=si 0x04 / di 0x05 / bx 0x07) — a
+    // pointer deref: `cmp [si],0` for `*p == 0` in a condition, or `add [bx],3`
+    // for `*p += 3` (an in-place RMW through a pointer).
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x04), A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x05), A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x07), A] },
     // group-1 ALU with a full imm16 (`0x81`) — the wide-immediate counterpart of
     // the `0x83` imm8 forms above, for a constant that doesn't fit a sign-extended
     // byte (`x -= 1000`, `g &= 0xff00`). Same operand shapes, one extra imm byte.
@@ -489,6 +491,7 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluImm, pat: &[L(0x81), REG, A, A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x04), A, A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x05), A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x07), A, A] },
     // byte group-1 with imm8 (local / global / register) — `char` operands.
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), BP_DISP8, A, A] },
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), DISP16, A, A, A] },
