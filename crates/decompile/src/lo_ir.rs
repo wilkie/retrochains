@@ -466,17 +466,37 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             vec![LoOp::Bin { dst, op, lhs: R(Reg::Ax), rhs: Imm(imm) }]
         }
         Idiom::AluImm => {
-            // group 1 with a sign-extended imm8, against a local (`83 46 disp
-            // imm`), a global (`83 06 disp16 imm`), or a register (`83 modrm imm`).
+            // group 1 against a local (`46 disp`), a global (`06 disp16`), an
+            // `[si]`/`[di]` deref (`04`/`05`), or a register — with the immediate
+            // either a sign-extended imm8 (`0x83`) or a full imm16 (`0x81`). The
+            // operand shapes are identical; only the immediate width differs, so
+            // the place and its start offset are shared and only the read varies.
             let m = modrm(1);
             let op = group1_op(m >> 3);
-            let (lhs, imm) = match m & 0xc7 {
-                0x46 => (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed())),
-                0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed())),
-                // `[si]` / `[di]` deref (mod=00, rm=100/101) — `cmp [si],imm`.
-                0x04 | 0x05 => (Deref(deref_base(m)), i32::from(bytes[2].cast_signed())),
-                _ => (R(rm_of(1)), i32::from(bytes[2].cast_signed())),
+            let (lhs, imm_off) = match m & 0xc7 {
+                0x46 => (Local(disp8_at(bytes, 2)), 3),
+                0x06 => (Global(u16_at(bytes, 2)), 4),
+                0x04 | 0x05 => (Deref(deref_base(m)), 2),
+                _ => (R(rm_of(1)), 2),
             };
+            // Sign-extend either width to keep the constant a valid 16-bit `int`
+            // (so `g &= 0xff00` reads as `g &= -256` — byte-identical imm16, but a
+            // value the recompiler treats as a plain `int`, not an overflowing one).
+            let imm = if bytes[0] == 0x81 {
+                i32::from(u16_at(bytes, imm_off).cast_signed())
+            } else {
+                i32::from(bytes[imm_off].cast_signed())
+            };
+            // A `0x81` (wide-immediate) op carrying a value that *fits* a
+            // sign-extended `imm8` is a tell: a plain scalar would have used the
+            // shorter `0x83`. BCC reaches for the wide form here only in contexts
+            // Stage 1 doesn't model — a `long` half (`and [lo],7; and [hi],0`), an
+            // array element, a struct field — where lifting it as a scalar compound
+            // mis-recovers. Leave those opaque (as before) rather than mis-model;
+            // they belong to the later deref/`long` stages.
+            if bytes[0] == 0x81 && i8::try_from(imm).is_ok() {
+                return vec![LoOp::Asm { bytes: bytes.to_vec() }];
+            }
             let dst = if op == BinOp::Cmp { Place::Flags } else { lhs };
             vec![LoOp::Bin { dst, op, lhs, rhs: Imm(imm) }]
         }

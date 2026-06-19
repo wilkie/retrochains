@@ -1511,6 +1511,39 @@ mod tests {
     }
 
     #[test]
+    fn wide_immediate_compound_roundtrips() {
+        // Group-1 ALU with a full imm16 (`0x81`) — a constant too big for the
+        // sign-extended imm8 (`0x83`) form. Reg-var and global, add/sub/and/or.
+        assert_roundtrips("int f(int x){ x -= 1000; return x; }\n");
+        assert_roundtrips("int f(int x){ x += 5000; return x; }\n");
+        // `& 0xff00` lifts as `& -256` (byte-identical imm16, valid `int`).
+        assert_roundtrips("int f(int x){ x &= 0xff00; return x; }\n");
+        assert_roundtrips("int f(int x){ x |= 0x0fff; return x; }\n");
+        // Global wide-immediate compound.
+        assert_roundtrips("int g; void f(){ g &= 0xff00; }\n");
+    }
+
+    #[test]
+    fn wide_immediate_on_long_or_array_stays_incomplete() {
+        // BCC uses the wide `0x81` form for a `long` half / array element even when
+        // the value fits an imm8 — a context Stage 1 doesn't model. Those must not
+        // mis-recover into scalar compounds; the function stays incomplete (the
+        // pre-Stage-1 state), not a byte-mismatch.
+        let long_and = recompile_text(
+            "int main(void){ long x = 15; x &= 7; return 0; }\n",
+            &CompileOpts::default(),
+        )
+        .expect("compiles");
+        assert!(decompile(&long_and).is_none(), "long &= small stays declined");
+        let arr_and = recompile_text(
+            "int main(void){ int a[3]; a[0]=0; a[1]=0xFF; a[2]=0; a[1]&=0x0F; return a[1]; }\n",
+            &CompileOpts::default(),
+        )
+        .expect("compiles");
+        assert!(decompile(&arr_and).is_none(), "array elem &= small stays declined");
+    }
+
+    #[test]
     fn widening_conversions_roundtrip() {
         // `char * char` promotes both to `int` (each `cbw`) and multiplies via
         // the register spill — `imul dx` reads the spilled right operand, not a

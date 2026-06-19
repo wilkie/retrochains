@@ -464,6 +464,14 @@ const IDIOMS: &[Def] = &[
     // for `*p == 0` in a condition.
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x04), A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), M(0xc7, 0x05), A] },
+    // group-1 ALU with a full imm16 (`0x81`) — the wide-immediate counterpart of
+    // the `0x83` imm8 forms above, for a constant that doesn't fit a sign-extended
+    // byte (`x -= 1000`, `g &= 0xff00`). Same operand shapes, one extra imm byte.
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), BP_DISP8, A, A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), DISP16, A, A, A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), REG, A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x04), A, A] },
+    Def { idiom: Idiom::AluImm, pat: &[L(0x81), M(0xc7, 0x05), A, A] },
     // byte group-1 with imm8 (local / global / register) — `char` operands.
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), BP_DISP8, A, A] },
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), DISP16, A, A, A] },
