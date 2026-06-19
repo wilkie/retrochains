@@ -3366,6 +3366,15 @@ impl Ctx {
                 lhs: Place::Reg(Reg::Ax),
                 rhs: Place::Imm(k),
             }) => *k,
+            // `case 0` — BCC tests the scrutinee against 0 with `or ax,ax`, not
+            // `cmp ax,0`. The `je body; jmp default` that follows still marks it a
+            // switch dispatch (an `if` has no `jmp default`).
+            Some(LoOp::Bin {
+                dst: Place::Reg(Reg::Ax),
+                op: BinOp::Or,
+                lhs: Place::Reg(Reg::Ax),
+                rhs: Place::Reg(Reg::Ax),
+            }) => 0,
             _ => return None,
         };
         let (cond, target) = match self.insns.get(c + 1).map(|n| &n.op) {
