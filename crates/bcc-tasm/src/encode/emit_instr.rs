@@ -3030,6 +3030,15 @@ pub(crate) fn emit_instr(
             out.push(0x34);
             out.push(*imm);
         }
+        Instr::AluByteRegDispImm8 { op, di, disp, imm } => {
+            // `<op> byte ptr [si+disp]/[di+disp], imm8` → 80 (mod=01 reg=<op>
+            // r/m=100 si / 101 di) disp ii. op ∈ {1=or, 4=and, 6=xor}.
+            out.push(0x80);
+            let rm = if *di { 0x45 } else { 0x44 };
+            out.push(rm | (op << 3));
+            out.push(i8::try_from(*disp).expect("reg-rel disp fits in i8") as u8);
+            out.push(*imm);
+        }
         Instr::AndBpRelByteImm8 { offset, imm } => {
             // `and byte ptr [bp+disp], imm8` → 80 /4 [bp+disp] ii.
             // Grp1 r/m8 imm8. Fixture 720.

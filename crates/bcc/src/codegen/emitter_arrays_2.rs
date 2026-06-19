@@ -705,6 +705,38 @@ impl<'a> super::FunctionEmitter<'a> {
             }
             return;
         }
+        // Char reg-resident pointer subscript BITWISE compound: `char *p; p[K]
+        // |= imm` / `&=` / `^=` with `p` in SI/DI. Bitwise has no carry, so BCC
+        // uses a mem-direct byte op `<op> byte ptr [reg+off], imm8` (no AL
+        // detour). Oracle: `p[2] |= 8` → `or byte ptr [si+2],8`.
+        if self.locals.has(array)
+            && let Some(pointee) = self.locals.type_of(array).pointee()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(array)
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && pointee.is_char_like()
+            && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && let Some(v) = try_const_eval(value)
+        {
+            let mnem = match op {
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let reg_name = reg.name();
+            let disp = if off == 0 {
+                format!("[{reg_name}]")
+            } else if off > 0 {
+                format!("[{reg_name}+{off}]")
+            } else {
+                format!("[{reg_name}-{}]", -off)
+            };
+            let _ = write!(self.out, "\t{mnem}\tbyte ptr {disp},{}\r\n", v & 0xFF);
+            return;
+        }
         // Stack-resident local/param pointer subscript compound:
         // `int *p` held on the stack (a parameter, or a spilled local),
         // `p[K] op= <var>`. BCC loads the pointer into BX *first*, then

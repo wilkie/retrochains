@@ -116,6 +116,17 @@ pub(crate) fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AndSiPtrByteImm8 { imm: imm as u8 });
         }
     }
+    // `and byte ptr [si+disp]` / `[di+disp], imm8` — char field at an offset.
+    if let Some(disp) = parse_byte_si_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::AluByteRegDispImm8 { op: 4, di: false, disp: i16::from(disp), imm: imm as u8 });
+    }
+    if let Some(disp) = parse_byte_di_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::AluByteRegDispImm8 { op: 4, di: true, disp: i16::from(disp), imm: imm as u8 });
+    }
     // `and word ptr [si], imm16` — int `*p &= K` through SI. BCC uses the
     // imm16 form even for small bitwise constants (fixture 4289).
     if lhs == "word ptr [si]" {
@@ -368,6 +379,17 @@ pub(crate) fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrSiPtrByteImm8 { imm: imm as u8 });
         }
     }
+    // `or byte ptr [si+disp]` / `[di+disp], imm8` — char field at an offset.
+    if let Some(disp) = parse_byte_si_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::AluByteRegDispImm8 { op: 1, di: false, disp: i16::from(disp), imm: imm as u8 });
+    }
+    if let Some(disp) = parse_byte_di_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::AluByteRegDispImm8 { op: 1, di: true, disp: i16::from(disp), imm: imm as u8 });
+    }
     // `or word ptr [si], K|ax` — int `*p |= …` through SI (imm16 even for
     // small constants, fixture 4288).
     if lhs == "word ptr [si]" {
@@ -594,6 +616,17 @@ pub(crate) fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::XorSiPtrByteImm8 { imm: imm as u8 });
         }
+    }
+    // `xor byte ptr [si+disp]` / `[di+disp], imm8` — char field at an offset.
+    if let Some(disp) = parse_byte_si_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::AluByteRegDispImm8 { op: 6, di: false, disp: i16::from(disp), imm: imm as u8 });
+    }
+    if let Some(disp) = parse_byte_di_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::AluByteRegDispImm8 { op: 6, di: true, disp: i16::from(disp), imm: imm as u8 });
     }
     // `xor word ptr [si], K|ax` — int `*p ^= …` through SI (imm16 even for
     // small constants, fixture 4290).

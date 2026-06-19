@@ -2210,6 +2210,11 @@ pub enum Instr {
     OrSiPtrByteImm8 { imm: u8 },
     /// `xor byte ptr [si], imm8` — `80 34 ii`. Sibling for `^=`.
     XorSiPtrByteImm8 { imm: u8 },
+    /// `<op> byte ptr [si+disp]` / `[di+disp], imm8` — the +disp sibling of the
+    /// three byte bitwise forms above (`p->c |= K` for a char field past the
+    /// first). `80 (mod=01 reg=<op> r/m=100 si / 101 di) disp ii`, where `op` is
+    /// the group-1 digit: 1=OR, 4=AND, 6=XOR.
+    AluByteRegDispImm8 { op: u8, di: bool, disp: i16, imm: u8 },
     /// `<op> word ptr [si], imm16` — Grp1 r/m16,imm16, mod=00 r/m=100
     /// (`81 <modrm> imm_lo imm_hi`, 4 bytes). An in-place RMW through a
     /// register-variable pointer, `*p op= K`. BCC uses the imm16 form even
