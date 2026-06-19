@@ -1548,6 +1548,16 @@ mod tests {
     }
 
     #[test]
+    fn pointer_subscript_immediate_store_roundtrips() {
+        // `p[K] = const` — a word immediate store at a constant offset through a
+        // pointer (`mov word ptr [si/di/bx + disp], imm16`), recovered as the
+        // pointer-arithmetic subscript.
+        assert_roundtrips("void f(int *p){ p[1] = 5; }\n");
+        assert_roundtrips("void f(int *p){ p[2] = 1000; }\n");
+        assert_roundtrips("int f(int *p){ p[1] = 7; return p[1]; }\n");
+    }
+
+    #[test]
     fn compound_with_call_or_deref_rhs_stays_declined() {
         // A call RHS hits the `push si` arg/save ambiguity, a deref RHS is the
         // later deref stage — both expose unrelated gaps when they complete the

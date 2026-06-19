@@ -2273,6 +2273,32 @@ impl Ctx {
 
                 // `mov byte ptr [bx], imm` — a `char` immediate stored through a
                 // `char *` (`*p = const`).
+                // `mov byte [p+disp], imm` — `cp[K] = const` through a `char *` at a
+                // constant offset (`*(cp + K) = const`). `[bx]` reads the tracked
+                // pointer; `[si]`/`[di]` is a reg-var `char *`. Char stride is 1, so
+                // the offset is the byte disp directly.
+                LoOp::StoreImmByte { dst: Place::DerefDisp(r, disp), imm } => {
+                    flush_call(&mut acc, out);
+                    let ptr = match r {
+                        Reg::Bx => bx.clone(),
+                        // A reg-var `char *` at a constant offset is often the decay
+                        // of a local `char` array (`p = a; p[1] = …`), which
+                        // detect_local_array can't yet model alongside the pointer
+                        // (it mis-recovers as scalars) — leave those to the array
+                        // stage rather than emit wrong bytes.
+                        _ => None,
+                    };
+                    match ptr {
+                        Some(p) => {
+                            if let Expr::Var(v) = &p {
+                                self.note_char_ptr(*v);
+                            }
+                            let place = LValue::Deref(Box::new(Self::offset_ptr(p, disp)));
+                            out.push(Stmt::Assign(place, Expr::Const(imm)));
+                        }
+                        None => self.cant(),
+                    }
+                }
                 LoOp::StoreImmByte { dst: Place::Deref(Reg::Bx), imm } => {
                     flush_call(&mut acc, out);
                     match bx.clone() {

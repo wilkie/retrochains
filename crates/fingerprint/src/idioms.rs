@@ -166,6 +166,9 @@ pub enum Idiom {
     /// `c7 47 disp8 iw` — store a word immediate at `[bx+disp8]`
     /// (`p[K] = const` / `*(p+K) = const`).
     StoreImmDispDeref,
+    /// `c6 44/45/47 disp8 ii` — store a *byte* immediate at `[si/di/bx+disp8]`
+    /// (`cp[K] = const` through a `char *`, the byte sibling of `StoreImmDispDeref`).
+    StoreImmByteDispDeref,
     /// `a0 aa aa` — `mov al, [mem]`: load a `char` global.
     LoadGlobalByte,
     /// `a2 aa aa` — `mov [mem], al`: store a `char` global.
@@ -297,6 +300,7 @@ impl Idiom {
             Idiom::PointerStore => "store via pointer (mov [si/di], r16)",
             Idiom::PointerStoreDisp8 => "store via pointer+offset (mov [bx+disp8], r16)",
             Idiom::StoreImmDispDeref => "store imm via pointer+offset (mov [bx+disp8], imm16)",
+            Idiom::StoreImmByteDispDeref => "store byte imm via pointer+offset (mov [si/di/bx+disp8], imm8)",
             Idiom::LoadGlobalByte => "load global byte (mov al, [mem])",
             Idiom::StoreGlobalByte => "store global byte (mov [mem], al)",
             Idiom::AluGlobal => "alu reg, global",
@@ -402,6 +406,13 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x44), A] },
     Def { idiom: Idiom::PointerStoreDisp8, pat: &[L(0x89), M(0xc7, 0x45), A] },
     Def { idiom: Idiom::StoreImmDispDeref, pat: &[L(0xc7), M(0xc7, 0x47), A, A, A] },
+    // word disp-deref store through [si+disp]/[di+disp] — `c7 44/45 disp iw`.
+    Def { idiom: Idiom::StoreImmDispDeref, pat: &[L(0xc7), M(0xc7, 0x44), A, A, A] },
+    Def { idiom: Idiom::StoreImmDispDeref, pat: &[L(0xc7), M(0xc7, 0x45), A, A, A] },
+    // byte disp-deref store through [si/di/bx + disp] — `c6 44/45/47 disp ii`.
+    Def { idiom: Idiom::StoreImmByteDispDeref, pat: &[L(0xc6), M(0xc7, 0x44), A, A] },
+    Def { idiom: Idiom::StoreImmByteDispDeref, pat: &[L(0xc6), M(0xc7, 0x45), A, A] },
+    Def { idiom: Idiom::StoreImmByteDispDeref, pat: &[L(0xc6), M(0xc7, 0x47), A, A] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x89), M(0xc7, 0x07)] },
     Def { idiom: Idiom::PointerStore, pat: &[L(0x88), M(0xc7, 0x07)] },
     Def { idiom: Idiom::StoreImmDeref, pat: &[L(0xc7), M(0xc7, 0x07), A, A] }, // mov [bx], imm16
