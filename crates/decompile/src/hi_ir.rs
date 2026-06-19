@@ -207,6 +207,10 @@ pub enum LValue {
     Var(Var),
     /// `*p` — a store through a pointer.
     Deref(Box<Expr>),
+    /// `gvN.fK = …` — assign a bit-field of a global modelled as a synthesized
+    /// struct. Recovered from the clear+set pair `and byte[g],~mask; or
+    /// byte[g],v<<bit_off`. Mirrors [`Expr::Bitfield`].
+    Bitfield { global: u16, bit_off: u8, width: u8 },
 }
 
 /// What the `dx` register holds while a 32-bit `long` is being assembled (its
@@ -359,6 +363,7 @@ fn walk_vars_lvalue(lv: &mut LValue, f: &mut dyn FnMut(&mut Var)) {
     match lv {
         LValue::Var(v) => f(v),
         LValue::Deref(e) => walk_vars_expr(e, f),
+        LValue::Bitfield { .. } => {}
     }
 }
 
@@ -1110,6 +1115,40 @@ impl Ctx {
             return None;
         }
         Some((bit_off, width, j - i))
+    }
+
+    /// Match a bit-field WRITE clear+set PAIR at instruction `i`: `and byte[g],
+    /// ~mask` then `or byte[g], v<<bit_off` to the SAME global. The cleared-bit
+    /// mask must be a single contiguous field and the OR value must lie within
+    /// it. Returns `(bit_off, width, value)` for `g.fK = value`.
+    fn bitfield_write_pair_at(&self, i: usize) -> Option<(u8, u8, i32)> {
+        let LoOp::BinByte { dst: Place::Global(g), op: BinOp::And, rhs: Place::Imm(a), .. } =
+            self.insns.get(i)?.op
+        else {
+            return None;
+        };
+        let LoOp::BinByte { dst: Place::Global(g2), op: BinOp::Or, rhs: Place::Imm(o), .. } =
+            self.insns.get(i + 1)?.op
+        else {
+            return None;
+        };
+        if g2 != g {
+            return None;
+        }
+        // Bits the AND clears = the field's bits.
+        let field_mask = !((a as u32) as u8);
+        if field_mask == 0 {
+            return None;
+        }
+        let bit_off = field_mask.trailing_zeros() as u8;
+        let width = field_mask.count_ones() as u8;
+        // Contiguous?  And the OR value must sit entirely within the field.
+        let expected = ((u16::from((1u16 << width) - 1)) << bit_off) as u8;
+        let ob = (o as u32) as u8;
+        if field_mask != expected || (ob & !field_mask) != 0 {
+            return None;
+        }
+        Some((bit_off, width, i32::from(ob >> bit_off)))
     }
 
     /// A byte-width destination: note the variable as `char` and return it.
@@ -2272,6 +2311,28 @@ impl Ctx {
                 // is byte-indistinguishable from a scalar char local
                 // (array-vs-scalars); a byte register goes via `Bin` (Place::Byte
                 // is already char).
+                // Bit-field WRITE: the clear+set pair `and byte[g],~mask; or
+                // byte[g],v<<off` → `gvN.fK = v`. Even global only (the gvN
+                // naming is word-spaced). Recovering it (instead of the raw
+                // `gv &= ~m; gv |= v`) is what lets a global that is ALSO read as
+                // a bit-field stay consistent — both sides become struct ops and
+                // the mixed-access guard doesn't fire.
+                LoOp::BinByte {
+                    dst: Place::Global(g),
+                    op: BinOp::And,
+                    lhs: Place::Global(lg),
+                    rhs: Place::Imm(_),
+                } if g == lg && g % 2 == 0 && self.bitfield_write_pair_at(i).is_some() => {
+                    flush_call(&mut acc, out);
+                    let (bit_off, width, value) = self.bitfield_write_pair_at(i).unwrap();
+                    self.bitfield_globals.entry(g).or_default().insert((bit_off, width));
+                    out.push(Stmt::Assign(
+                        LValue::Bitfield { global: g, bit_off, width },
+                        Expr::Const(value),
+                    ));
+                    skip = 1; // the paired `or`
+                }
+
                 LoOp::BinByte { dst, op, lhs, rhs: Place::Imm(v) }
                     if dst == lhs && Self::is_compound_op(op) =>
                 {

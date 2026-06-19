@@ -905,6 +905,9 @@ fn lvalue_str(lv: &LValue, names: &Names) -> String {
     match lv {
         LValue::Var(v) => names.var_str(*v),
         LValue::Deref(e) => deref_str(e, names),
+        LValue::Bitfield { global, bit_off, width } => {
+            names.bitfield_str(*global, *bit_off, *width)
+        }
     }
 }
 
