@@ -1451,18 +1451,46 @@ impl Ctx {
                 LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::DerefDisp(r, disp) }
                     if is_reg_var(r) =>
                 {
-                    // NB: the char field/element compound `*(p+disp) op= K` (`mov
-                    // al,[si+d]; <op> al,K; mov [si+d],al`) is NOT recovered here.
-                    // The decompiler loses the struct type, so it would emit
-                    // `p[disp] op= K` over a `char *` — which our bcc currently
-                    // panics on (emitter_arrays_2.rs: char-pointer param subscript
-                    // compound, reg-resident pointer; the byte sibling of the word
-                    // fix in commit 6f4d6b00). Recover it once that bcc gap closes.
-                    flush_call(&mut acc, out);
-                    let v = Var::Reg(r);
-                    self.note(v);
-                    self.note_char_ptr(v);
-                    acc = Some(Self::deref_at(Expr::Var(v), disp));
+                    // `*(p+disp) op= K` — char compound on a struct field / fixed
+                    // element through a reg-var pointer at a non-zero offset
+                    // (`s->c op= K`): `mov al,[si+d]; add al,K; mov [si+d],al`.
+                    // Recover the load-op-store-SAME-lvalue pattern as a Compound
+                    // (the Assign `*(p+d) = *(p+d) op K` double-derefs). The
+                    // struct type is lost, so it emits `p[d] op= K` over a `char
+                    // *` — recompiled via the reg-resident char-pointer compound
+                    // path in emit_array_compound_assign. ARITH only (Add/Sub):
+                    // BCC folds char `-=` to `add al,(-K)`, so a recovered Add
+                    // covers both; bitwise char compounds go mem-direct and aren't
+                    // emitted by that bcc path yet, so leave them incomplete.
+                    if acc.is_none()
+                        && let Some(LoOp::Bin {
+                            dst: Place::Byte(ByteReg::Al),
+                            op: op @ (BinOp::Add | BinOp::Sub),
+                            lhs: Place::Byte(ByteReg::Al),
+                            rhs: Place::Imm(v),
+                        }) = self.insns.get(i + 1).map(|n| n.op.clone())
+                        && matches!(
+                            self.insns.get(i + 2).map(|n| &n.op),
+                            Some(LoOp::Store { dst: Place::DerefDisp(r2, d2), src: Place::Byte(_) })
+                                if *r2 == r && *d2 == disp
+                        )
+                    {
+                        let p = Var::Reg(r);
+                        self.note(p);
+                        self.note_char_ptr(p);
+                        out.push(Stmt::Compound(
+                            LValue::Deref(Box::new(Self::offset_ptr(Expr::Var(p), disp))),
+                            op,
+                            Expr::Const(v),
+                        ));
+                        skip = 2;
+                    } else {
+                        flush_call(&mut acc, out);
+                        let v = Var::Reg(r);
+                        self.note(v);
+                        self.note_char_ptr(v);
+                        acc = Some(Self::deref_at(Expr::Var(v), disp));
+                    }
                 }
 
                 // `*p++` / `*p--` — `mov bx,si` snapshots the pointer, then `inc/dec

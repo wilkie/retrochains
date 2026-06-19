@@ -654,6 +654,46 @@ impl<'a> super::FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\tword ptr {disp},ax\r\n");
             return;
         }
+        // Char reg-resident pointer subscript compound (ARITH): `char *p;
+        // p[K] += imm` / `-= imm` with `p` in SI/DI. BCC canonicalizes char
+        // arithmetic through AL — `mov al,byte ptr [reg+off]; add al,<imm8>;
+        // mov byte ptr [reg+off],al` — with subtraction folded to `add al,
+        // (-K)&0xff` (`p[2] -= 2` → `add al,254`). The ±1 forms peephole to
+        // inc/dec elsewhere, and bitwise char compounds go mem-direct, so
+        // both are excluded here. The recovered `char *p; p[K] += C` form
+        // reaches this (decompiler fixture 4311).
+        if self.locals.has(array)
+            && let Some(pointee) = self.locals.type_of(array).pointee()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(array)
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && pointee.is_char_like()
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && let Some(v) = try_const_eval(value)
+        {
+            let imm = if matches!(op, BinOp::Add) {
+                (v & 0xFF) as u8
+            } else {
+                (0u32.wrapping_sub(v) & 0xFF) as u8
+            };
+            // ±1 peepholes to inc/dec, not handled by this AL-through arm.
+            if imm != 1 && imm != 0xFF {
+                let stride = i32::from(pointee.size_bytes());
+                let off = (k as i32).wrapping_mul(stride);
+                let reg_name = reg.name();
+                let disp = if off == 0 {
+                    format!("[{reg_name}]")
+                } else if off > 0 {
+                    format!("[{reg_name}+{off}]")
+                } else {
+                    format!("[{reg_name}-{}]", -off)
+                };
+                let _ = write!(self.out, "\tmov\tal,byte ptr {disp}\r\n");
+                let _ = write!(self.out, "\tadd\tal,{imm}\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr {disp},al\r\n");
+                return;
+            }
+        }
         // Stack-resident local/param pointer subscript compound:
         // `int *p` held on the stack (a parameter, or a spilled local),
         // `p[K] op= <var>`. BCC loads the pointer into BX *first*, then
