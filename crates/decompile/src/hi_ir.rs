@@ -1822,23 +1822,25 @@ impl Ctx {
                 }
 
                 // `<op> al, K` — extend the byte accumulator with a constant, but
-                // ONLY when it holds a plain `char` GLOBAL just loaded. BCC's
-                // AL-through char compound `g op= K` is `mov al,[g]; add al,K; mov
-                // [g],al`; the matching store recovers `g = g op K`, which
-                // recompiles to the identical AL-through (verified). For a char
-                // LOCAL / DEREF / array element / struct-local field, `x = x op K`
-                // does NOT recompile like `x op= K` (extra reload / different
-                // frame), so those stay incomplete — same global-only safety as
-                // the byte inc/dec arm (mismatch fixtures 707/710/711/719/1384).
-                // Constant rhs only; a byte-register rhs is the `AluByteReg`
-                // (char op char) path.
+                // ONLY when it holds a plain `char` GLOBAL or a `char` REGISTER
+                // variable just loaded. BCC's AL-through char compound `c op= K`
+                // is `mov al,<c>; add al,K; mov <c>,al`; the matching store
+                // recovers `c = c op K`, which recompiles to the identical
+                // AL-through for a global (`mov [g],al`) or a char reg-var (`mov
+                // dl,al`) — both verified byte-identical to `c op= K`. For a char
+                // LOCAL stack slot / DEREF / array element / struct-local field,
+                // `x = x op K` does NOT recompile like `x op= K` (extra reload /
+                // different frame), so those stay incomplete (mismatch fixtures
+                // 707/710/711/719/1384) until a load-op-store-same-lvalue
+                // *compound* recognizer lands. Constant rhs only; a byte-register
+                // rhs is the `AluByteReg` (char op char) path.
                 LoOp::Bin {
                     dst: Place::Byte(ByteReg::Al),
                     op,
                     lhs: Place::Byte(ByteReg::Al),
                     rhs: Place::Imm(v),
                 } if is_foldable(op)
-                    && matches!(acc, Some(Expr::Var(Var::Global(_)))) =>
+                    && matches!(acc, Some(Expr::Var(Var::Global(_) | Var::ByteReg(_)))) =>
                 {
                     let l = acc.take().unwrap();
                     acc = Some(Expr::Binary(op, Box::new(l), Box::new(Expr::Const(v))));
