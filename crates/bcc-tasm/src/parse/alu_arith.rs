@@ -239,6 +239,13 @@ pub(crate) fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SubSiPtrAx);
         }
     }
+    // `sub word ptr [di], imm16` — `*q -= K` (wide const) through a DI pointer
+    // (fixture 4295); small consts use imm8sx.
+    if lhs == "word ptr [di]" && parse_imm8_signed(rhs).is_none() {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SubDiPtrImm16 { imm: imm as u16 });
+        }
+    }
     // `sub word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
     if rhs == "ax" && lhs == "word ptr [bx]" {
@@ -770,6 +777,13 @@ pub(crate) fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // (fixture 838).
         if rhs == "ax" {
             return Ok(Instr::AddSiPtrAx);
+        }
+    }
+    // `add word ptr [di], imm16` — `*q += K` through a DI pointer (a second
+    // pointer, fixture 4296). Wide form only; small consts use imm8sx (83).
+    if lhs == "word ptr [di]" && parse_imm8_signed(rhs).is_none() {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AddDiPtrImm16 { imm: imm as u16 });
         }
     }
     // `add word ptr <group>:<sym>[bx], imm/reg` — indexed-element

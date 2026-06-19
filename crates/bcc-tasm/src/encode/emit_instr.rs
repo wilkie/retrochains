@@ -2353,6 +2353,27 @@ pub(crate) fn emit_instr(
             out.extend_from_slice(&[0x81, 0x2C]);
             out.extend_from_slice(&imm.to_le_bytes());
         }
+        // `<op> word ptr [di], imm16` → 81 <modrm> imm_lo imm_hi (mod=00 r/m=101).
+        Instr::AddDiPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x05]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::OrDiPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x0D]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AndDiPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x25]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::XorDiPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x35]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::SubDiPtrImm16 { imm } => {
+            out.extend_from_slice(&[0x81, 0x2D]);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {
             // `lea r16, word ptr [bp+disp]` → 8D /<dst> [bp+disp].

@@ -1075,6 +1075,23 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             return;
         }
         let is_byte_slot = locals.size(local_idx) == 1;
+        // If AX still holds `&local` (a `*p op= K` whose pointer assignment
+        // `p = &local` left the address live in AX), real MSC reuses it via
+        // `mov bx,ax; op [bx],K` rather than touching the local directly — our
+        // const-prop would otherwise pick the direct form. Restore the byte-exact
+        // choice. (Pointers/longs keep their own paths.)
+        if !locals.is_long_local(local_idx)
+            && locals.local_pointee_size(local_idx) == 0
+            && crate::codegen::expr::ax_holds_addr_of_local(
+                out,
+                disp,
+                locals.last_branch_barrier.get(),
+            )
+        {
+            out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+            emit_bitwise_inplace_bx(*op, modrm, k, is_byte_slot, out);
+            return;
+        }
         if is_byte_slot {
             let imm = (k as u32 & 0xFF) as u8;
             out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(imm);
@@ -1155,6 +1172,22 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             out.push(0x98); // cbw
             let op_byte = if matches!(op, BinOp::Add) { 0x01u8 } else { 0x29u8 };
             out.push(op_byte); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            return;
+        }
+        // AX-holds-`&local` reuse, as in the bitwise block: `*p ±= K` keeps the
+        // pointer's address live in AX, so real MSC codes `mov bx,ax; <op> [bx],K`.
+        // Int (word) self-compound only; pointers/longs keep their own forms.
+        if !is_byte
+            && !locals.is_long_local(local_idx)
+            && locals.local_pointee_size(local_idx) == 0
+            && crate::codegen::expr::ax_holds_addr_of_local(
+                out,
+                disp,
+                locals.last_branch_barrier.get(),
+            )
+        {
+            out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+            emit_inplace_bx_word_op(*op, k, out);
             return;
         }
         match (op, k, is_byte) {
@@ -4837,6 +4870,59 @@ fn emit_inplace_bx_word_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
         _ => unreachable!(),
     }
 }
+/// `*p op= K` bitwise compound through a pointer already in BX — `<op> [bx],imm`.
+/// Mirrors the direct-local byte/word/imm rules (see `emit_assign`'s bitwise
+/// block); only the ModR/M differs: mod=00 r/m=111 for `[bx]` (`(modrm&0x38)|0x07`,
+/// preserving the op's reg field), mod=01 r/m=111 + disp 1 for the high byte.
+/// Used when AX provably holds `&local` so the const-prop-to-direct form is
+/// replaced by the byte-exact deref-via-AX form (`ax_holds_addr_of_local`).
+fn emit_bitwise_inplace_bx(op: BinOp, modrm: u8, k: i32, is_byte_slot: bool, out: &mut Vec<u8>) {
+    let lo = (modrm & 0x38) | 0x07; // [bx]
+    let hi = (modrm & 0x38) | 0x47; // [bx+disp8]
+    if is_byte_slot {
+        out.extend_from_slice(&[0x80, lo, (k as u32 & 0xFF) as u8]);
+        return;
+    }
+    let imm16 = (k as u32 & 0xFFFF) as u16;
+    let imm8 = (imm16 & 0xFF) as u8;
+    let high = (imm16 >> 8) as u8;
+    match op {
+        BinOp::BitAnd => {
+            if high == 0xFF {
+                if imm8 == 0x00 {
+                    out.extend_from_slice(&[0xC6, 0x07, 0x00]); // mov byte [bx],0
+                } else {
+                    out.extend_from_slice(&[0x80, lo, imm8]);
+                }
+            } else if imm8 == 0xFF {
+                if high == 0x00 {
+                    out.extend_from_slice(&[0xC6, 0x47, 0x01, 0x00]); // mov byte [bx+1],0
+                } else {
+                    out.extend_from_slice(&[0x80, hi, 0x01, high]);
+                }
+            } else {
+                out.push(0x81);
+                out.push(lo);
+                out.extend_from_slice(&imm16.to_le_bytes());
+            }
+        }
+        BinOp::BitOr | BinOp::BitXor => {
+            if imm16 <= 0xFF {
+                out.extend_from_slice(&[0x80, lo, imm8]);
+            } else if imm8 == 0x00 {
+                out.extend_from_slice(&[0x80, hi, 0x01, high]);
+            } else if let Ok(k8) = i8::try_from(k) {
+                out.extend_from_slice(&[0x83, lo, k8 as u8]);
+            } else {
+                out.push(0x81);
+                out.push(lo);
+                out.extend_from_slice(&imm16.to_le_bytes());
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
 pub(crate) fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let disp = locals.disp(local_idx);
     if locals.is_far_ptr_local(local_idx) {

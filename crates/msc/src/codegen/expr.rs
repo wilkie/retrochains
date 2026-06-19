@@ -1973,6 +1973,90 @@ pub(crate) fn ax_holds_slot_copy(out: &[u8], src: i16, dst: i16, barrier: usize)
         && out[out.len() - pat.len()..] == pat
         && out.len() - pat.len() >= barrier
 }
+/// Does AX currently hold `&local` — the value a still-live `lea ax,[bp+disp]`
+/// produced? Real MSC reuses such a live address for an in-place deref compound
+/// (`*p op= K` → `mov bx,ax; op [bx],K`) rather than accessing the local directly;
+/// our const-prop otherwise rewrites `*p` to a direct local access, so this check
+/// restores the byte-exact choice. Scans back over instructions that provably
+/// don't write AX — a store to a bp-rel slot (`mov [bp±d8],reg`), an in-place
+/// memory grp1 (`<op> [bp±d8],imm`), a memory immediate move, or `inc/dec
+/// [bp±d8]` — to the establishing `lea`. Conservative: any tail byte it can't
+/// classify ends the scan `false`, and the `lea` must be straight-line (at/past
+/// the branch barrier). disp8 frames only.
+pub(crate) fn ax_holds_addr_of_local(out: &[u8], target_disp: i16, barrier: usize) -> bool {
+    if !(-128..=127).contains(&target_disp) {
+        return false;
+    }
+    // When the deref *immediately follows* the pointer store (`p = &local` =
+    // `... mov [bp±d],ax` as the very last instruction), MSC const-props `*p` to a
+    // direct local access (`op [local],K`) rather than reusing AX — even though AX
+    // still holds the address. The reuse only kicks in past an intervening
+    // instruction (fixtures 841/838/595 = direct; 4292-4296 `*q` after `*p` =
+    // reuse). So bail if the tail is a store from AX to a bp-rel slot.
+    let n0 = out.len();
+    let store_from_ax = (n0 >= 3 && out[n0 - 3] == 0x89 && out[n0 - 2] == 0x46)
+        || (n0 >= 4 && out[n0 - 4] == 0x89 && out[n0 - 3] == 0x86);
+    if store_from_ax {
+        return false;
+    }
+    let lea = [0x8D, 0x46, target_disp as u8]; // lea ax,[bp+disp8]
+    let mut n = out.len();
+    loop {
+        if n >= lea.len() && out[n - lea.len()..n] == lea {
+            return n - lea.len() >= barrier;
+        }
+        let Some(len) = trailing_non_ax_write_disp8(&out[..n]) else { return false };
+        if len > n {
+            return false;
+        }
+        // Each recognized form writes `[bp+disp]`; its disp byte sits at
+        // `n - (len - 2)`. If an intervening instruction wrote the *target* local,
+        // MSC keeps accessing it directly (fixture 1765 `*p = *p + 3` after
+        // `x += …`), so the address-in-AX reuse does not apply.
+        if out[n - (len - 2)] == target_disp as u8 {
+            return false;
+        }
+        n -= len;
+    }
+}
+
+/// The byte length of the instruction ending `prefix`, when it is a recognized
+/// bp-relative (disp8) memory form that does NOT write AX; else `None`. Only the
+/// shapes that appear between a pointer's `lea ax,&local` / store and a later
+/// deref of it.
+fn trailing_non_ax_write_disp8(prefix: &[u8]) -> Option<usize> {
+    let n = prefix.len();
+    let bp_rel = |m: u8| (m & 0xC7) == 0x46; // mod=01, r/m=110 ([bp+disp8]), any reg
+    // mov [bp+d8],reg : 89 /r d8                                       (3)
+    if n >= 3 && prefix[n - 3] == 0x89 && bp_rel(prefix[n - 2]) {
+        return Some(3);
+    }
+    // grp1 byte [bp+d8],imm8 : 80 /r d8 ii   ;  word imm8sx : 83 /r d8 ii   (4)
+    if n >= 4 && (prefix[n - 4] == 0x80 || prefix[n - 4] == 0x83) && bp_rel(prefix[n - 3]) {
+        return Some(4);
+    }
+    // grp1 word [bp+d8],imm16 : 81 /r d8 iw                            (5)
+    if n >= 5 && prefix[n - 5] == 0x81 && bp_rel(prefix[n - 4]) {
+        return Some(5);
+    }
+    // mov byte [bp+d8],imm8 : C6 46 d8 ii                              (4)
+    if n >= 4 && prefix[n - 4] == 0xC6 && prefix[n - 3] == 0x46 {
+        return Some(4);
+    }
+    // mov word [bp+d8],imm16 : C7 46 d8 iw                             (5)
+    if n >= 5 && prefix[n - 5] == 0xC7 && prefix[n - 4] == 0x46 {
+        return Some(5);
+    }
+    // inc/dec word|byte [bp+d8] : FF|FE 46/4E d8                       (3)
+    if n >= 3
+        && (prefix[n - 3] == 0xFF || prefix[n - 3] == 0xFE)
+        && (prefix[n - 2] == 0x46 || prefix[n - 2] == 0x4E)
+    {
+        return Some(3);
+    }
+    None
+}
+
 pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], barrier: usize) -> bool {
     let ends = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
     // The instruction that established AX's value must be STRAIGHT-LINE (at or past

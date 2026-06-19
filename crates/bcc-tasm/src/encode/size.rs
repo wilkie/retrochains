@@ -321,7 +321,12 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         | Instr::OrSiPtrImm16 { .. }
         | Instr::AndSiPtrImm16 { .. }
         | Instr::XorSiPtrImm16 { .. }
-        | Instr::SubSiPtrImm16 { .. } => 4,
+        | Instr::SubSiPtrImm16 { .. }
+        | Instr::AddDiPtrImm16 { .. }
+        | Instr::OrDiPtrImm16 { .. }
+        | Instr::AndDiPtrImm16 { .. }
+        | Instr::XorDiPtrImm16 { .. }
+        | Instr::SubDiPtrImm16 { .. } => 4,
         Instr::XorDiPtrReg16 { .. } => 2,
         Instr::MovBxPtrAl | Instr::MovBxPtrAx => 2,
         Instr::MovBxPtrReg16 { .. } => 2,

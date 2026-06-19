@@ -2182,6 +2182,15 @@ pub enum Instr {
     AndSiPtrImm16 { imm: u16 },
     XorSiPtrImm16 { imm: u16 },
     SubSiPtrImm16 { imm: u16 },
+    /// `<op> word ptr [di], imm16` — the `[di]` siblings (mod=00 r/m=101), for
+    /// `*q op= K` when the pointer lands in DI (a second pointer, fixtures
+    /// 4292–4296). modrm: /0=ADD 0x05, /1=OR 0x0D, /4=AND 0x25, /5=SUB 0x2D,
+    /// /6=XOR 0x35.
+    AddDiPtrImm16 { imm: u16 },
+    OrDiPtrImm16 { imm: u16 },
+    AndDiPtrImm16 { imm: u16 },
+    XorDiPtrImm16 { imm: u16 },
+    SubDiPtrImm16 { imm: u16 },
     /// `and byte ptr [bp+<offset>], imm8` — `80 (mod=01 /4 r/m=110)
     /// dd ii` = `80 66 dd ii`. Grp1 r/m8 imm8 against a stack
     /// local. Char-local-array bitwise compound (fixture 720:

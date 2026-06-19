@@ -127,6 +127,12 @@ pub(crate) fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AndSiPtrAx);
         }
     }
+    // `and word ptr [di], imm16` — the DI-pointer sibling.
+    if lhs == "word ptr [di]" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AndDiPtrImm16 { imm: imm as u16 });
+        }
+    }
     // `and word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
     if rhs == "ax" && lhs == "word ptr [bx]" {
@@ -359,6 +365,12 @@ pub(crate) fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrSiPtrAx);
         }
     }
+    // `or word ptr [di], imm16` — the DI-pointer sibling.
+    if lhs == "word ptr [di]" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::OrDiPtrImm16 { imm: imm as u16 });
+        }
+    }
     // `or word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
     if rhs == "ax" && lhs == "word ptr [bx]" {
@@ -565,6 +577,12 @@ pub(crate) fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if rhs == "ax" {
             return Ok(Instr::XorSiPtrAx);
+        }
+    }
+    // `xor word ptr [di], imm16` — the DI-pointer sibling.
+    if lhs == "word ptr [di]" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::XorDiPtrImm16 { imm: imm as u16 });
         }
     }
     // `xor word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
