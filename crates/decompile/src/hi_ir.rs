@@ -3341,7 +3341,11 @@ impl Ctx {
             cases.push(case);
             c += 2;
         }
-        if cases.len() < 2 {
+        // Even a SINGLE `cmp ax,K; je body; jmp default` is a switch — its
+        // scrutinee is loaded into `ax` first and the dispatch is `je body`,
+        // unlike a plain `if (x==K)` (`cmp [x],K; jne skip`, memory operand). So
+        // one case is enough; an `if` never produces this shape.
+        if cases.is_empty() {
             return None;
         }
         // The chain ends in an unconditional jump to the no-match block.
