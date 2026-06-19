@@ -1128,17 +1128,22 @@ impl Ctx {
     /// Returns `(var, is_dec)`. (No store between the two ops, so the saved value
     /// is used directly — `b=a; a++` would interpose a store.)
     fn reg_postinc_at(&self, i: usize) -> Option<(Var, bool)> {
-        let LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Reg(r) } = self.insns.get(i)?.op
-        else {
+        let LoOp::Load { dst: Place::Reg(Reg::Ax), src } = self.insns.get(i)?.op else {
             return None;
         };
-        let var = Self::var_of(Place::Reg(r))?;
-        let LoOp::Un { dst: Place::Reg(d), op, operand: Place::Reg(o) } =
-            self.insns.get(i + 1)?.op
-        else {
+        // The stepped operand is a register variable (`mov ax,si; inc si`) or a
+        // GLOBAL (`mov ax,[g]; inc [g]`). Globals are safe — the data segment is
+        // modelled at exact offsets, so `g++` recompiles to the same `inc [_g]`.
+        // A LOCAL is excluded (a `char`/`int` array element is byte-identical to
+        // a scalar local but lays out differently — array-vs-scalars).
+        if !matches!(src, Place::Reg(_) | Place::Global(_)) {
+            return None;
+        }
+        let var = Self::var_of(src)?;
+        let LoOp::Un { dst, op, operand } = self.insns.get(i + 1)?.op else {
             return None;
         };
-        if d != r || o != r || !matches!(op, UnOp::Inc | UnOp::Dec) {
+        if dst != src || operand != src || !matches!(op, UnOp::Inc | UnOp::Dec) {
             return None;
         }
         Some((var, matches!(op, UnOp::Dec)))
@@ -2011,7 +2016,7 @@ impl Ctx {
                 // in `ax`. Recover the post-increment as a VALUE; a separate
                 // `v++` statement would leave `acc` a plain reference and the
                 // recompile would re-read the stepped value (mis-recompile).
-                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Reg(_) }
+                LoOp::Load { dst: Place::Reg(Reg::Ax), .. }
                     if i + 1 < hi && self.reg_postinc_at(i).is_some() =>
                 {
                     flush_call(&mut acc, out);
