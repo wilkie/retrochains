@@ -1453,6 +1453,29 @@ impl<'a> super::FunctionEmitter<'a> {
                 bp_addr(off)
             };
             (dest, leaf_ty)
+        } else if let Some((ptr_name, total_off, leaf_ty)) = self.try_arrow_chain_addr(base, field)
+        {
+            // `b->a.x op= v` — arrow-rooted Dot chain: load the pointer into a
+            // register and compound through `[reg+total_off]`. Mirrors the simple
+            // `p->x op= v` Arrow case below, with the chain's accumulated offset.
+            let r = if self.locals.has(&ptr_name) {
+                match self.locals.location_of(&ptr_name) {
+                    LocalLocation::Reg(reg) => reg.name().to_string(),
+                    LocalLocation::Stack(o) => {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(o));
+                        "bx".to_string()
+                    }
+                }
+            } else {
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{ptr_name}\r\n");
+                "bx".to_string()
+            };
+            let dest = if total_off == 0 {
+                format!("[{r}]")
+            } else {
+                format!("[{r}+{total_off}]")
+            };
+            (dest, leaf_ty)
         } else {
             let ExprKind::Ident(name) = &base.kind else {
                 panic!("non-ident base in member compound assign not yet supported (no fixture)");
