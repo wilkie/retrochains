@@ -654,6 +654,48 @@ impl<'a> super::FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\tword ptr {disp},ax\r\n");
             return;
         }
+        // Stack-resident local/param pointer subscript compound:
+        // `int *p` held on the stack (a parameter, or a spilled local),
+        // `p[K] op= <var>`. BCC loads the pointer into BX *first*, then
+        // evaluates the RHS into AX, then `<op> word ptr [bx+K*stride],
+        // ax`. Distinct from the register-resident sibling above (which
+        // skips the BX load). Fixture 4281 (`p->b += v` through a
+        // struct-pointer parameter; the field access decompiles to this
+        // `int *` subscript form).
+        if self.locals.has(array)
+            && let Some(pointee) = self.locals.type_of(array).pointee()
+            && let LocalLocation::Stack(ptr_off) = self.locals.location_of(array)
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && matches!(pointee, Type::Int | Type::UInt)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && try_const_eval(value).is_none()
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(ptr_off));
+            self.emit_expr_to_ax(value);
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tword ptr {disp},ax\r\n");
+            return;
+        }
         // `<global-int-arr>[<var-idx>] <op>= <rhs>` — compute index
         // into BX (with scale), then memory-direct compound op on
         // `<sym>[bx]`. Fixture 2949 (`arr[i] += 1` → `inc word ptr

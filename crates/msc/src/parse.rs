@@ -3770,13 +3770,21 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 let index = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
                 let elem = p.param_pointee_sizes[param_idx];
+                let target = AssignTarget::ParamIndexStore {
+                    param: param_idx,
+                    index: Box::new(index),
+                    elem,
+                };
+                // `p[i] op= rhs` desugars to `p[i] = p[i] op rhs`; the codegen
+                // recognizes the self-compound and emits the in-place form.
+                if let Some(value) = parse_compound_rhs(p, &target)? {
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
                 p.eat(&Tok::Assign)?;
                 let value = parse_expr(p)?;
                 p.eat(&Tok::Semi)?;
-                return Ok(Stmt::Assign {
-                    target: AssignTarget::ParamIndexStore { param: param_idx, index: Box::new(index), elem },
-                    value,
-                });
+                return Ok(Stmt::Assign { target, value });
             }
             // `<struct-array-local>[K].<field> = <expr>;` — store into an element
             // of an array of structs (byte_off = K*sizeof(S) + field_off).
@@ -4675,6 +4683,12 @@ pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> R
         // p→array alias so the in-place mem-op peephole fires on the element.
         AssignTarget::PtrIndexByte { ptr, disp } => {
             Expr::PtrIndexByte { ptr: *ptr, index: Box::new(Expr::IntLit(*disp as i32)) }
+        }
+        // Pointer-parameter subscript `p[i] op= v` — the self-read is the
+        // matching ParamIndex; the codegen recognizes the self-compound and
+        // emits the in-place `<op> [bx+off],ax`.
+        AssignTarget::ParamIndexStore { param, index, .. } => {
+            Expr::ParamIndex { param: *param, index: index.clone() }
         }
         // Direct global-array subscript `a[K] op= v` (the self-read is Index).
         AssignTarget::IndexedGlobal { array, byte_off } => {

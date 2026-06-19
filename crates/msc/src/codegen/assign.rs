@@ -99,6 +99,20 @@ pub(crate) fn contains_assign_expr(e: &Expr) -> bool {
         _ => false,
     }
 }
+/// Mem-destination `<op> r/m16, r16` opcode for the in-place compound forms
+/// (`add/sub/and/or/xor word ptr [mem], ax`). `None` for ops without that
+/// single-instruction encoding (mul/div/shift go through load-modify-store).
+fn mem_dest_reg_op(op: BinOp) -> Option<u8> {
+    Some(match op {
+        BinOp::Add => 0x01,
+        BinOp::Sub => 0x29,
+        BinOp::BitAnd => 0x21,
+        BinOp::BitOr => 0x09,
+        BinOp::BitXor => 0x31,
+        _ => return None,
+    })
+}
+
 pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // `t = (s1, ..., v)` — run the comma side effects, then assign v to t so a
     // constant v keeps the c7 immediate store (`mov [t],K`) instead of being
@@ -429,6 +443,17 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
                     out.push(bx_modrm(off)); push_off(out, off);
                     if is_byte { out.push((v as u32 & 0xFF) as u8); }
                     else { out.extend_from_slice(&((v as u32 & 0xFFFF) as u16).to_le_bytes()); }
+                } else if !is_byte
+                    && let Expr::BinOp { op: cop, left, right } = value
+                    && let Expr::ParamIndex { param: lp, index: li } = left.as_ref()
+                    && *lp == param
+                    && li.fold(locals.inits) == Some(k)
+                    && let Some(opcode) = mem_dest_reg_op(*cop)
+                {
+                    // self-compound `p[K] op= rhs` → in-place `<op> word ptr
+                    // [bx+off],ax` (BX already loaded above). Fixture 4304.
+                    emit_expr_to_ax(right.as_ref(), locals, out, fixups);
+                    out.push(opcode); out.push(bx_modrm(off)); push_off(out, off);
                 } else {
                     if is_byte { emit_byte_rhs_to_al(&value, locals, out, fixups); }
                     else { emit_expr_to_ax(&value, locals, out, fixups); }
