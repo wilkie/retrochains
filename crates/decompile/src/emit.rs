@@ -1536,13 +1536,15 @@ mod tests {
 
     #[test]
     fn pointer_deref_compound_roundtrips() {
-        // `*p op= K` — in-place read-modify-write through a pointer (`add [bx],K`
-        // or `add [si],K` for a register-variable pointer), distinct from the
-        // load-op-store `*p = *p op K`. (Only `add [mem],imm` assembles today; the
-        // `or`/`sub`/`and` deref forms are a separate `bcc-tasm` gap.)
+        // `*p op= K` — in-place read-modify-write through a pointer (`add [si],K`
+        // for a register-variable pointer), distinct from the load-op-store
+        // `*p = *p op K`. `sub`/`or` need a wide const: the `0x81` fits-imm8 guard
+        // (the long/array/struct tell) leaves a small bitwise deref unlifted.
         assert_roundtrips("void f(int *p){ *p += 3; }\n");
         assert_roundtrips("int f(int *p){ *p += 3; return *p; }\n");
         assert_roundtrips("void f(int *p){ *p += 1000; }\n"); // wide imm16 through a deref
+        assert_roundtrips("void f(int *p){ *p -= 2000; }\n"); // sub deref (tasm SubSiPtrImm16)
+        assert_roundtrips("int f(int *p){ *p |= 0x1000; return *p; }\n"); // or deref (wide)
     }
 
     #[test]
