@@ -617,6 +617,12 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let op = if (modrm(1) >> 3) & 7 == 1 { UnOp::Dec } else { UnOp::Inc };
             vec![LoOp::UnByte { dst: d, op, operand: d }]
         }
+        // `fe 44/4c [si+disp]` / `fe 45/4d [di+disp]` — `p->c++` (char field at off).
+        Idiom::IncDecByteDerefDisp => {
+            let d = Place::DerefDisp(deref_base(modrm(1)), disp8_at(bytes, 2));
+            let op = if (modrm(1) >> 3) & 7 == 1 { UnOp::Dec } else { UnOp::Inc };
+            vec![LoOp::UnByte { dst: d, op, operand: d }]
+        }
 
         // ---- promotions ----------------------------------------------------
         Idiom::Cbw => vec![LoOp::Promote { kind: Promote::Cbw }],

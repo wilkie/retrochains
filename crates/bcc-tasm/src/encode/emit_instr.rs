@@ -2992,6 +2992,15 @@ pub(crate) fn emit_instr(
             out.push(0xFE);
             out.push(0x0C);
         }
+        Instr::IncDecByteRegDisp { disp, di, dec } => {
+            // `inc`/`dec byte ptr [si+disp]` / `[di+disp]` → FE (mod=01,
+            // reg=/0 inc or /1 dec, r/m=100 si / 101 di) + disp8.
+            out.push(0xFE);
+            let rm = if *di { 0x45 } else { 0x44 };
+            let reg = if *dec { 0x08 } else { 0x00 };
+            out.push(rm | reg);
+            out.push(i8::try_from(*disp).expect("reg-rel disp fits in i8") as u8);
+        }
         Instr::IncSiPtrWord => {
             // `inc word ptr [si]` → FF 04.
             out.push(0xFF);

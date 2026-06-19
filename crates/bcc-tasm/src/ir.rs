@@ -2186,6 +2186,11 @@ pub enum Instr {
     /// uses this for postfix `(*p)++` discarded (fixture 714);
     /// prefix `++*p` and explicit `*p += 1` take the AL detour.
     IncSiPtrByte,
+    /// `inc`/`dec byte ptr [si+disp]` / `[di+disp]` — `FE` (mod=01 /0=inc /1=dec
+    /// r/m=100(si)/101(di)) + disp8. The mem-direct `(*(p+K))++` / `p->c++` for a
+    /// `char` field/element past the first, through a reg-var pointer at a
+    /// non-zero offset.
+    IncDecByteRegDisp { disp: i16, di: bool, dec: bool },
     /// `inc word ptr [si]` — `FF 04`. ModR/M 04 = mod=00 /0(INC)
     /// r/m=100([SI]). Int sibling of `IncSiPtrByte` (fixture 1290:
     /// `p->x++` with p in SI and x at offset 0).

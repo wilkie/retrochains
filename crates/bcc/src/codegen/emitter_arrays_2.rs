@@ -654,14 +654,15 @@ impl<'a> super::FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\tword ptr {disp},ax\r\n");
             return;
         }
-        // Char reg-resident pointer subscript compound (ARITH): `char *p;
-        // p[K] += imm` / `-= imm` with `p` in SI/DI. BCC canonicalizes char
-        // arithmetic through AL — `mov al,byte ptr [reg+off]; add al,<imm8>;
-        // mov byte ptr [reg+off],al` — with subtraction folded to `add al,
-        // (-K)&0xff` (`p[2] -= 2` → `add al,254`). The ±1 forms peephole to
-        // inc/dec elsewhere, and bitwise char compounds go mem-direct, so
-        // both are excluded here. The recovered `char *p; p[K] += C` form
-        // reaches this (decompiler fixture 4311).
+        // Char reg-resident pointer subscript compound: `char *p; p[K] op= imm`
+        // with `p` in SI/DI. BCC splits by form:
+        //   - postfix `p[K]++` / `--` (discarded): mem-direct `inc/dec byte ptr
+        //     [reg+off]`.
+        //   - any other arith (`+= C`, `-= C`, non-postfix `+= 1`): AL-through —
+        //     `mov al,byte ptr [reg+off]; <add al,C | inc al | dec al>; mov byte
+        //     ptr [reg+off],al`, with `-=` folded to `add al,(-C)&0xff` (`p[2]-=2`
+        //     → `add al,254`). Bitwise char compounds go mem-direct and aren't
+        //     handled here. Decompiler fixtures 4311 (`+= C`) / char ptr `++`.
         if self.locals.has(array)
             && let Some(pointee) = self.locals.type_of(array).pointee()
             && let LocalLocation::Reg(reg) = self.locals.location_of(array)
@@ -676,23 +677,33 @@ impl<'a> super::FunctionEmitter<'a> {
             } else {
                 (0u32.wrapping_sub(v) & 0xFF) as u8
             };
-            // ±1 peepholes to inc/dec, not handled by this AL-through arm.
-            if imm != 1 && imm != 0xFF {
-                let stride = i32::from(pointee.size_bytes());
-                let off = (k as i32).wrapping_mul(stride);
-                let reg_name = reg.name();
-                let disp = if off == 0 {
-                    format!("[{reg_name}]")
-                } else if off > 0 {
-                    format!("[{reg_name}+{off}]")
-                } else {
-                    format!("[{reg_name}-{}]", -off)
-                };
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let reg_name = reg.name();
+            let disp = if off == 0 {
+                format!("[{reg_name}]")
+            } else if off > 0 {
+                format!("[{reg_name}+{off}]")
+            } else {
+                format!("[{reg_name}-{}]", -off)
+            };
+            if from_postfix && (imm == 1 || imm == 0xFF) {
+                // Discarded `p[K]++` / `p[K]--` → mem-direct inc/dec.
+                let mnem = if imm == 1 { "inc" } else { "dec" };
+                let _ = write!(self.out, "\t{mnem}\tbyte ptr {disp}\r\n");
+            } else {
+                // AL-through: `inc/dec al` for ±1, `add al,imm` otherwise.
                 let _ = write!(self.out, "\tmov\tal,byte ptr {disp}\r\n");
-                let _ = write!(self.out, "\tadd\tal,{imm}\r\n");
+                if imm == 1 {
+                    self.out.extend_from_slice(b"\tinc\tal\r\n");
+                } else if imm == 0xFF {
+                    self.out.extend_from_slice(b"\tdec\tal\r\n");
+                } else {
+                    let _ = write!(self.out, "\tadd\tal,{imm}\r\n");
+                }
                 let _ = write!(self.out, "\tmov\tbyte ptr {disp},al\r\n");
-                return;
             }
+            return;
         }
         // Stack-resident local/param pointer subscript compound:
         // `int *p` held on the stack (a parameter, or a spilled local),

@@ -359,6 +359,7 @@ pub(crate) fn instr_size(instr: &Instr) -> usize {
         | Instr::XorBpRelByteImm8 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 1,
         Instr::AddSiPtrReg8 { .. } | Instr::SubSiPtrReg8 { .. } => 2,
         Instr::IncSiPtrByte | Instr::DecSiPtrByte => 2,
+        Instr::IncDecByteRegDisp { .. } => 3,
         Instr::IncSiPtrWord | Instr::DecSiPtrWord => 2,
         Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. }
         | Instr::AddSiDispImm8 { .. } | Instr::SubSiDispImm8 { .. } => 4,

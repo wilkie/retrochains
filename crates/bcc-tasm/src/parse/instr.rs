@@ -524,6 +524,14 @@ pub(crate) fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if rest == "byte ptr [si]" {
                 return Ok(Instr::IncSiPtrByte);
             }
+            // `inc byte ptr [si+disp]` / `[di+disp]` — char field/element postinc
+            // through a reg-var pointer at a non-zero offset (`p->c++`).
+            if let Some(disp) = parse_byte_si_disp(rest) {
+                return Ok(Instr::IncDecByteRegDisp { disp: i16::from(disp), di: false, dec: false });
+            }
+            if let Some(disp) = parse_byte_di_disp(rest) {
+                return Ok(Instr::IncDecByteRegDisp { disp: i16::from(disp), di: true, dec: false });
+            }
             // `inc word ptr [si]` — int sibling (fixture 1290).
             if rest == "word ptr [si]" {
                 return Ok(Instr::IncSiPtrWord);
@@ -631,6 +639,13 @@ pub(crate) fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // `dec byte ptr [si]` — char postdec through pointer.
             if rest == "byte ptr [si]" {
                 return Ok(Instr::DecSiPtrByte);
+            }
+            // `dec byte ptr [si+disp]` / `[di+disp]` — char field/element postdec.
+            if let Some(disp) = parse_byte_si_disp(rest) {
+                return Ok(Instr::IncDecByteRegDisp { disp: i16::from(disp), di: false, dec: true });
+            }
+            if let Some(disp) = parse_byte_di_disp(rest) {
+                return Ok(Instr::IncDecByteRegDisp { disp: i16::from(disp), di: true, dec: true });
             }
             // `dec word ptr [si]` — int sibling.
             if rest == "word ptr [si]" {

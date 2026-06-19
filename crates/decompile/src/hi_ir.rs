@@ -2156,6 +2156,26 @@ impl Ctx {
                     ));
                 }
 
+                // The `[si+disp]` sibling — `p->c++` for a char field past the
+                // first (`inc byte [si+disp]`). Recover `(*(p+disp))++`, which
+                // renders `p[disp]++` and recompiles to the same mem-direct inc.
+                LoOp::UnByte { dst: dst @ Place::DerefDisp(r, disp), op, operand }
+                    if dst == operand
+                        && is_reg_var(r)
+                        && matches!(op, UnOp::Inc | UnOp::Dec)
+                        && acc.is_none() =>
+                {
+                    let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
+                    let p = Var::Reg(r);
+                    self.note(p);
+                    self.note_char_ptr(p);
+                    out.push(Stmt::Compound(
+                        LValue::Deref(Box::new(Self::offset_ptr(Expr::Var(p), disp))),
+                        step,
+                        Expr::Const(1),
+                    ));
+                }
+
                 // In-place compound through a pointer — `*p op= Y` (`add [bx],3`,
                 // `or [si],dx`). The destination is a deref: `[bx]` reads whatever
                 // the pointer-tracking holds (a loaded pointer, or a `p+i`/`a[i]`
