@@ -136,6 +136,12 @@ pub enum Expr {
     /// (the old pointer saved in `bx`, advanced in place, then deref'd). `true`
     /// is the decrement form.
     PostIncDeref(Var, bool),
+    /// `gvN.fK` — read an unsigned bit-field of a global modelled as a synthesized
+    /// struct. Recovered from the extraction `mov al,[g]; shr ax,1 ×bit_off; and
+    /// ax,(2^width-1)`. `global` is the data-segment offset; the global's whole
+    /// field set is carried on the [`Function`] so the emitter can synthesize the
+    /// `struct { unsigned :pad; unsigned fK:w; … } gvN;` declaration.
+    Bitfield { global: u16, bit_off: u8, width: u8 },
 }
 
 /// Does an expression contain a (side-effecting) call anywhere?
@@ -145,7 +151,8 @@ fn contains_call(e: &Expr) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
         Expr::Ternary(a, b, c) => contains_call(a) || contains_call(b) || contains_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => contains_call(a),
-        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) | Expr::PostIncDeref(..) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } => false,
     }
 }
 
@@ -156,7 +163,8 @@ fn contains_call(e: &Expr) -> bool {
 /// call RHS hits the `push si` arg/save ambiguity), so they stay declined.
 fn is_simple_compound_rhs(e: &Expr) -> bool {
     match e {
-        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => true,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
+        | Expr::Bitfield { .. } => true,
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
             is_simple_compound_rhs(a) && is_simple_compound_rhs(b)
         }
@@ -269,7 +277,7 @@ fn expr_mentions(expr: &Expr, var: Var) -> bool {
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_mentions(a, var),
         Expr::Call(_, args) => args.iter().any(|a| expr_mentions(a, var)),
-        Expr::Const(_) | Expr::LongConst(_) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Bitfield { .. } => false,
     }
 }
 
@@ -342,7 +350,7 @@ fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => walk_vars_expr(a, f),
         Expr::Call(_, args) => args.iter_mut().for_each(|a| walk_vars_expr(a, f)),
-        Expr::Const(_) | Expr::LongConst(_) => {}
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Bitfield { .. } => {}
     }
 }
 
@@ -559,7 +567,10 @@ pub struct Function {
     /// The subset of `vars` that are `unsigned` (compared with `jb`/`ja` or
     /// shifted logically with `shr`).
     pub unsigned_vars: Vec<Var>,
-    /// Local arrays reconstructed from the frame. A constant array index folds
+    /// Globals modelled as a bit-field struct: data-segment offset → its
+    /// `(bit_off, width)` fields. The emitter synthesizes a `struct { … } gvN;`
+    /// per entry and renders [`Expr::Bitfield`] as `gvN.fK`.
+    pub bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeSet<(u8, u8)>>,
     /// to a direct `[bp+disp]` slot access, so an `int a[M]` looks like scalar
     /// slots; when those slots can't be the whole top-packed scalar layout the
     /// frame is modelled as an array instead (see [`recover`]).
@@ -755,6 +766,11 @@ struct Ctx {
     /// not be (mis-)typed `char`. Used to type the rhs of a `char op= int`.
     word_slots: std::collections::HashSet<i16>,
     word_globals: std::collections::HashSet<u16>,
+    /// Globals modelled as a bit-field struct: data-segment offset → the set of
+    /// `(bit_off, width)` fields observed. The emitter synthesizes a struct decl
+    /// per entry; a global that ALSO has a non-bit-field access makes recovery
+    /// incomplete (the raw access can't live on a struct).
+    bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeSet<(u8, u8)>>,
     /// Local-array bases (`lea` offsets) dereferenced at byte width — `char`
     /// arrays. The element type of a purely variable-indexed array isn't in any
     /// slot, only in the byte-vs-word deref, so this carries that signal to the
@@ -1005,7 +1021,8 @@ impl Ctx {
                 self.mark_unsigned(c);
             }
             Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => self.mark_unsigned(a),
-            Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..) | Expr::PostIncDeref(..) => {}
+            Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..)
+            | Expr::PostIncDeref(..) | Expr::Bitfield { .. } => {}
         }
     }
 
@@ -1044,6 +1061,55 @@ impl Ctx {
         self.note(var);
         self.note_char(var);
         Some(Expr::Var(var))
+    }
+
+    /// Match an unsigned bit-field READ starting at the `Load{Byte(Al),
+    /// Global(g)}` at instruction `i`: `bit_off` consecutive `shr ax,1` then `and
+    /// ax,(2^width-1)`, with `bit_off + width <= 8`. Returns `(bit_off, width,
+    /// consumed)` where `consumed` is the number of ops AFTER the load to skip
+    /// (the shifts and the and). The mask must be exactly `2^w-1` (a low-bit
+    /// mask); the absence of a `cbw`/`mov ah,0` between the load and the shift/and
+    /// is what distinguishes this from a scalar `char & K`.
+    fn bitfield_read_at(&self, i: usize, _g: u16) -> Option<(u8, u8, usize)> {
+        let is_shr1 = |op: &LoOp| {
+            matches!(
+                op,
+                LoOp::Bin {
+                    dst: Place::Reg(Reg::Ax),
+                    op: BinOp::Shr,
+                    lhs: Place::Reg(Reg::Ax),
+                    rhs: Place::Imm(1),
+                }
+            )
+        };
+        let mut j = i + 1;
+        let mut bit_off = 0u8;
+        while self.insns.get(j).is_some_and(|n| is_shr1(&n.op)) {
+            bit_off += 1;
+            j += 1;
+            if bit_off > 7 {
+                return None;
+            }
+        }
+        let LoOp::Bin {
+            dst: Place::Reg(Reg::Ax),
+            op: BinOp::And,
+            lhs: Place::Reg(Reg::Ax),
+            rhs: Place::Imm(m),
+        } = self.insns.get(j)?.op
+        else {
+            return None;
+        };
+        // `m` must be a low-bit mask `2^w - 1`, w >= 1, fitting one byte.
+        let m = u32::try_from(m).ok()?;
+        if m == 0 || (m & (m + 1)) != 0 {
+            return None;
+        }
+        let width = (m + 1).trailing_zeros() as u8;
+        if bit_off + width > 8 {
+            return None;
+        }
+        Some((bit_off, width, j - i))
     }
 
     /// A byte-width destination: note the variable as `char` and return it.
@@ -1685,6 +1751,26 @@ impl Ctx {
                             }
                         }
                     }
+                }
+
+                // `mov al,[g]; shr ax,1 ×bit_off; and ax,(2^w-1)` — an unsigned
+                // bit-field READ of a global. BCC skips the widen (the final mask
+                // clears the high byte / shifted-in garbage), which is exactly why
+                // no scalar `char`/`int` form reproduces it. Recover `g.fK`;
+                // record the field so the emitter synthesizes the struct. The
+                // global must NOT also be accessed raw (checked post-recovery).
+                // Even offset only: the `gvN`↔offset naming is word-spaced, so an
+                // odd load address (a field in a higher byte of a multi-byte
+                // struct, e.g. `z` after `x:4;y:4`) would mis-map — those need the
+                // struct-base-vs-field-offset model (a later slice); decline them.
+                LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::Global(g) }
+                    if g % 2 == 0 && self.bitfield_read_at(i, g).is_some() =>
+                {
+                    flush_call(&mut acc, out);
+                    let (bit_off, width, consumed) = self.bitfield_read_at(i, g).unwrap();
+                    self.bitfield_globals.entry(g).or_default().insert((bit_off, width));
+                    acc = Some(Expr::Bitfield { global: g, bit_off, width });
+                    skip = consumed;
                 }
 
                 // `mov al, …` loads a `char` into the accumulator (a following
@@ -3366,6 +3452,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         long_slots,
         word_slots,
         word_globals,
+        bitfield_globals: std::collections::HashMap::new(),
         char_array_bases: Vec::new(),
         long_array_bases: Vec::new(),
         complete: true,
@@ -3401,6 +3488,18 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
     if double_counted {
         ctx.cant_for("long-high-slot-double-count");
     }
+    // A global modelled as a bit-field struct can't also carry a raw scalar
+    // access (`gv &= -8` won't typecheck on a struct). If a bit-field global is
+    // ALSO in `vars` (read/written as a plain char/int), the model is
+    // inconsistent — leave it incomplete. The program-level classifier that
+    // recovers the WRITES as bit-field ops too is a later slice.
+    if ctx
+        .bitfield_globals
+        .keys()
+        .any(|&g| ctx.vars.contains(&Var::Global(g)))
+    {
+        ctx.cant_for("bitfield-global-mixed-access");
+    }
     let ret = if ctx.returns_long {
         Type::Long
     } else if ctx.returns_char {
@@ -3430,6 +3529,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         char_ptr_vars: ctx.char_ptr_vars,
         long_vars: ctx.long_vars,
         unsigned_vars: ctx.unsigned_vars,
+        bitfield_globals: ctx.bitfield_globals,
         arrays,
         body,
         complete,

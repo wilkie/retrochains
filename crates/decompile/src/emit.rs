@@ -67,6 +67,10 @@ struct Names {
     /// target is in here names that function; one that isn't is an external
     /// (`g0`). Empty for single-function emit, so every call is external there.
     callees: Vec<(usize, String)>,
+    /// Globals modelled as bit-field structs: offset → its `(bit_off, width)`
+    /// fields. Each gets a synthesized `struct { … } gvN;` decl and renders
+    /// [`Expr::Bitfield`] as `gvN.fK`. Set after [`build`] from the function.
+    bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeSet<(u8, u8)>>,
 }
 
 /// `<type> <name>` for a variable — `int *p` (pointer), `unsigned long l`,
@@ -184,6 +188,7 @@ impl Names {
             arrays: arrays.to_vec(),
             form: AccessForm::Subscript,
             callees: Vec::new(),
+            bitfield_globals: std::collections::HashMap::new(),
         }
     }
 
@@ -217,12 +222,45 @@ impl Names {
     }
 
     /// The file-scope global declarations — `gv1, gv2, …` in offset order, so
-    /// recompiling re-derives the same data-segment offsets.
+    /// recompiling re-derives the same data-segment offsets. A bit-field global
+    /// is emitted as a synthesized `struct { … } gvN;` instead of a scalar.
     fn global_decls(&self) -> impl Iterator<Item = String> + '_ {
         (1..=self.global_count).map(|i| {
             let off = u16::try_from(i - 1).unwrap_or(0) * 2;
-            self.decl(Var::Global(off), &format!("gv{i}"))
+            if self.bitfield_globals.contains_key(&off) {
+                self.bitfield_struct_decl(off, &format!("gv{i}"))
+            } else {
+                self.decl(Var::Global(off), &format!("gv{i}"))
+            }
         })
+    }
+
+    /// `gvN.fK` — render a bit-field read. `fK` is the field's index in the
+    /// global's sorted `(bit_off, width)` set, matching the synthesized decl.
+    fn bitfield_str(&self, global: u16, bit_off: u8, width: u8) -> String {
+        let i = global_index(global);
+        let k = self
+            .bitfield_globals
+            .get(&global)
+            .and_then(|fs| fs.iter().position(|&(b, w)| b == bit_off && w == width))
+            .unwrap_or(0);
+        format!("gv{i}.f{k}")
+    }
+
+    /// `struct { unsigned :pad; unsigned fK:w; … } name;` — synthesize a struct
+    /// reproducing the observed bit-field accesses, padding the gaps with
+    /// anonymous fields so each `fK` lands at its bit offset.
+    fn bitfield_struct_decl(&self, off: u16, name: &str) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut cur_bit = 0u8;
+        for (k, &(bit_off, width)) in self.bitfield_globals[&off].iter().enumerate() {
+            if bit_off > cur_bit {
+                parts.push(format!("unsigned :{};", bit_off - cur_bit));
+            }
+            parts.push(format!("unsigned f{k} : {width};"));
+            cur_bit = bit_off + width;
+        }
+        format!("struct {{ {} }} {name}", parts.join(" "))
     }
 
     /// The local-variable declarations (parameters and globals excluded — those
@@ -326,7 +364,8 @@ fn expr_is_fold_safe_unverified(e: &Expr) -> bool {
                 && expr_is_fold_safe_unverified(c)
         }
         // Memory loads and side effects: leave split unless a verifier vouches.
-        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) => false,
+        // A bit-field read is a global memory access — not fold-safe.
+        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::Bitfield { .. } => false,
     }
 }
 
@@ -448,7 +487,7 @@ fn expr_refs_local_at_or_after(e: &Expr, idx: usize, pos: &dyn Fn(&Var) -> Optio
             expr_refs_local_at_or_after(a, idx, pos)
         }
         Expr::Call(_, args) => args.iter().any(|a| expr_refs_local_at_or_after(a, idx, pos)),
-        Expr::Const(_) | Expr::LongConst(_) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Bitfield { .. } => false,
     }
 }
 
@@ -580,6 +619,10 @@ fn emit_function(
     );
     names.form = form;
     names.callees = callees.to_vec();
+    names.bitfield_globals = f.bitfield_globals.clone();
+    for &g in names.bitfield_globals.keys() {
+        names.global_count = names.global_count.max(global_index(g));
+    }
     let _ = writeln!(out, "{ret} {name}({}) {{", names.signature());
     emit_decls_and_body(&names, &f.body, mode, out);
     out.push_str("}\n");
@@ -626,6 +669,10 @@ pub(crate) fn to_c_full(f: &Function, form: AccessForm, mode: FoldMode) -> Optio
         &f.arrays,
     );
     names.form = form;
+    names.bitfield_globals = f.bitfield_globals.clone();
+    for &g in names.bitfield_globals.keys() {
+        names.global_count = names.global_count.max(global_index(g));
+    }
 
     let mut s = String::new();
     // The callee of every recovered call is an opaque external (its identity
@@ -698,7 +745,8 @@ fn expr_has_external_call(e: &Expr, callees: &[(usize, String)]) -> bool {
                 || expr_has_external_call(c, callees)
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_external_call(a, callees),
-        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) | Expr::PostIncDeref(..) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } => false,
     }
 }
 
@@ -731,7 +779,8 @@ fn expr_has_call(e: &Expr) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => expr_has_call(a) || expr_has_call(b),
         Expr::Ternary(a, b, c) => expr_has_call(a) || expr_has_call(b) || expr_has_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_has_call(a),
-        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) | Expr::PostIncDeref(..) => false,
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
+        | Expr::PostIncDeref(..) | Expr::Bitfield { .. } => false,
     }
 }
 
@@ -908,6 +957,9 @@ fn expr_str(e: &Expr, names: &Names) -> String {
         Expr::Const(v) => v.to_string(),
         Expr::LongConst(v) => format!("{v}L"),
         Expr::Var(v) => names.var_str(*v),
+        Expr::Bitfield { global, bit_off, width } => {
+            names.bitfield_str(*global, *bit_off, *width)
+        }
         // Fully parenthesized so the printed tree matches the recovered one.
         Expr::Binary(op, l, r) => {
             format!("({} {} {})", expr_str(l, names), binop_token(*op), expr_str(r, names))
