@@ -1088,12 +1088,37 @@ impl Ctx {
             )
         };
         let mut j = i + 1;
+        // Shift the field down to bit 0 of the byte. BCC unrolls a small shift to
+        // `shr ax,1` repeats (1..3) but emits `mov cl,N; shr ax,cl` for N >= 4.
+        let cl_shift = matches!(
+            self.insns.get(j).map(|n| &n.op),
+            Some(LoOp::Load { dst: Place::Byte(ByteReg::Cl), src: Place::Imm(_) })
+        ) && matches!(
+            self.insns.get(j + 1).map(|n| &n.op),
+            Some(LoOp::Bin {
+                dst: Place::Reg(Reg::Ax),
+                op: BinOp::Shr,
+                lhs: Place::Reg(Reg::Ax),
+                rhs: Place::Byte(ByteReg::Cl),
+            })
+        );
         let mut bit_off = 0u8;
-        while self.insns.get(j).is_some_and(|n| is_shr1(&n.op)) {
-            bit_off += 1;
-            j += 1;
+        if cl_shift {
+            let LoOp::Load { src: Place::Imm(n), .. } = &self.insns[j].op else {
+                unreachable!()
+            };
+            bit_off = u8::try_from(*n).ok()?;
             if bit_off > 7 {
                 return None;
+            }
+            j += 2;
+        } else {
+            while self.insns.get(j).is_some_and(|n| is_shr1(&n.op)) {
+                bit_off += 1;
+                j += 1;
+                if bit_off > 7 {
+                    return None;
+                }
             }
         }
         let LoOp::Bin {
