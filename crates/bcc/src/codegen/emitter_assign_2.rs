@@ -1351,6 +1351,51 @@ impl<'a> super::FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\tword ptr [{r}],ax\r\n");
             return;
         }
+        // Int-pointee `*p op= var` through a GLOBAL pointer or a
+        // stack-resident local pointer (the reg-resident case is the
+        // path above): load the pointer into BX, eval RHS to AX, then
+        // `<op> word ptr [bx],ax`. BCC loads BX before the RHS. Fixture
+        // 4305 (`int *gp; *gp += v`).
+        if depth == 0
+            && try_const_eval(value).is_none()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let ty = if is_global {
+                self.globals.type_of(base_name).cloned()
+            } else {
+                Some(self.locals.type_of(base_name).clone())
+            };
+            let int_pointee = ty
+                .as_ref()
+                .and_then(|t| t.pointee())
+                .is_some_and(|p| matches!(p, Type::Int | Type::UInt));
+            let bx_load = if !int_pointee {
+                None
+            } else if is_global {
+                Some(format!("\tmov\tbx,word ptr DGROUP:_{base_name}\r\n"))
+            } else if let LocalLocation::Stack(off) = self.locals.location_of(base_name) {
+                Some(format!("\tmov\tbx,word ptr {}\r\n", bp_addr(off)))
+            } else {
+                None
+            };
+            if let Some(load) = bx_load {
+                self.out.extend_from_slice(load.as_bytes());
+                self.emit_expr_to_ax(value);
+                let mnem = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\t{mnem}\tword ptr [bx],ax\r\n");
+                return;
+            }
+        }
         // Int-pointee `*p *= y` / `/= y` / `%= y` with non-const
         // local RHS: `mov ax, word ptr [r]; imul/idiv word ptr
         // [bp+N]; mov word ptr [r], ax|dx`. Fixture 839.

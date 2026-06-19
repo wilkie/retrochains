@@ -5114,6 +5114,19 @@ pub(crate) fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: 
         emit_bitwise_inplace_bx(*op, 0x46 | (reg << 3), k, false, out);
         return;
     }
+    // `*gp op= v` with a VARIABLE RHS (arith or bitwise) → in-place
+    // `<op> word ptr [bx],ax` (BX already loaded above; eval RHS to AX) rather
+    // than load-modify-store. Mem-dest opcode per op. Fixture 4305.
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::DerefWord { ptr }
+            if matches!(ptr.as_ref(), Expr::Global(g) if *g == global_idx))
+        && right.fold(locals.inits).is_none()
+        && let Some(opcode) = mem_dest_reg_op(*op)
+    {
+        emit_expr_to_ax(right.as_ref(), locals, out, fixups);
+        out.extend_from_slice(&[opcode, 0x07]); // <op> word ptr [bx],ax
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         // `c7 07 imm16` — mov word ptr [bx], imm16.
