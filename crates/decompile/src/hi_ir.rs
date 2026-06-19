@@ -1123,6 +1123,39 @@ impl Ctx {
         Some((lo, hi, count))
     }
 
+    /// Match a `long` divide/modulo via a runtime helper at instruction `i`: four
+    /// `Arg` pushes of TWO long pairs at descending frame offsets (`D, D-2, D-4,
+    /// D-6`) then an extern call. cdecl pushes the 2nd operand first (hi, lo) then
+    /// the 1st (hi, lo), so `op1 = (D-6, D-4)` (dividend), `op2 = (D-2, D)`.
+    /// Returns `(op1_lo, op1_hi, op2_lo, op2_hi)`. Like the shift, `_TEXT` can't
+    /// tell `/` from `%` (the helper is `N_LDIV@`/`N_LMOD@`, a reloc, not the
+    /// `e8 00 00` placeholder), so both round-trip as `/`.
+    fn long_divmod_at(&self, i: usize) -> Option<(Place, Place, Place, Place)> {
+        let mut offs = [0i16; 4];
+        for (k, slot) in offs.iter_mut().enumerate() {
+            let LoOp::Arg { src: Place::Local(d) } = self.insns.get(i + k)?.op else {
+                return None;
+            };
+            *slot = d;
+        }
+        if offs[0] != offs[1] + 2 || offs[1] != offs[2] + 2 || offs[2] != offs[3] + 2 {
+            return None;
+        }
+        let LoOp::Call { target, .. } = self.insns.get(i + 4)?.op else {
+            return None;
+        };
+        let call_end = self.insns[i + 4].span.start + self.insns[i + 4].span.len;
+        if target != call_end {
+            return None;
+        }
+        Some((
+            Place::Local(offs[3]),
+            Place::Local(offs[2]),
+            Place::Local(offs[1]),
+            Place::Local(offs[0]),
+        ))
+    }
+
     /// A postfix `v++`/`v--` as a value: `mov ax,v; inc/dec v` — the OLD value is
     /// saved in `ax` (a call arg / return) before the register variable steps.
     /// Returns `(var, is_dec)`. (No store between the two ops, so the saved value
@@ -1579,6 +1612,24 @@ impl Ctx {
 
                 // `push ax` — the accumulator is the argument; `push [bp+d]` or a
                 // register push supplies a variable directly.
+                // `long` divide/modulo via a runtime helper: four arg pushes of
+                // two long pairs, then the extern call. Recover `op1 / op2` (the
+                // direction is in the helper's reloc symbol, not the `e8 00 00`
+                // _TEXT, so `/` reproduces the bytes for `/` and `%` alike).
+                LoOp::Arg { src: Place::Local(_) } if self.long_divmod_at(i).is_some() => {
+                    flush_call(&mut acc, out);
+                    let (a_lo, a_hi, b_lo, b_hi) = self.long_divmod_at(i).unwrap();
+                    acc = self
+                        .long_operand(a_lo, a_hi)
+                        .zip(self.long_operand(b_lo, b_hi))
+                        .map(|(a, b)| Expr::Binary(BinOp::Div, Box::new(a), Box::new(b)));
+                    if acc.is_none() {
+                        self.cant();
+                    }
+                    acc_long = true;
+                    skip = 4; // the other three args and the call
+                }
+
                 LoOp::Arg { src: Place::Reg(Reg::Ax) } => match acc.take() {
                     Some(e) => pending_args.push(e),
                     None => self.cant(),
