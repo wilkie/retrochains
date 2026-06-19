@@ -866,6 +866,12 @@ fn compound_str(lv: &LValue, op: BinOp, rhs: &Expr, names: &Names) -> String {
     let target = lvalue_str(lv, names);
     if matches!(op, BinOp::Add | BinOp::Sub) && matches!(rhs, Expr::Const(1)) {
         let pp = if op == BinOp::Add { "++" } else { "--" };
+        // A prefix-deref lvalue (`*p`) needs parens before `++`/`--`: bare
+        // `*p++` parses as `*(p++)` (increment the pointer), not `(*p)++`
+        // (increment the pointee). Subscripts (`a[i]`) and names don't.
+        if target.starts_with('*') {
+            return format!("({target}){pp}");
+        }
         return format!("{target}{pp}");
     }
     format!("{target} {}= {}", binop_token(op), expr_str(rhs, names))

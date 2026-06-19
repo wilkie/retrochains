@@ -2133,6 +2133,29 @@ impl Ctx {
                     }
                 }
 
+                // In-place byte `inc`/`dec` through a reg-var `char *` — `inc byte
+                // [si]` (`(*p)++` / `(*p)--`, `0xFE 04/0c`). The mem-direct sibling
+                // of the byte-global arm; distinct from the AL-through `*p += 1`.
+                // Recover `(*p)++` as `Compound(*p, ±1)` (renders `(*p)++`, which
+                // recompiles to the same `inc byte [si]`). Discarded form only
+                // (empty accumulator) — a value-using `f((*p)++)` keeps `acc` live.
+                LoOp::UnByte { dst: dst @ Place::Deref(r), op, operand }
+                    if dst == operand
+                        && is_reg_var(r)
+                        && matches!(op, UnOp::Inc | UnOp::Dec)
+                        && acc.is_none() =>
+                {
+                    let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
+                    let p = Var::Reg(r);
+                    self.note(p);
+                    self.note_char_ptr(p);
+                    out.push(Stmt::Compound(
+                        LValue::Deref(Box::new(Expr::Var(p))),
+                        step,
+                        Expr::Const(1),
+                    ));
+                }
+
                 // In-place compound through a pointer — `*p op= Y` (`add [bx],3`,
                 // `or [si],dx`). The destination is a deref: `[bx]` reads whatever
                 // the pointer-tracking holds (a loaded pointer, or a `p+i`/`a[i]`
