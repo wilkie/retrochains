@@ -276,7 +276,10 @@ pub enum Stmt {
     /// compare-chain (`cmp ax,K; je case`)* or a jump table. The third field is
     /// the `default:` body when the no-match block ends in a `break` (otherwise
     /// empty — a `default:` that returns, or no default, is the post-switch code).
-    Switch(Expr, Vec<(i32, Vec<Stmt>)>, Vec<Stmt>),
+    /// The fourth field is the `default:`'s SOURCE position — the number of case
+    /// arms emitted before it (so `default` lands in the middle/first when its
+    /// body is laid out between case bodies in memory). `arms.len()` means last.
+    Switch(Expr, Vec<(i32, Vec<Stmt>)>, Vec<Stmt>, usize),
     /// `break;` — a `switch` case body ending in a jump to the post-switch code.
     Break,
 }
@@ -310,10 +313,11 @@ fn fold_for_loops(stmts: Vec<Stmt>) -> Vec<Stmt> {
         Stmt::While(c, b) => Stmt::While(c, fold_for_loops(b)),
         Stmt::Do(c, b) => Stmt::Do(c, fold_for_loops(b)),
         Stmt::For(i, c, st, b) => Stmt::For(i, c, st, fold_for_loops(b)),
-        Stmt::Switch(s, arms, def) => Stmt::Switch(
+        Stmt::Switch(s, arms, def, pos) => Stmt::Switch(
             s,
             arms.into_iter().map(|(k, b)| (k, fold_for_loops(b))).collect(),
             fold_for_loops(def),
+            pos,
         ),
         other => other,
     });
@@ -408,7 +412,7 @@ fn walk_vars(stmts: &mut [Stmt], f: &mut dyn FnMut(&mut Var)) {
                 walk_vars(std::slice::from_mut(step), f);
                 walk_vars(b, f);
             }
-            Stmt::Switch(sc, arms, def) => {
+            Stmt::Switch(sc, arms, def, _) => {
                 walk_vars_expr(sc, f);
                 for (_, b) in arms.iter_mut() {
                     walk_vars(b, f);
@@ -453,7 +457,7 @@ fn coalesce_inc_pairs(stmts: &mut Vec<Stmt>, pred: &impl Fn(&Var) -> bool) {
             Stmt::While(_, b) | Stmt::Do(_, b) | Stmt::For(_, _, _, b) => {
                 coalesce_inc_pairs(b, pred);
             }
-            Stmt::Switch(_, arms, def) => {
+            Stmt::Switch(_, arms, def, _) => {
                 for (_, b) in arms.iter_mut() {
                     coalesce_inc_pairs(b, pred);
                 }
@@ -3382,11 +3386,67 @@ impl Ctx {
         def_idx: usize,
         hi: usize,
     ) -> usize {
+        // The `default:`'s source position — how many case bodies precede it in
+        // memory. When it's last, the existing fall-through model applies; when
+        // it sits between cases, recover it as a real arm at that position.
+        let def_pos = cases.iter().filter(|&&(_, s)| s < def_idx).count();
+        if def_pos < cases.len() {
+            return self.emit_switch_mid_default(stmts, scrutinee, cases, def_idx, def_pos, hi);
+        }
         let (default_body, cont_idx) = self.switch_default(def_idx, hi);
         let cont_off = self.insns[cont_idx].span.start;
         let arms = self.build_switch_arms(cases, def_idx, cont_off);
-        stmts.push(Stmt::Switch(scrutinee, arms, default_body));
+        stmts.push(Stmt::Switch(scrutinee, arms, default_body, def_pos));
         cont_idx
+    }
+
+    /// Emit a `switch` whose `default:` body is laid out BETWEEN case bodies (a
+    /// `default` that isn't written last). Each body — cases and the default —
+    /// is bounded by the next body start in memory order; the continuation is the
+    /// code after the LAST body. Declines if the last body isn't straight-line
+    /// (a nested branch makes its end ambiguous).
+    fn emit_switch_mid_default(
+        &mut self,
+        stmts: &mut Vec<Stmt>,
+        scrutinee: Expr,
+        cases: &[(i32, usize)],
+        def_idx: usize,
+        def_pos: usize,
+        hi: usize,
+    ) -> usize {
+        let mut starts: Vec<usize> = cases.iter().map(|&(_, s)| s).collect();
+        starts.push(def_idx);
+        starts.sort_unstable();
+        let max_start = *starts.last().unwrap();
+        let Some(cont_idx) = self.switch_body_end(max_start, hi) else {
+            self.cant_for("switch:complex-mid-default-body");
+            return def_idx;
+        };
+        let cont_off = self.insns[cont_idx].span.start;
+        let body_end = |s: usize| starts.iter().copied().filter(|&x| x > s).min().unwrap_or(cont_idx);
+        let mut arms = Vec::new();
+        for &(value, s) in cases {
+            let end = body_end(s);
+            arms.push((value, self.switch_body(s, end, cont_off)));
+        }
+        let default_body = self.switch_body(def_idx, body_end(def_idx), cont_off);
+        stmts.push(Stmt::Switch(scrutinee, arms, default_body, def_pos));
+        cont_idx
+    }
+
+    /// The instruction index just past a straight-line `switch` body starting at
+    /// `start` — i.e. after its terminating `Jump`/`Ret`. `None` if a conditional
+    /// `Branch` appears first (a body with internal control flow, whose extent
+    /// can't be read this simply).
+    fn switch_body_end(&self, start: usize, hi: usize) -> Option<usize> {
+        for j in start..hi {
+            match self.insns[j].op {
+                LoOp::Jump { .. } | LoOp::Ret { .. } => return Some(j + 1),
+                LoOp::Branch { .. } => return None,
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Build the arms of a recovered `switch` from `(case value, body start
@@ -3411,7 +3471,11 @@ impl Ctx {
     /// Structure one `switch` case (or `default`) body in `[start, end)`,
     /// turning a trailing jump to the continuation `cont_off` into a `break`.
     fn switch_body(&mut self, start: usize, end: usize, cont_off: usize) -> Vec<Stmt> {
+        // A trailing jump to the continuation is a `break` — UNLESS the
+        // continuation is the epilogue (no post-switch code), where that jump is
+        // a `return` recovered from the body by `structure`.
         let breaks = end > start
+            && !self.is_epilogue(cont_off)
             && matches!(self.insns[end - 1].op, LoOp::Jump { target } if target == cont_off);
         let body_end = if breaks { end - 1 } else { end };
         let mut body = self.structure(start, body_end);
@@ -4471,7 +4535,7 @@ mod tests {
             recover_c("int f(int a) { switch (a) { case 1: return 1; case 2: return 2; case 3: return 3; } return 0; }\n");
         assert!(f.complete, "a compare-chain switch is recovered");
         assert!(
-            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _) if arms.len() == 3)),
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _, _) if arms.len() == 3)),
             "recovers a 3-arm switch",
         );
     }
@@ -4485,7 +4549,7 @@ mod tests {
         );
         assert!(f.complete, "a distinct jump-table switch is recovered");
         assert!(
-            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _) if arms.len() == 4)),
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _, _) if arms.len() == 4)),
             "recovers a 4-arm switch",
         );
     }
@@ -4499,7 +4563,7 @@ mod tests {
         );
         assert!(f.complete, "a fall-through jump table is recovered");
         assert!(
-            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _) if arms.len() == 4)),
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _, _) if arms.len() == 4)),
             "four case labels (two of them sharing one body)",
         );
     }
@@ -4513,7 +4577,7 @@ mod tests {
         );
         assert!(f.complete);
         assert!(
-            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, def) if arms.len() == 2 && !def.is_empty())),
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, def, _) if arms.len() == 2 && !def.is_empty())),
             "two cases and a non-empty default arm",
         );
     }
@@ -4538,7 +4602,7 @@ mod tests {
         );
         assert!(f.complete, "a char jump-table switch is recovered");
         assert!(
-            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _) if arms.len() == 4)),
+            f.body.iter().any(|s| matches!(s, Stmt::Switch(_, arms, _, _) if arms.len() == 4)),
             "recovers a 4-arm switch",
         );
         assert!(f.char_vars.contains(&Var::Param(4)), "the scrutinee param is typed `char`");

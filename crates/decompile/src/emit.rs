@@ -721,7 +721,7 @@ fn body_has_external_call(stmts: &[Stmt], callees: &[(usize, String)]) -> bool {
                 || has_ext(std::slice::from_ref(step), callees)
                 || has_ext(b, callees)
         }
-        Stmt::Switch(scrut, arms, def) => {
+        Stmt::Switch(scrut, arms, def, _) => {
             ext(scrut)
                 || arms.iter().any(|(_, b)| has_ext(b, callees))
                 || has_ext(def, callees)
@@ -769,7 +769,7 @@ fn body_has_call(stmts: &[Stmt]) -> bool {
                 || body_has_call(std::slice::from_ref(step))
                 || body_has_call(b)
         }
-        Stmt::Switch(scrut, arms, def) => {
+        Stmt::Switch(scrut, arms, def, _) => {
             expr_has_call(scrut)
                 || arms.iter().any(|(_, b)| body_has_call(b))
                 || body_has_call(def)
@@ -861,14 +861,20 @@ fn emit_stmt(stmt: &Stmt, depth: usize, names: &Names, out: &mut String) {
             indent(depth, out);
             out.push_str("}\n");
         }
-        Stmt::Switch(scrut, arms, def) => {
+        Stmt::Switch(scrut, arms, def, def_pos) => {
             let _ = writeln!(out, "switch ({}) {{", expr_str(scrut, names));
-            for (value, body) in arms {
+            for (i, (value, body)) in arms.iter().enumerate() {
+                if i == *def_pos && !def.is_empty() {
+                    indent(depth, out);
+                    out.push_str("default:\n");
+                    emit_block(def, depth + 1, false, names, out);
+                }
                 indent(depth, out);
                 let _ = writeln!(out, "case {value}:");
                 emit_block(body, depth + 1, false, names, out);
             }
-            if !def.is_empty() {
+            // `default` last (the common case): `def_pos >= arms.len()`.
+            if *def_pos >= arms.len() && !def.is_empty() {
                 indent(depth, out);
                 out.push_str("default:\n");
                 emit_block(def, depth + 1, false, names, out);
