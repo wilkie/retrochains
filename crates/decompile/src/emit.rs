@@ -70,7 +70,7 @@ struct Names {
     /// Globals modelled as bit-field structs: offset → its `(bit_off, width)`
     /// fields. Each gets a synthesized `struct { … } gvN;` decl and renders
     /// [`Expr::Bitfield`] as `gvN.fK`. Set after [`build`] from the function.
-    bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeSet<(u8, u8)>>,
+    bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeMap<(u8, u8), bool>>,
 }
 
 /// `<type> <name>` for a variable — `int *p` (pointer), `unsigned long l`,
@@ -242,22 +242,24 @@ impl Names {
         let k = self
             .bitfield_globals
             .get(&global)
-            .and_then(|fs| fs.iter().position(|&(b, w)| b == bit_off && w == width))
+            .and_then(|fs| fs.keys().position(|&(b, w)| b == bit_off && w == width))
             .unwrap_or(0);
         format!("gv{i}.f{k}")
     }
 
-    /// `struct { unsigned :pad; unsigned fK:w; … } name;` — synthesize a struct
-    /// reproducing the observed bit-field accesses, padding the gaps with
-    /// anonymous fields so each `fK` lands at its bit offset.
+    /// `struct { unsigned :pad; <int|unsigned> fK:w; … } name;` — synthesize a
+    /// struct reproducing the observed bit-field accesses, padding the gaps with
+    /// anonymous fields so each `fK` lands at its bit offset. A field is `int`
+    /// (signed) when an access sign-extended it (`shl`/`sar`), else `unsigned`.
     fn bitfield_struct_decl(&self, off: u16, name: &str) -> String {
         let mut parts: Vec<String> = Vec::new();
         let mut cur_bit = 0u8;
-        for (k, &(bit_off, width)) in self.bitfield_globals[&off].iter().enumerate() {
+        for (k, (&(bit_off, width), &signed)) in self.bitfield_globals[&off].iter().enumerate() {
             if bit_off > cur_bit {
                 parts.push(format!("unsigned :{};", bit_off - cur_bit));
             }
-            parts.push(format!("unsigned f{k} : {width};"));
+            let ty = if signed { "int" } else { "unsigned" };
+            parts.push(format!("{ty} f{k} : {width};"));
             cur_bit = bit_off + width;
         }
         format!("struct {{ {} }} {name}", parts.join(" "))

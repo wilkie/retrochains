@@ -575,7 +575,7 @@ pub struct Function {
     /// Globals modelled as a bit-field struct: data-segment offset → its
     /// `(bit_off, width)` fields. The emitter synthesizes a `struct { … } gvN;`
     /// per entry and renders [`Expr::Bitfield`] as `gvN.fK`.
-    pub bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeSet<(u8, u8)>>,
+    pub bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeMap<(u8, u8), bool>>,
     /// to a direct `[bp+disp]` slot access, so an `int a[M]` looks like scalar
     /// slots; when those slots can't be the whole top-packed scalar layout the
     /// frame is modelled as an array instead (see [`recover`]).
@@ -775,7 +775,7 @@ struct Ctx {
     /// `(bit_off, width)` fields observed. The emitter synthesizes a struct decl
     /// per entry; a global that ALSO has a non-bit-field access makes recovery
     /// incomplete (the raw access can't live on a struct).
-    bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeSet<(u8, u8)>>,
+    bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeMap<(u8, u8), bool>>,
     /// Local-array bases (`lea` offsets) dereferenced at byte width — `char`
     /// arrays. The element type of a purely variable-indexed array isn't in any
     /// slot, only in the byte-vs-word deref, so this carries that signal to the
@@ -1145,6 +1145,58 @@ impl Ctx {
         // `x:4;y:4` is bit 8). `bit_off + width <= 16` always holds.
         let bit_off = (u8::try_from(addr & 1).unwrap()) * 8 + bit_off;
         Some((bit_off, width, j - i))
+    }
+
+    /// Match a SIGNED bit-field READ at the `Load{Byte(Al), Global(addr)}` at
+    /// `i`: `mov cl,(16-bit_off-width); shl ax,cl; mov cl,(16-width); sar ax,cl`
+    /// — BCC sign-extends by shifting the field's top bit to bit 15 then
+    /// arithmetic-shifting back. Returns `(bit_off, width, consumed)`; the field
+    /// is `int fK:width` (signed). `bit_off` is unit-relative (byte 1 → +8).
+    fn signed_bitfield_read_at(&self, i: usize, addr: u16) -> Option<(u8, u8, usize)> {
+        let shl_n = self.cl_imm_shift(i + 1, BinOp::Shl)?;
+        let sar_n = self.cl_imm_shift(i + 3, BinOp::Sar)?;
+        // width = 16 - sar; bit_in_byte = sar - shl (must be 0..7 within the byte).
+        let width = 16u8.checked_sub(sar_n)?;
+        let bit_in_byte = sar_n.checked_sub(shl_n)?;
+        if width == 0 || width > 8 || bit_in_byte + width > 8 {
+            return None;
+        }
+        let bit_off = (u8::try_from(addr & 1).unwrap()) * 8 + bit_in_byte;
+        Some((bit_off, width, 4))
+    }
+
+    /// If instructions `j, j+1` are `mov cl,N; <op> ax,cl`, return `N`.
+    fn cl_imm_shift(&self, j: usize, op_want: BinOp) -> Option<u8> {
+        let LoOp::Load { dst: Place::Byte(ByteReg::Cl), src: Place::Imm(n) } =
+            self.insns.get(j)?.op
+        else {
+            return None;
+        };
+        let LoOp::Bin {
+            dst: Place::Reg(Reg::Ax),
+            op,
+            lhs: Place::Reg(Reg::Ax),
+            rhs: Place::Byte(ByteReg::Cl),
+        } = self.insns.get(j + 1)?.op
+        else {
+            return None;
+        };
+        if op != op_want {
+            return None;
+        }
+        u8::try_from(n).ok()
+    }
+
+    /// Record a bit-field `(bit_off, width)` of the unit at `unit`, merging
+    /// signedness — a field is `signed` if ANY access sign-extends it.
+    fn note_bitfield(&mut self, unit: u16, bit_off: u8, width: u8, signed: bool) {
+        let e = self
+            .bitfield_globals
+            .entry(unit)
+            .or_default()
+            .entry((bit_off, width))
+            .or_insert(false);
+        *e |= signed;
     }
 
     /// Match a bit-field WRITE clear+set PAIR at instruction `i`: `and byte[g],
@@ -1829,6 +1881,20 @@ impl Ctx {
                 // clears the high byte / shifted-in garbage), which is exactly why
                 // no scalar `char`/`int` form reproduces it. Recover `g.fK`;
                 // record the field so the emitter synthesizes the struct. The
+                // SIGNED bit-field read: `mov al,[g]; mov cl,s1; shl ax,cl; mov
+                // cl,s2; sar ax,cl` — the field is `int fK:w` (the struct decl
+                // emits `int`, which is what reproduces the shl/sar sign-extend).
+                LoOp::Load { dst: Place::Byte(ByteReg::Al), src: Place::Global(g) }
+                    if self.signed_bitfield_read_at(i, g).is_some() =>
+                {
+                    flush_call(&mut acc, out);
+                    let (bit_off, width, consumed) = self.signed_bitfield_read_at(i, g).unwrap();
+                    let unit = g & !1;
+                    self.note_bitfield(unit, bit_off, width, true);
+                    acc = Some(Expr::Bitfield { global: unit, bit_off, width });
+                    skip = consumed;
+                }
+
                 // global must NOT also be accessed raw (checked post-recovery).
                 // A load at an odd address is a field in byte 1 of the 2-byte
                 // unit at `g & ~1` (`b.z` after `x:4;y:4`); `bitfield_read_at`
@@ -1840,7 +1906,7 @@ impl Ctx {
                     flush_call(&mut acc, out);
                     let (bit_off, width, consumed) = self.bitfield_read_at(i, g).unwrap();
                     let unit = g & !1;
-                    self.bitfield_globals.entry(unit).or_default().insert((bit_off, width));
+                    self.note_bitfield(unit, bit_off, width, false);
                     acc = Some(Expr::Bitfield { global: unit, bit_off, width });
                     skip = consumed;
                 }
@@ -2360,7 +2426,7 @@ impl Ctx {
                     flush_call(&mut acc, out);
                     let (bit_off, width, value) = self.bitfield_write_pair_at(i).unwrap();
                     let unit = g & !1;
-                    self.bitfield_globals.entry(unit).or_default().insert((bit_off, width));
+                    self.note_bitfield(unit, bit_off, width, false);
                     out.push(Stmt::Assign(
                         LValue::Bitfield { global: unit, bit_off, width },
                         Expr::Const(value),
