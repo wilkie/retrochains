@@ -2047,20 +2047,16 @@ impl Ctx {
                 // `mov ax, …` starts a fresh accumulator value, discarding any
                 // call result the previous statement left unused. With `dx` set
                 // up, the value is a `long` (its high word in `dx`).
-                // `mov ax,offset @str; push ax; call` — a string-literal argument
-                // that is the call's FIRST C parameter (cdecl pushes it LAST, so
-                // the push is immediately before the call). `mov ax,0` in the `b8`
-                // form is a relocatable offset there — a literal 0 first-arg would
-                // be `xor ax,ax`. Recovered as `""` (only the relocation, not the
-                // bytes, is in `_TEXT`). Requiring the `Call` to follow the push
-                // excludes a literal-0 pushed as a LATER arg (`memset(a,0,n)`,
-                // `outp(p,0)`), which BCC also emits in the `b8` form.
+                // `mov ax,0` in the `b8` (3-byte `mov ax,imm16`) form is a
+                // RELOCATABLE offset — a string literal, or `&global` at offset 0
+                // — never a literal 0, which BCC emits as the 2-byte `xor ax,ax`.
+                // So a 3-byte `mov ax,0` is a data address in ANY position (a call
+                // arg `g0("")`, a `return &g`, a pointer store). Recovered as `""`
+                // (only the relocation, not the bytes, is in `_TEXT`, so any data
+                // address at that offset reproduces it). `dx` clear excludes a
+                // `long` constant's low word (`mov dx,h; mov ax,0`).
                 LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Imm(0) }
-                    if self.insns[i].span.len == 3
-                        && matches!(
-                            self.insns.get(i + 1).map(|n| &n.op),
-                            Some(LoOp::Arg { src: Place::Reg(Reg::Ax) })
-                        ) =>
+                    if self.insns[i].span.len == 3 && dx.is_none() =>
                 {
                     flush_call(&mut acc, out);
                     acc = Some(Expr::StrLit);
