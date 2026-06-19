@@ -191,6 +191,9 @@ pub enum Idiom {
     /// `fe /0` or `fe /1` with mod=11 — `inc r8` / `dec r8` (byte). The `char`
     /// counterpart of [`IncDecReg`]; `inc al` is `char + 1` kept byte-wide.
     IncDecByteReg,
+    /// `fe 06/0e disp16` — `inc`/`dec byte ptr [global]`. The byte counterpart of
+    /// [`Grp5Global`]; marks the global `char` (`g++` for `char g`).
+    IncDecByteGlobal,
     /// `03/2b/0b/23/33/3b /r [bx]` — an ALU op with a `[bx]` dereference operand
     /// (`add ax, [bx]` for `… + *p`).
     AluDeref,
@@ -309,6 +312,7 @@ impl Idiom {
             Idiom::MovByteReg => "byte reg copy (mov r8, r8)",
             Idiom::AluByteReg => "alu byte reg, reg",
             Idiom::IncDecByteReg => "inc/dec byte reg",
+            Idiom::IncDecByteGlobal => "inc/dec byte [global]",
             Idiom::AluDeref => "alu reg, [bx]",
             Idiom::StoreImmDeref => "store imm via pointer (mov [bx], imm16)",
             Idiom::StoreImmByteDeref => "store byte imm via pointer (mov [bx], imm8)",
@@ -444,6 +448,11 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluByteReg, pat: &[L(0x32), REG] },
     Def { idiom: Idiom::AluByteReg, pat: &[L(0x3a), REG] },
     Def { idiom: Idiom::IncDecByteReg, pat: &[L(0xfe), REG] }, // inc/dec r8
+    // `fe 06 disp16` (inc) / `fe 0e disp16` (dec) — byte inc/dec on a global.
+    // Byte sibling of Grp5Global; modrm mod=00 rm=110, reg ∈ {000, 001}.
+    // (The byte-LOCAL form `fe [bp+disp]` is intentionally left opaque — see the
+    // array-vs-scalars note on the recovery arm in hi_ir.rs.)
+    Def { idiom: Idiom::IncDecByteGlobal, pat: &[L(0xfe), M(0xf7, 0x06), A, A] },
     // reg-to-reg mov, and ALU reg,reg / reg,local (add/sub/or/and/xor/cmp).
     Def { idiom: Idiom::MovReg, pat: &[L(0x8b), REG] },
     Def { idiom: Idiom::MovReg, pat: &[L(0x89), REG] },

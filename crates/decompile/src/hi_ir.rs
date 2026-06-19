@@ -2013,6 +2013,38 @@ impl Ctx {
                     }
                 }
 
+                // In-place byte `inc`/`dec` on a `char` GLOBAL lvalue — `inc
+                // byte [g]` (char global / struct field). The byte width marks
+                // the lvalue `char`, unlike the word `Un` arm above. A single-
+                // instruction `++`/`--`. Stage 4 mem-RMW (`0xFE 06/0e`).
+                //
+                // Globals are safe: the data segment is modelled as scalars at
+                // their exact recovered offsets, so `gv@k++` recompiles to the
+                // same `inc byte [_+k]`. The byte-LOCAL form (`0xFE [bp+disp]`)
+                // is intentionally left opaque (not even recognized as an idiom)
+                // — a `char` array element (`a[K]++`) is byte-indistinguishable
+                // from a scalar char local but reg-allocates / lays out
+                // differently, so lifting it would expose the array-vs-scalars
+                // mismatch (fixture 721). The `Place::Global` bound here keeps
+                // the arm honest if a non-global `UnByte` ever appears.
+                //
+                // Only the DISCARDED form (`g++;` as a statement), guarded by an
+                // empty accumulator. A value-using post/pre-inc (`return g++`,
+                // `f(c++)`) loads the operand into `al` first, leaving `acc`
+                // live; recovering it as a bare `g++` statement would drop the
+                // old-value use and mis-recompile (fixtures 731/733/972).
+                LoOp::UnByte { dst: dst @ Place::Global(_), op, operand }
+                    if dst == operand
+                        && matches!(op, UnOp::Inc | UnOp::Dec)
+                        && acc.is_none() =>
+                {
+                    let step = if matches!(op, UnOp::Inc) { BinOp::Add } else { BinOp::Sub };
+                    match self.char_dest(dst) {
+                        Some(lv) => out.push(Stmt::Compound(lv, step, Expr::Const(1))),
+                        None => self.cant(),
+                    }
+                }
+
                 // In-place compound through a pointer — `*p op= Y` (`add [bx],3`,
                 // `or [si],dx`). The destination is a deref: `[bx]` reads whatever
                 // the pointer-tracking holds (a loaded pointer, or a `p+i`/`a[i]`
@@ -3261,7 +3293,7 @@ fn op_sig(op: &LoOp) -> &'static str {
             BinOp::Cmp => "Bin:Cmp",
             _ => "Bin:other",
         },
-        LoOp::Un { op, .. } => match op {
+        LoOp::Un { op, .. } | LoOp::UnByte { op, .. } => match op {
             UnOp::Inc => "Un:Inc",
             UnOp::Dec => "Un:Dec",
             UnOp::Neg => "Un:Neg",

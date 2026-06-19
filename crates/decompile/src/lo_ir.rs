@@ -178,6 +178,10 @@ pub enum LoOp {
     CmpByte { lhs: Place, rhs: Place },
     /// `dst ← op operand` (`inc`/`dec`/`neg`/`not`).
     Un { dst: Place, op: UnOp, operand: Place },
+    /// Byte-width `inc`/`dec` of a *memory* operand (`inc byte ptr [g]`,
+    /// `dec byte ptr [bp-1]`) — a separate op because the byte width marks the
+    /// lvalue `char`, which a word `Un` doesn't. `0xFE /0,/1`.
+    UnByte { dst: Place, op: UnOp, operand: Place },
     /// A width promotion (`cbw`/`cwd`).
     Promote { kind: Promote },
     /// `dst ← &src` (`lea`).
@@ -587,6 +591,12 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let g = Global(u16_at(bytes, 2));
             let op = if (modrm(1) >> 3) & 7 == 1 { UnOp::Dec } else { UnOp::Inc };
             vec![LoOp::Un { dst: g, op, operand: g }]
+        }
+        // `fe 06/0e disp16` — `inc`/`dec byte [global]` (char global / field).
+        Idiom::IncDecByteGlobal => {
+            let g = Global(u16_at(bytes, 2));
+            let op = if (modrm(1) >> 3) & 7 == 1 { UnOp::Dec } else { UnOp::Inc };
+            vec![LoOp::UnByte { dst: g, op, operand: g }]
         }
 
         // ---- promotions ----------------------------------------------------
