@@ -1545,8 +1545,19 @@ impl Ctx {
                 LoOp::Enter { .. }
                 | LoOp::Leave
                 | LoOp::RestoreReg { .. }
-                | LoOp::Cleanup { .. }
-                | LoOp::Promote { kind: Promote::Cbw } => {}
+                | LoOp::Cleanup { .. } => {}
+
+                // `cbw` after an INT-producing binary op (`imul`/`idiv`/shift)
+                // truncates the result to `char` and sign-extends it back — a
+                // `(char)(a OP b)` cast. After a char load (or anything else) it's
+                // the implicit `char`→`int` promotion, a no-op for the value.
+                LoOp::Promote { kind: Promote::Cbw } => {
+                    if i > 0 && matches!(self.insns[i - 1].op, LoOp::Bin { .. }) {
+                        if let Some(e) = acc.take() {
+                            acc = Some(Expr::Cast(Type::Char, Box::new(e)));
+                        }
+                    }
+                }
 
                 // A prologue `push si/di` is a register save (no value). The same
                 // op MID-BODY is a call ARGUMENT — si/di are callee-saved, so the
