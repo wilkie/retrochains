@@ -149,6 +149,25 @@ fn contains_call(e: &Expr) -> bool {
     }
 }
 
+/// Is an accumulator value safe to fold as a compound's right-hand side
+/// (`x op= <e>`)? Plain arithmetic over variables and constants is; a memory
+/// load (`Deref`/`PostIncDeref`) or a `Call` is not — those expose unrelated
+/// gaps when completing the function (a deref RHS is the later deref stage; a
+/// call RHS hits the `push si` arg/save ambiguity), so they stay declined.
+fn is_simple_compound_rhs(e: &Expr) -> bool {
+    match e {
+        Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_) => true,
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            is_simple_compound_rhs(a) && is_simple_compound_rhs(b)
+        }
+        Expr::Ternary(a, b, c) => {
+            is_simple_compound_rhs(a) && is_simple_compound_rhs(b) && is_simple_compound_rhs(c)
+        }
+        Expr::Not(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => is_simple_compound_rhs(a),
+        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) => false,
+    }
+}
+
 /// A recovered local variable. BCC keeps `int` locals either on the stack frame
 /// or in the `si`/`di` register variables; both lift to ordinary named locals
 /// (the storage class is a hint, not semantics — and recompiling a plain `int`
@@ -1955,13 +1974,31 @@ impl Ctx {
                 // (`add si,5`, `add di,si`, `add [g],3`, `sub [bp-4],2`,
                 // `and si,7`). BCC codes this in one instruction, distinct from the
                 // load-op-store `X = X op Y`, so it recovers as `X op= Y`.
+                //
+                // `Y` is usually a register/local/immediate operand, but for a
+                // *complex* right-hand side BCC computes it into `ax` first and
+                // codes `op X, ax` — so an `ax` source takes the accumulated
+                // expression (`x += a * b`), not a bare register.
                 LoOp::Bin { dst, op, lhs, rhs }
                     if dst == lhs
                         && Self::is_compound_op(op)
                         && !matches!(dst, Place::Byte(_))
                         && Self::var_of(dst).is_some() =>
                 {
-                    match (self.dest(dst), self.operand(rhs)) {
+                    let rhs_expr = if matches!(rhs, Place::Reg(Reg::Ax)) {
+                        // A complex RHS is computed into `ax` first (`x += a * b`);
+                        // take that accumulated value — but only plain arithmetic.
+                        // A deref or call RHS exposes unrelated gaps when it lets the
+                        // function complete (see `is_simple_compound_rhs`), so leave
+                        // those declined.
+                        match acc.take() {
+                            Some(e) if is_simple_compound_rhs(&e) => Some(e),
+                            _ => None,
+                        }
+                    } else {
+                        self.operand(rhs)
+                    };
+                    match (self.dest(dst), rhs_expr) {
                         (Some(lv), Some(e)) => out.push(Stmt::Compound(lv, op, e)),
                         _ => self.cant(),
                     }

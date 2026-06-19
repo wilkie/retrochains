@@ -113,6 +113,10 @@ pub enum Idiom {
     AluReg,
     /// the same opcodes with `[bp±disp]` — an ALU op against a local/param.
     AluLocal,
+    /// `01/29/09/21/31/39 /r` with a memory `r/m` (local or global) — the
+    /// *memory-destination* direction, `op [mem], reg`: an in-place read-modify-
+    /// write of a stack local / param / global (`x += y`, `g &= mask`).
+    AluMemReg,
     /// `83 /r ii` — an ALU op with a sign-extended `imm8` (`add/cmp/...`).
     AluImm,
     /// `8d /r [bp±N]` — `lea r16, [bp±disp]`: the address of a local (array /
@@ -272,6 +276,7 @@ impl Idiom {
             Idiom::LoadImmReg => "load reg, imm16",
             Idiom::AluReg => "alu reg, reg (add/sub/or/and/xor/cmp)",
             Idiom::AluLocal => "alu reg, local",
+            Idiom::AluMemReg => "alu [mem], reg (in-place)",
             Idiom::AluImm => "alu r/m, imm8",
             Idiom::LeaLocal => "lea (address of local)",
             Idiom::StoreImmLocalByte => "store char imm to local (mov [bp±N], imm8)",
@@ -455,6 +460,18 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::AluGlobal, pat: &[L(0x23), DISP16, A, A] },
     Def { idiom: Idiom::AluGlobal, pat: &[L(0x33), DISP16, A, A] },
     Def { idiom: Idiom::AluGlobal, pat: &[L(0x3b), DISP16, A, A] },
+    // memory-destination ALU `op [global], reg` (opcodes 01/29/09/21/31 add/sub/
+    // or/and/xor, plus 39 cmp) — the in-place RMW direction. Global only for now:
+    // the `[bp±disp]` (local) form lands on array elements / spilled scalars where
+    // the array-vs-scalars frame ambiguity bites, so it waits for the deref/array
+    // stage. `adc`/`sbb` (11/19) are left out too — the long high-word halves, so a
+    // `long` compound stays unlifted rather than mis-recovering as two `int` ops.
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x01), DISP16, A, A] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x29), DISP16, A, A] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x09), DISP16, A, A] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x21), DISP16, A, A] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x31), DISP16, A, A] },
+    Def { idiom: Idiom::AluMemReg, pat: &[L(0x39), DISP16, A, A] },
     // group-1 ALU with imm8 (reg or local); CdeclPopN (`83 c4`) wins first.
     Def { idiom: Idiom::CdeclPopN, pat: &[L(0x83), L(0xc4), A] },
     Def { idiom: Idiom::AluImm, pat: &[L(0x83), BP_DISP8, A, A] },

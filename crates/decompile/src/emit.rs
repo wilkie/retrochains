@@ -1524,6 +1524,36 @@ mod tests {
     }
 
     #[test]
+    fn compound_with_computed_rhs_roundtrips() {
+        // `x op= <expr>`: BCC computes the RHS into `ax`, then `add si, ax`
+        // (reg var) — the accumulated expression becomes the compound's RHS.
+        assert_roundtrips("int f(int a, int b){ int s; s = 0; s += a * b; return s; }\n");
+        assert_roundtrips("int f(int a, int b){ int s; s = a; s -= b + 1; return s; }\n");
+        // Global in-place mem-dest compound — `op [g], reg`.
+        assert_roundtrips("int g; void f(int y){ g += y; }\n");
+        assert_roundtrips("int g; int h; void f(){ g ^= h; }\n");
+    }
+
+    #[test]
+    fn compound_with_call_or_deref_rhs_stays_declined() {
+        // A call RHS hits the `push si` arg/save ambiguity, a deref RHS is the
+        // later deref stage — both expose unrelated gaps when they complete the
+        // function, so the ax-source fold leaves them declined (not mis-recovered).
+        let call_rhs = recompile_text(
+            "int g(int x){ return x; } int f(int y){ int s; s = 0; s += g(y); return s; }\n",
+            &CompileOpts::default(),
+        )
+        .expect("compiles");
+        assert!(decompile(&call_rhs).is_none(), "call RHS stays declined");
+        let deref_rhs = recompile_text(
+            "int f(int *p){ int s; s = 0; s += *p; return s; }\n",
+            &CompileOpts::default(),
+        )
+        .expect("compiles");
+        assert!(decompile(&deref_rhs).is_none(), "deref RHS stays declined");
+    }
+
+    #[test]
     fn wide_immediate_on_long_or_array_stays_incomplete() {
         // BCC uses the wide `0x81` form for a `long` half / array element even when
         // the value fits an imm8 — a context Stage 1 doesn't model. Those must not
