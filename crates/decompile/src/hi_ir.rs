@@ -2176,6 +2176,42 @@ impl Ctx {
                     ));
                 }
 
+                // Byte-width in-place compound on a CHAR memory lvalue — `g |= 8`
+                // (char global / field), `*p &= 15` (char deref), `p->c ^= 4`
+                // (char field via a pointer at an offset). The byte width
+                // (`BinByte`) types the lvalue `char`, where the word `Bin`
+                // mem-dest arms below default `int` and mis-recompile to a word
+                // op. Constant rhs (the `0x80 /op [mem], imm8` shape), discarded.
+                // The byte LOCAL (`[bp+disp]`) is excluded — a char array element
+                // is byte-indistinguishable from a scalar char local
+                // (array-vs-scalars); a byte register goes via `Bin` (Place::Byte
+                // is already char).
+                LoOp::BinByte { dst, op, lhs, rhs: Place::Imm(v) }
+                    if dst == lhs && Self::is_compound_op(op) =>
+                {
+                    flush_call(&mut acc, out);
+                    let lv = match dst {
+                        Place::Global(_) => self.char_dest(dst),
+                        Place::Deref(r) if is_reg_var(r) => {
+                            let p = Var::Reg(r);
+                            self.note(p);
+                            self.note_char_ptr(p);
+                            Some(LValue::Deref(Box::new(Expr::Var(p))))
+                        }
+                        Place::DerefDisp(r, disp) if is_reg_var(r) => {
+                            let p = Var::Reg(r);
+                            self.note(p);
+                            self.note_char_ptr(p);
+                            Some(LValue::Deref(Box::new(Self::offset_ptr(Expr::Var(p), disp))))
+                        }
+                        _ => None,
+                    };
+                    match lv {
+                        Some(lv) => out.push(Stmt::Compound(lv, op, Expr::Const(v))),
+                        None => self.cant(),
+                    }
+                }
+
                 // In-place compound through a pointer — `*p op= Y` (`add [bx],3`,
                 // `or [si],dx`). The destination is a deref: `[bx]` reads whatever
                 // the pointer-tracking holds (a loaded pointer, or a `p+i`/`a[i]`
@@ -3409,7 +3445,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
 fn op_sig(op: &LoOp) -> &'static str {
     match op {
         LoOp::Asm { .. } => "Asm(unlifted)",
-        LoOp::Bin { op, .. } => match op {
+        LoOp::Bin { op, .. } | LoOp::BinByte { op, .. } => match op {
             BinOp::Add => "Bin:Add",
             BinOp::Sub => "Bin:Sub",
             BinOp::And => "Bin:And",

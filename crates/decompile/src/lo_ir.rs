@@ -172,6 +172,12 @@ pub enum LoOp {
     StoreImmByte { dst: Place, imm: i32 },
     /// `dst ← lhs op rhs`. For `Cmp`/`Test`, `dst` is [`Place::Flags`].
     Bin { dst: Place, op: BinOp, lhs: Place, rhs: Place },
+    /// Byte-width `dst ← lhs op rhs` on a **memory** lvalue (`or byte ptr [g],
+    /// 8`, `and byte ptr [si], 15`) — the byte sibling of [`Bin`]. A separate op
+    /// because the byte width marks the lvalue `char`; a word `Bin` over the same
+    /// place would recompile to a word op and mis-recover the pointee/global
+    /// `int`. `0x80 /op [mem], imm8` and the byte mem-dest reg-source forms.
+    BinByte { dst: Place, op: BinOp, lhs: Place, rhs: Place },
     /// `cmp` at **byte** width (`cmp byte ptr [x], imm` / `cmp dl, …`) — a
     /// separate op because the byte width marks the operands `char`, which a
     /// word `cmp` doesn't.
@@ -426,21 +432,30 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             vec![LoOp::Bin { dst, op, lhs: place, rhs: R(reg_of(1)) }]
         }
         Idiom::AluImmByte => {
-            // Byte group-1 with imm8, same operand shapes as `AluImm` — but the
-            // register form is a *byte* register (a `char`).
+            // Byte group-1 with imm8, same operand shapes as `AluImm`. A MEMORY
+            // operand becomes a byte-marked `BinByte` (so recovery types the
+            // lvalue `char`); a byte register is already `char` via `Place::Byte`.
             let m = modrm(1);
             let op = group1_op(m >> 3);
-            let (lhs, imm) = match m & 0xc7 {
-                0x46 => (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed())),
-                0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed())),
-                // `[si]`/`[di]` deref (mod=00, rm=100/101) — `cmp byte [si],imm`.
-                0x04 | 0x05 => (Deref(deref_base(m)), i32::from(bytes[2].cast_signed())),
-                _ => (Byte(byte_rm_of(1)), i32::from(bytes[2].cast_signed())),
+            let (place, imm, is_mem) = match m & 0xc7 {
+                0x46 => (Local(disp8_at(bytes, 2)), i32::from(bytes[3].cast_signed()), true),
+                0x06 => (Global(u16_at(bytes, 2)), i32::from(bytes[4].cast_signed()), true),
+                // `[si]`/`[di]` deref (mod=00, rm=100/101).
+                0x04 | 0x05 => (Deref(deref_base(m)), i32::from(bytes[2].cast_signed()), true),
+                // `[si+disp]`/`[di+disp]` (mod=01, rm=100/101) — `p->c |= K`.
+                0x44 | 0x45 => (
+                    Place::DerefDisp(deref_base(m), disp8_at(bytes, 2)),
+                    i32::from(bytes[3].cast_signed()),
+                    true,
+                ),
+                _ => (Byte(byte_rm_of(1)), i32::from(bytes[2].cast_signed()), false),
             };
             if op == BinOp::Cmp {
-                vec![LoOp::CmpByte { lhs, rhs: Imm(imm) }]
+                vec![LoOp::CmpByte { lhs: place, rhs: Imm(imm) }]
+            } else if is_mem {
+                vec![LoOp::BinByte { dst: place, op, lhs: place, rhs: Imm(imm) }]
             } else {
-                vec![LoOp::Bin { dst: lhs, op, lhs, rhs: Imm(imm) }]
+                vec![LoOp::Bin { dst: place, op, lhs: place, rhs: Imm(imm) }]
             }
         }
         Idiom::LoadImmByteReg => {

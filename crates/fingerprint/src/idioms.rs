@@ -600,13 +600,10 @@ const IDIOMS: &[Def] = &[
     // for a `char *` register-variable dereferenced in a condition.
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), M(0xc7, 0x04), A] },
     Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), M(0xc7, 0x05), A] },
-    // NB: `80 /op [si+disp]/[di+disp], imm8` (`p->c |= K` for a char field at an
-    // offset) is intentionally NOT recognized yet. Decoding it to `Bin{DerefDisp,
-    // op, Imm}` loses byteness, so recovery mis-types the pointee `int` (the same
-    // pre-existing gap as the no-disp `*p &= 15`). Add a byte-marked mem-dest ALU
-    // (a `BinByte` LoOp) FIRST, then this + the no-disp char-deref bitwise both
-    // recover correctly. The bcc/tasm side already assembles `or byte [si+disp],
-    // imm` (fixture 4313).
+    // `80 /op [si+disp8]/[di+disp8], imm8` — byte mem-dest ALU at a reg-var
+    // pointer offset (`p->c |= K`). Decodes to a byte-marked `BinByte`.
+    Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), M(0xc7, 0x44), A, A] },
+    Def { idiom: Idiom::AluImmByte, pat: &[L(0x80), M(0xc7, 0x45), A, A] },
     // alu ax, imm16 — the accumulator short forms (05/0d/15/1d/25/2d/35/3d), all
     // `00xxx101`, distinguished by the `reg`-like bits from the 81/83 groups.
     Def { idiom: Idiom::AluAxImm, pat: &[M(0xc7, 0x05), A, A] },
