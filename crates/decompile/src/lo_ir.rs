@@ -129,6 +129,10 @@ pub enum BinOp {
     Ror,
     Rcl,
     Rcr,
+    /// Logical `&&` / `||` — never lifted from an instruction; synthesized by the
+    /// decompiler when recovering a short-circuit condition (`if (a || b)`).
+    LAnd,
+    LOr,
 }
 
 /// A unary operator.

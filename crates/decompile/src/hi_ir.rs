@@ -3285,6 +3285,81 @@ impl Ctx {
         }
     }
 
+    /// Detect a short-circuit `||`/`&&` condition: a chain of `compare;
+    /// conditional-branch` links that converge on a common THEN (the if-body)
+    /// and AFTER (the skip). The first link's compare is at `cmp0`, its branch at
+    /// `branch0`. Returns `(condition, then_idx, after_idx)`.
+    ///
+    /// Each branch either jumps to THEN (this operand being TRUE enters the body
+    /// → an `||` term) or to AFTER (this operand being FALSE skips it → an `&&`
+    /// term, the branch's relop negated). Building the condition right-to-left
+    /// recovers pure `||`, pure `&&`, AND mixed precedence (`a || b && c`).
+    fn detect_short_circuit(
+        &mut self,
+        cmp0: usize,
+        branch0: usize,
+        acc: Option<&Expr>,
+    ) -> Option<(Expr, usize, usize)> {
+        // Collect the chain. Each link is a test op then a forward conditional
+        // branch; the next link's test immediately follows the branch (so an
+        // operand needing setup — a load/call between links — isn't matched).
+        let mut links: Vec<(usize, usize, usize)> = Vec::new();
+        let (mut cmp, mut br) = (cmp0, branch0);
+        loop {
+            let LoOp::Branch { target, .. } = self.insns.get(br)?.op else {
+                return None;
+            };
+            if target <= self.insns[br].span.start {
+                return None; // forward branches only
+            }
+            links.push((cmp, br, target));
+            if self.is_test_op(br + 1) && matches!(self.insns.get(br + 2).map(|n| &n.op), Some(LoOp::Branch { .. })) {
+                cmp = br + 1;
+                br = br + 2;
+            } else {
+                break;
+            }
+        }
+        if links.len() < 2 {
+            return None;
+        }
+        let then_idx = links.last().unwrap().1 + 1;
+        let then_off = self.insns.get(then_idx)?.span.start;
+        let after_off = links.last().unwrap().2;
+        // The last branch must skip PAST the body; every branch targets exactly
+        // THEN or AFTER (a single merge point).
+        if after_off <= then_off || links.iter().any(|&(_, _, t)| t != then_off && t != after_off) {
+            return None;
+        }
+        let after_idx = self.idx_of(after_off)?;
+        let mut cond: Option<Expr> = None;
+        for (k, &(c, b, t)) in links.iter().enumerate().rev() {
+            let to_after = t == after_off;
+            // Only the FIRST operand can read the folded accumulator (`or ax,ax`
+            // on a computed value); later operands test their own memory operand.
+            let link_acc = if k == 0 { acc } else { None };
+            let r = self.condition(c, b, to_after, link_acc);
+            cond = Some(match cond {
+                None => r,
+                Some(rest) => {
+                    let op = if to_after { BinOp::LAnd } else { BinOp::LOr };
+                    Expr::Binary(op, Box::new(r), Box::new(rest))
+                }
+            });
+        }
+        Some((cond?, then_idx, after_idx))
+    }
+
+    /// Is the op at `idx` a comparison or truthiness test (`cmp …` / `or r,r`)?
+    fn is_test_op(&self, idx: usize) -> bool {
+        matches!(
+            self.insns.get(idx).map(|n| &n.op),
+            Some(LoOp::Bin { dst: Place::Flags, op: BinOp::Cmp, .. })
+                | Some(LoOp::Bin { op: BinOp::Or, dst: Place::Reg(_), .. })
+                | Some(LoOp::Bin { op: BinOp::Or, dst: Place::Byte(_), .. })
+        )
+    }
+
     /// If the then-block ending at the branch-target index `tb` is followed by
     /// an `else`, return the index one past the else-block. The marker is an
     /// unconditional jump just before `tb` that skips past `then_target`.
@@ -3772,6 +3847,17 @@ impl Ctx {
                     // `*p` set up before an `or ax,ax` / `cmp ax,K`), which the
                     // condition needs to read a register operand.
                     let cond_acc = self.fold_linear(linear_start, cmp_idx, &mut stmts);
+                    // A short-circuit `||`/`&&` chain — recover the combined
+                    // condition and one `if` over the merged then/after blocks.
+                    if let Some((cond, then_idx, after_idx)) =
+                        self.detect_short_circuit(cmp_idx, i, cond_acc.as_ref())
+                    {
+                        let then = self.structure(then_idx, after_idx);
+                        stmts.push(Stmt::If(cond, then, Vec::new()));
+                        i = after_idx;
+                        linear_start = after_idx;
+                        continue;
+                    }
                     let Some(tb) = self.idx_of(target) else {
                         self.cant_for("structure:branch-target");
                         i += 1;

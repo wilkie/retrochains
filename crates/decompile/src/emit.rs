@@ -1026,6 +1026,8 @@ fn binop_token(op: crate::lo_ir::BinOp) -> &'static str {
         BinOp::Sub => "-",
         BinOp::Or => "|",
         BinOp::And => "&",
+        BinOp::LOr => "||",
+        BinOp::LAnd => "&&",
         BinOp::Xor => "^",
         BinOp::Shl => "<<",
         // Arithmetic/logical right shift both print as `>>`; the operand's
