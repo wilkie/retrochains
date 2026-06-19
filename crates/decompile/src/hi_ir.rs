@@ -1451,6 +1451,22 @@ impl Ctx {
                     }
                 }
 
+                // `xor dx,dx` after an `int` value in `ax` zero-extends it to a
+                // `long` — the unsigned analogue of `cwd` (`(unsigned long)u`).
+                // BCC zero-extends an *unsigned* widening this way; a signed one
+                // uses `cwd`. So the accumulator becomes an unsigned `long`.
+                LoOp::Bin {
+                    dst: Place::Reg(Reg::Dx),
+                    op: BinOp::Xor,
+                    lhs: Place::Reg(Reg::Dx),
+                    rhs: Place::Reg(Reg::Dx),
+                } if acc.is_some() && !acc_long => {
+                    if let Some(e) = acc.clone() {
+                        self.mark_unsigned(&e);
+                    }
+                    acc_long = true;
+                }
+
                 // A jump to the epilogue is a `return <accumulator>`. The return
                 // *type* is `char` when the value is left in `al` (a byte) with no
                 // `cbw` widening it — detectable locally as a byte-register write
