@@ -162,6 +162,26 @@ pub enum Expr {
     GlobalIndex { base: u16, index: Box<Expr> },
 }
 
+/// Does `e` read an element of the global array at `base` anywhere?
+fn expr_reads_global_base(e: &Expr, base: u16) -> bool {
+    match e {
+        Expr::GlobalIndex { base: b, index } => *b == base || expr_reads_global_base(index, base),
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            expr_reads_global_base(a, base) || expr_reads_global_base(b, base)
+        }
+        Expr::Ternary(a, b, c) => {
+            expr_reads_global_base(a, base)
+                || expr_reads_global_base(b, base)
+                || expr_reads_global_base(c, base)
+        }
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => {
+            expr_reads_global_base(a, base)
+        }
+        Expr::Call(_, args) => args.iter().any(|a| expr_reads_global_base(a, base)),
+        _ => false,
+    }
+}
+
 /// Does an expression contain a (side-effecting) call anywhere?
 fn contains_call(e: &Expr) -> bool {
     match e {
@@ -610,11 +630,15 @@ pub struct Function {
     /// `(bit_off, width)` fields. The emitter synthesizes a `struct { … } gvN;`
     /// per entry and renders [`Expr::Bitfield`] as `gvN.fK`.
     pub bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeMap<(u8, u8), bool>>,
-    /// File-scope arrays: data-segment base offset → element count. The emitter
-    /// declares `int gvN[len];` per entry and renders [`Expr::GlobalIndex`] as
-    /// `gvN[i]`. A global that is array-indexed must not also be a scalar
-    /// `Var::Global` (the merge is a later slice — recovery declines the mix).
-    pub global_arrays: std::collections::BTreeMap<u16, u16>,
+    /// File-scope arrays: data-segment base offset → (element type, count). The
+    /// emitter declares `<elem> gvN[len];` per entry and renders
+    /// [`Expr::GlobalIndex`] as `gvN[i]`. A global that is array-indexed must not
+    /// also be a scalar `Var::Global` (the merge is a later slice — recovery
+    /// declines the mix).
+    pub global_arrays: std::collections::BTreeMap<u16, (ArrayElem, u16)>,
+    /// The subset of [`global_arrays`](Self::global_arrays) whose `char` element
+    /// is read zero-extended (`mov ah,0`, not `cbw`) — declared `unsigned char`.
+    pub unsigned_global_arrays: std::collections::BTreeSet<u16>,
     /// to a direct `[bp+disp]` slot access, so an `int a[M]` looks like scalar
     /// slots; when those slots can't be the whole top-packed scalar layout the
     /// frame is modelled as an array instead (see [`recover`]).
@@ -659,7 +683,7 @@ impl ArrayElem {
     }
 
     /// The C type keyword.
-    fn c_type(self) -> &'static str {
+    pub(crate) fn c_type(self) -> &'static str {
         match self {
             ArrayElem::Char => "char",
             ArrayElem::Int => "int",
@@ -816,8 +840,11 @@ struct Ctx {
     /// incomplete (the raw access can't live on a struct).
     bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeMap<(u8, u8), bool>>,
     /// File-scope arrays observed via an indexed access (`_a[idx]`): base
-    /// offset → element count. Mirrors [`Function::global_arrays`].
-    global_arrays: std::collections::BTreeMap<u16, u16>,
+    /// offset → (element type, count). Mirrors [`Function::global_arrays`].
+    global_arrays: std::collections::BTreeMap<u16, (ArrayElem, u16)>,
+    /// Global-array bases read zero-extended (`unsigned char`). Mirrors
+    /// [`Function::unsigned_global_arrays`].
+    unsigned_global_arrays: std::collections::BTreeSet<u16>,
     /// Local-array bases (`lea` offsets) dereferenced at byte width — `char`
     /// arrays. The element type of a purely variable-indexed array isn't in any
     /// slot, only in the byte-vs-word deref, so this carries that signal to the
@@ -1073,7 +1100,11 @@ impl Ctx {
                 self.mark_unsigned(c);
             }
             Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => self.mark_unsigned(a),
-            Expr::GlobalIndex { .. } => {}
+            // A zero-extended read of a char-array element makes the ARRAY
+            // `unsigned char` (not the index). Record the base; don't recurse.
+            Expr::GlobalIndex { base, .. } => {
+                self.unsigned_global_arrays.insert(*base);
+            }
             Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..)
             | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } | Expr::StrLit => {}
         }
@@ -1501,11 +1532,18 @@ impl Ctx {
         Some(LValue::Var(var))
     }
 
-    /// De-scale a global-array element index held in `bx` for an access at
-    /// `base`, recording the array. Returns the C-level index expression, or
-    /// `None` (decline) when `base` isn't a plausible array offset or `bx`
-    /// doesn't hold an int-scaled index. Shared by the read and write arms.
-    fn global_array_index(&mut self, base: u16, bx: Option<Expr>) -> Option<Expr> {
+    /// Resolve a global-array element index for an access at `base` with element
+    /// type `elem` through index register `index_reg`, recording the array.
+    /// Returns the C-level index, or `None` (decline) when `base` isn't a
+    /// plausible array offset or the index isn't a clean element index. Shared by
+    /// the read/write/ALU arms. `bx` is the tracked value of the `bx` scratch.
+    fn global_array_index(
+        &mut self,
+        base: u16,
+        elem: ArrayElem,
+        index_reg: Reg,
+        bx: Option<Expr>,
+    ) -> Option<Expr> {
         // A NEGATIVE displacement (`8b 87 fe ff` = `[bx-2]`) is the folded
         // `a[i-K]` form — `base` is `array_base - K`, not a standalone offset; a
         // huge `base` would declare thousands of scalar globals. Only a small,
@@ -1513,17 +1551,29 @@ impl Ctx {
         if (base as i16) < 0 || base > 0x200 || base % 2 != 0 {
             return None;
         }
-        let (idx, shifts) = strip_scale(bx?);
-        if shifts != 1 {
-            return None; // int stride 2 (one `shl`) only
-        }
+        let idx = match index_reg {
+            // A scratch index in `bx`: BCC scaled it to a byte offset
+            // (`i << log2(stride)`), so de-scale it and check the shift matches
+            // the element stride (an `int` array shifts by 1, a `char` array not).
+            Reg::Bx => {
+                let (i, shifts) = strip_scale(bx?);
+                if (1i16 << shifts) != elem.stride() {
+                    return None;
+                }
+                i
+            }
+            // A `char`-array index held directly in a register variable (stride 1,
+            // no scaling) — the index IS the reg-var (`a[k]` with `k` in si/di).
+            Reg::Si | Reg::Di if elem.stride() == 1 => self.operand(Place::Reg(index_reg))?,
+            _ => return None,
+        };
         // Track the highest constant index so the declared length covers it.
         let elems = match &idx {
             Expr::Const(k) if *k >= 0 => u16::try_from(*k + 1).unwrap_or(1),
             _ => 1,
         };
-        let e = self.global_arrays.entry(base).or_insert(1);
-        *e = (*e).max(elems);
+        let entry = self.global_arrays.entry(base).or_insert((elem, 1));
+        entry.1 = entry.1.max(elems);
         Some(idx)
     }
 
@@ -1818,7 +1868,7 @@ impl Ctx {
                     src: Place::GlobalIndexed { base, index: Reg::Bx },
                 } => {
                     flush_call(&mut acc, out);
-                    match self.global_array_index(base, bx.clone()) {
+                    match self.global_array_index(base, ArrayElem::Int, Reg::Bx, bx.clone()) {
                         Some(idx) => acc = Some(Expr::GlobalIndex { base, index: Box::new(idx) }),
                         None => self.cant(),
                     }
@@ -1840,12 +1890,69 @@ impl Ctx {
                             self.operand(other)
                         }
                     };
-                    match (self.global_array_index(base, bx.clone()), value) {
+                    match (self.global_array_index(base, ArrayElem::Int, Reg::Bx, bx.clone()), value) {
                         (Some(idx), Some(e)) => out.push(Stmt::Assign(
                             LValue::GlobalIndex { base, index: Box::new(idx) },
                             e,
                         )),
                         _ => self.cant(),
+                    }
+                }
+
+                // `mov al, _a[idx]` — read a CHAR global-array element (`8a 84 lo
+                // hi`), a byte access (stride 1). The index is held directly in a
+                // register variable (si/di) or in bx; a following cbw promotes the
+                // char to int for the surrounding expression (handled as a no-op
+                // on the recovered `gvN[i]`, which re-emits the byte-load + cbw).
+                LoOp::Load {
+                    dst: Place::Byte(ByteReg::Al),
+                    src: Place::GlobalIndexed { base, index },
+                } => {
+                    flush_call(&mut acc, out);
+                    match self.global_array_index(base, ArrayElem::Char, index, bx.clone()) {
+                        Some(idx) => acc = Some(Expr::GlobalIndex { base, index: Box::new(idx) }),
+                        None => self.cant(),
+                    }
+                }
+
+                // `mov _a[idx], al` — store the char accumulator to a CHAR
+                // global-array element (`88 84 lo hi`, `a[i] = c`).
+                LoOp::Store {
+                    dst: Place::GlobalIndexed { base, index },
+                    src: Place::Byte(ByteReg::Al),
+                } => {
+                    let value = acc.take();
+                    match (self.global_array_index(base, ArrayElem::Char, index, bx.clone()), value) {
+                        // A char element modified by ARITHMETIC of itself (`a[i] +=
+                        // K` = load/inc/store) recovered as `a[i] = a[i] + K` would
+                        // promote to int (`cbw`) and mismatch BCC's byte-wide
+                        // compound. A real load-op-store compound recognizer for
+                        // global-array elements is a later slice; decline for now.
+                        // (A bare copy `a[i] = b[j]` is fine — not arithmetic.)
+                        (Some(_), Some(e))
+                            if !matches!(e, Expr::GlobalIndex { .. })
+                                && expr_reads_global_base(&e, base) =>
+                        {
+                            self.cant();
+                        }
+                        (Some(idx), Some(e)) => out.push(Stmt::Assign(
+                            LValue::GlobalIndex { base, index: Box::new(idx) },
+                            e,
+                        )),
+                        _ => self.cant(),
+                    }
+                }
+
+                // `mov byte _a[idx], imm8` — store a char literal to a CHAR
+                // global-array element (`c6 84 lo hi ii`, `a[i] = 'x'`).
+                LoOp::StoreImmByte { dst: Place::GlobalIndexed { base, index }, imm } => {
+                    flush_call(&mut acc, out);
+                    match self.global_array_index(base, ArrayElem::Char, index, bx.clone()) {
+                        Some(idx) => out.push(Stmt::Assign(
+                            LValue::GlobalIndex { base, index: Box::new(idx) },
+                            Expr::Const(imm),
+                        )),
+                        None => self.cant(),
                     }
                 }
 
@@ -2390,7 +2497,7 @@ impl Ctx {
                     lhs: Place::Reg(Reg::Ax),
                     rhs: Place::GlobalIndexed { base, index: Reg::Bx },
                 } if is_foldable(op) => {
-                    match (acc.take(), self.global_array_index(base, bx.clone())) {
+                    match (acc.take(), self.global_array_index(base, ArrayElem::Int, Reg::Bx, bx.clone())) {
                         (Some(l), Some(idx)) => {
                             let elem = Expr::GlobalIndex { base, index: Box::new(idx) };
                             acc = Some(Expr::Binary(op, Box::new(l), Box::new(elem)));
@@ -2408,7 +2515,7 @@ impl Ctx {
                     lhs: Place::Reg(l),
                     rhs: Place::GlobalIndexed { base, index: Reg::Bx },
                 } if d == l && is_reg_var(d) && Self::is_compound_op(op) => {
-                    match self.global_array_index(base, bx.clone()) {
+                    match self.global_array_index(base, ArrayElem::Int, Reg::Bx, bx.clone()) {
                         Some(idx) => {
                             let v = Var::Reg(d);
                             self.note(v);
@@ -4181,6 +4288,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         word_globals,
         bitfield_globals: std::collections::HashMap::new(),
         global_arrays: std::collections::BTreeMap::new(),
+        unsigned_global_arrays: std::collections::BTreeSet::new(),
         char_array_bases: Vec::new(),
         long_array_bases: Vec::new(),
         in_prologue: true,
@@ -4270,6 +4378,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         unsigned_vars: ctx.unsigned_vars,
         bitfield_globals: ctx.bitfield_globals,
         global_arrays: ctx.global_arrays,
+        unsigned_global_arrays: ctx.unsigned_global_arrays,
         arrays,
         body,
         complete,
@@ -4739,6 +4848,38 @@ mod tests {
         );
         assert!(f.complete, "the loop-accumulate over a global array is recovered");
         assert!(f.global_arrays.contains_key(&0));
+    }
+
+    #[test]
+    fn global_char_array_read_and_write() {
+        // `char a[5]; return a[i]` = `mov si,i; mov al,_a[si]; cbw` — a byte
+        // access (stride 1, index held directly in si). The element type is char.
+        let f = recover_c("char a[5]; int f(int i) { return a[i]; }\n");
+        assert!(f.complete, "a char-array read is recovered");
+        assert_eq!(f.global_arrays.get(&0).map(|&(e, _)| e), Some(ArrayElem::Char));
+        // The store side: `a[i] = 'x'` (`mov byte _a[si], imm8`).
+        let g = recover_c("char a[5]; void g(int i) { a[i] = 'x'; }\n");
+        assert!(g.complete, "a char-array write is recovered");
+        let Some(Stmt::Assign(LValue::GlobalIndex { .. }, Expr::Const(0x78))) = g.body.first() else {
+            panic!("expected `gv1[i] = 'x'`, got {:?}", g.body);
+        };
+    }
+
+    #[test]
+    fn global_unsigned_char_array_read() {
+        // An `unsigned char` array zero-extends (`mov ah,0`) instead of `cbw`;
+        // the array must be declared `unsigned char` to reproduce that.
+        let f = recover_c("unsigned char a[10]; int f(int i) { return a[i]; }\n");
+        assert!(f.complete);
+        assert!(f.unsigned_global_arrays.contains(&0), "the char array is unsigned");
+    }
+
+    #[test]
+    fn global_char_array_self_compound_declines() {
+        // `a[i] += 1` (byte-wide `inc al`) recovered as `a[i] = a[i] + 1` would
+        // promote to int (`cbw`) and mismatch — decline it.
+        let f = recover_c("char a[5]; void g(int i) { a[i] += 1; }\n");
+        assert!(!f.complete, "the char-array self-compound stays incomplete");
     }
 
     #[test]

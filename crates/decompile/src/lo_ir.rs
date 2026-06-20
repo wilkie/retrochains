@@ -408,22 +408,35 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         // `8b /r _a[idx]` (`8b 87 lo hi`) — load a global-array element through a
         // scaled index register. `reg` field = dst, `rm` field (4/5/7) = index
         // (si/di/bx); the disp16 is the array's data-segment base.
+        // `8b/8a /r _a[idx]` — word (`int`) or byte (`char`) array-element load.
         Idiom::LoadGlobalIndexed => {
             let m = modrm(1);
-            let src = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
-            vec![LoOp::Load { dst: R(reg_of(1)), src }]
+            let place = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
+            if bytes[0] == 0x8a {
+                vec![LoOp::Load { dst: Byte(ByteReg::Al), src: place }]
+            } else {
+                vec![LoOp::Load { dst: R(reg_of(1)), src: place }]
+            }
         }
-        // `89 /r _a[idx]` — store register `reg` to a global-array element.
+        // `89/88 /r _a[idx]` — store a register to a word/byte array element.
         Idiom::StoreGlobalIndexed => {
             let m = modrm(1);
             let dst = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
-            vec![LoOp::Store { dst, src: R(reg_of(1)) }]
+            if bytes[0] == 0x88 {
+                vec![LoOp::Store { dst, src: Byte(ByteReg::Al) }]
+            } else {
+                vec![LoOp::Store { dst, src: R(reg_of(1)) }]
+            }
         }
-        // `c7 /0 _a[idx] iw` — store a word immediate to a global-array element.
+        // `c7/c6 /0 _a[idx] imm` — store a word imm16 / byte imm8 to an element.
         Idiom::StoreImmGlobalIndexed => {
             let m = modrm(1);
             let dst = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
-            vec![LoOp::Store { dst, src: Imm(i32::from(u16_at(bytes, 4))) }]
+            if bytes[0] == 0xc6 {
+                vec![LoOp::StoreImmByte { dst, imm: i32::from(bytes[4]) }]
+            } else {
+                vec![LoOp::Store { dst, src: Imm(i32::from(u16_at(bytes, 4))) }]
+            }
         }
         // `<op> reg, _a[idx]` — an ALU op reading a global-array element.
         Idiom::AluGlobalIndexed => {

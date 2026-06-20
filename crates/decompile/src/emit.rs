@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 
 use crate::hi_ir::{
-    recover_program, ArraySpec, Expr, Function, LValue, RelOp, Stmt, Type, Var,
+    recover_program, ArrayElem, ArraySpec, Expr, Function, LValue, RelOp, Stmt, Type, Var,
 };
 use crate::lo_ir::{BinOp, Reg};
 
@@ -71,10 +71,12 @@ struct Names {
     /// fields. Each gets a synthesized `struct { … } gvN;` decl and renders
     /// [`Expr::Bitfield`] as `gvN.fK`. Set after [`build`] from the function.
     bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeMap<(u8, u8), bool>>,
-    /// File-scope arrays: offset → element count. Each gets an `int gvN[len];`
-    /// decl (instead of a scalar `int gvN;`) and renders [`Expr::GlobalIndex`]
-    /// as `gvN[i]`. Set after [`build`] from the function.
-    global_arrays: std::collections::BTreeMap<u16, u16>,
+    /// File-scope arrays: offset → (element type, count). Each gets a
+    /// `<elem> gvN[len];` decl (instead of a scalar `int gvN;`) and renders
+    /// [`Expr::GlobalIndex`] as `gvN[i]`. Set after [`build`] from the function.
+    global_arrays: std::collections::BTreeMap<u16, (ArrayElem, u16)>,
+    /// Bases in [`global_arrays`](Self::global_arrays) declared `unsigned char`.
+    unsigned_global_arrays: std::collections::BTreeSet<u16>,
 }
 
 /// `<type> <name>` for a variable — `int *p` (pointer), `unsigned long l`,
@@ -194,6 +196,7 @@ impl Names {
             callees: Vec::new(),
             bitfield_globals: std::collections::HashMap::new(),
             global_arrays: std::collections::BTreeMap::new(),
+            unsigned_global_arrays: std::collections::BTreeSet::new(),
         }
     }
 
@@ -232,8 +235,9 @@ impl Names {
     fn global_decls(&self) -> impl Iterator<Item = String> + '_ {
         (1..=self.global_count).map(|i| {
             let off = u16::try_from(i - 1).unwrap_or(0) * 2;
-            if let Some(&len) = self.global_arrays.get(&off) {
-                format!("int gv{i}[{len}]")
+            if let Some(&(elem, len)) = self.global_arrays.get(&off) {
+                let u = if self.unsigned_global_arrays.contains(&off) { "unsigned " } else { "" };
+                format!("{u}{} gv{i}[{len}]", elem.c_type())
             } else if self.bitfield_globals.contains_key(&off) {
                 self.bitfield_struct_decl(off, &format!("gv{i}"))
             } else {
@@ -637,6 +641,7 @@ fn emit_function(
         names.global_count = names.global_count.max(global_index(g));
     }
     names.global_arrays = f.global_arrays.clone();
+    names.unsigned_global_arrays = f.unsigned_global_arrays.clone();
     for &g in names.global_arrays.keys() {
         names.global_count = names.global_count.max(global_index(g));
     }
@@ -691,6 +696,7 @@ pub(crate) fn to_c_full(f: &Function, form: AccessForm, mode: FoldMode) -> Optio
         names.global_count = names.global_count.max(global_index(g));
     }
     names.global_arrays = f.global_arrays.clone();
+    names.unsigned_global_arrays = f.unsigned_global_arrays.clone();
     for &g in names.global_arrays.keys() {
         names.global_count = names.global_count.max(global_index(g));
     }

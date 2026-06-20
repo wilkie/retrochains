@@ -484,15 +484,27 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x87), A, A] },
     Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x84), A, A] },
     Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x85), A, A] },
+    // `8a /r _a[idx]` — the BYTE sibling (mov al, _a[idx]): a CHAR-array read.
+    Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8a), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8a), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8a), M(0xc7, 0x85), A, A] },
     // `89 /r _a[idx]` — store a register to a global-array element. Any `reg`
     // field (the source register), rm = bx/si/di (the scaled index).
     Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x89), M(0xc7, 0x87), A, A] },
     Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x89), M(0xc7, 0x84), A, A] },
     Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x89), M(0xc7, 0x85), A, A] },
+    // `88 /r _a[idx]` — the BYTE sibling (mov _a[idx], al): a CHAR-array write.
+    Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x88), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x88), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x88), M(0xc7, 0x85), A, A] },
     // `c7 /0 _a[idx] iw` — store a word immediate to a global-array element.
     Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x87), A, A, A, A] },
     Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x84), A, A, A, A] },
     Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x85), A, A, A, A] },
+    // `c6 /0 _a[idx] ii` — the BYTE sibling (mov byte _a[idx], imm8): `a[i]='x'`.
+    Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc6), M(0xc7, 0x87), A, A, A] },
+    Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc6), M(0xc7, 0x84), A, A, A] },
+    Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc6), M(0xc7, 0x85), A, A, A] },
     // `03/2b/0b/23/33/3b /r _a[idx]` — an ALU op reading a global-array element
     // (`add/sub/or/and/xor/cmp r, _a[idx]`). rm = bx/si/di. Before AluReg (mod=11).
     Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x03), M(0xc7, 0x87), A, A] },
