@@ -457,6 +457,83 @@ fn walk_vars(stmts: &mut [Stmt], f: &mut dyn FnMut(&mut Var)) {
     }
 }
 
+/// Rewrite a scalar-global reference at `base + k*stride` (an array element
+/// reached by a *constant* index, which BCC folds to a direct `[base+k]`
+/// access) into the array element `gvN[k]`. Used to merge constant-index
+/// accesses into a global array that variable-index accesses established.
+fn rewrite_global_elem_expr(e: &mut Expr, base: u16, stride: u16) {
+    match e {
+        Expr::Var(Var::Global(off)) if *off >= base && (*off - base) % stride == 0 => {
+            let k = i32::from((*off - base) / stride);
+            *e = Expr::GlobalIndex { base, index: Box::new(Expr::Const(k)) };
+        }
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            rewrite_global_elem_expr(a, base, stride);
+            rewrite_global_elem_expr(b, base, stride);
+        }
+        Expr::Ternary(a, b, c) => {
+            rewrite_global_elem_expr(a, base, stride);
+            rewrite_global_elem_expr(b, base, stride);
+            rewrite_global_elem_expr(c, base, stride);
+        }
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => {
+            rewrite_global_elem_expr(a, base, stride);
+        }
+        Expr::Call(_, args) => args.iter_mut().for_each(|a| rewrite_global_elem_expr(a, base, stride)),
+        Expr::GlobalIndex { index, .. } => rewrite_global_elem_expr(index, base, stride),
+        _ => {}
+    }
+}
+
+/// The [`LValue`] counterpart of [`rewrite_global_elem_expr`].
+fn rewrite_global_elem_lvalue(lv: &mut LValue, base: u16, stride: u16) {
+    match lv {
+        LValue::Var(Var::Global(off)) if *off >= base && (*off - base) % stride == 0 => {
+            let k = i32::from((*off - base) / stride);
+            *lv = LValue::GlobalIndex { base, index: Box::new(Expr::Const(k)) };
+        }
+        LValue::Deref(e) => rewrite_global_elem_expr(e, base, stride),
+        LValue::GlobalIndex { index, .. } => rewrite_global_elem_expr(index, base, stride),
+        _ => {}
+    }
+}
+
+/// Apply the constant-index → array-element rewrite across a statement list.
+fn rewrite_global_elems(stmts: &mut [Stmt], base: u16, stride: u16) {
+    for s in stmts {
+        match s {
+            Stmt::Assign(lv, e) | Stmt::Compound(lv, _, e) => {
+                rewrite_global_elem_lvalue(lv, base, stride);
+                rewrite_global_elem_expr(e, base, stride);
+            }
+            Stmt::Return(Some(e)) | Stmt::ExprStmt(e) => rewrite_global_elem_expr(e, base, stride),
+            Stmt::Return(None) | Stmt::Break => {}
+            Stmt::If(c, t, el) => {
+                rewrite_global_elem_expr(c, base, stride);
+                rewrite_global_elems(t, base, stride);
+                rewrite_global_elems(el, base, stride);
+            }
+            Stmt::While(c, b) | Stmt::Do(c, b) => {
+                rewrite_global_elem_expr(c, base, stride);
+                rewrite_global_elems(b, base, stride);
+            }
+            Stmt::For(init, c, step, b) => {
+                rewrite_global_elems(std::slice::from_mut(init), base, stride);
+                rewrite_global_elem_expr(c, base, stride);
+                rewrite_global_elems(std::slice::from_mut(step), base, stride);
+                rewrite_global_elems(b, base, stride);
+            }
+            Stmt::Switch(sc, arms, def, _) => {
+                rewrite_global_elem_expr(sc, base, stride);
+                for (_, b) in arms.iter_mut() {
+                    rewrite_global_elems(b, base, stride);
+                }
+                rewrite_global_elems(def, base, stride);
+            }
+        }
+    }
+}
+
 /// Count references to `target` across a statement list.
 fn count_var(stmts: &mut [Stmt], target: Var) -> usize {
     let mut n = 0;
@@ -4338,10 +4415,35 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         ctx.cant_for("bitfield-global-mixed-access");
     }
     // A global array's elements can also be reached by a *constant* index, which
-    // BCC folds to a direct `[base+k]` load — recovered as a scalar `Var::Global`.
-    // Reconciling those into the array is a later slice; for now, if any scalar
-    // global access coexists with an array, leave the function incomplete rather
-    // than emit a conflicting scalar-plus-array data segment.
+    // BCC folds to a direct `[base+k]` load — recovered as a scalar
+    // `Var::Global`. Merge those into the array: a `Var::Global(base+k*stride)`
+    // is element `k` of the array `gvN`. Scope: exactly one array; every global
+    // at/above its base must be an aligned element (a global BELOW the base is a
+    // separate earlier scalar — fine, the array offset already accounts for it).
+    if ctx.global_arrays.len() == 1 {
+        let (&base, &(elem, _)) = ctx.global_arrays.iter().next().unwrap();
+        let stride = elem.stride().cast_unsigned();
+        let above: Vec<u16> = ctx
+            .vars
+            .iter()
+            .filter_map(|v| match v {
+                Var::Global(off) if *off >= base => Some(*off),
+                _ => None,
+            })
+            .collect();
+        if above.iter().all(|&off| (off - base) % stride == 0) {
+            rewrite_global_elems(&mut body, base, stride);
+            if let Some(max_idx) = above.iter().map(|&off| (off - base) / stride).max() {
+                let entry = ctx.global_arrays.get_mut(&base).unwrap();
+                entry.1 = entry.1.max(max_idx + 1);
+            }
+            ctx.vars.retain(|v| !matches!(v, Var::Global(off) if *off >= base));
+        }
+    }
+    // Any scalar global still coexisting with an array (a global below the base,
+    // a second array, or an unaligned access the merge couldn't absorb) is an
+    // unmodelled data-segment layout — leave it incomplete rather than emit a
+    // conflicting scalar-plus-array segment. (Offset coupling is a later slice.)
     if !ctx.global_arrays.is_empty()
         && ctx.vars.iter().any(|v| matches!(v, Var::Global(_)))
     {
@@ -4880,6 +4982,25 @@ mod tests {
         // promote to int (`cbw`) and mismatch — decline it.
         let f = recover_c("char a[5]; void g(int i) { a[i] += 1; }\n");
         assert!(!f.complete, "the char-array self-compound stays incomplete");
+    }
+
+    #[test]
+    fn global_array_const_index_merges_into_array() {
+        // A variable-index write (`a[i]=…`) and constant-index accesses
+        // (`a[0]=10; a[2]=30`) of the same global array reconcile: the folded
+        // scalar `Var::Global(base+k*stride)` reads become `gvN[k]`, no leftover
+        // scalar globals, and the array length covers the highest const index.
+        let f = recover_c(
+            "int a[3]; int main(void){int i=1;a[0]=10;a[1]=20;a[2]=30;return *(a+i);}\n",
+        );
+        assert!(f.complete, "const + variable indexing of one array reconciles");
+        assert_eq!(f.global_arrays.get(&0).map(|&(_, len)| len), Some(3), "len covers a[2]");
+        assert!(!f.vars.iter().any(|v| matches!(v, Var::Global(_))), "no leftover scalar globals");
+        // The const writes are array-element assignments now.
+        assert!(
+            f.body.iter().any(|s| matches!(s, Stmt::Assign(LValue::GlobalIndex { .. }, _))),
+            "a const write became an array-element assignment"
+        );
     }
 
     #[test]
