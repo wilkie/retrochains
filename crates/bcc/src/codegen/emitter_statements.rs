@@ -2376,6 +2376,13 @@ impl<'a> super::FunctionEmitter<'a> {
             && let ExprKind::Ident(name) = &e.kind
             && self.ident_is_char(name)
         {
+            // File-scope char source: load it memory-direct (no frame slot).
+            // The signed-char sibling of the uchar-global case above. Fixture
+            // 4319 (`char g; char first(void) { return g; }`).
+            if self.globals.type_of(name).is_some() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+                return;
+            }
             match self.locals.location_of(name) {
                 LocalLocation::Stack(off) => {
                     let _ = write!(
