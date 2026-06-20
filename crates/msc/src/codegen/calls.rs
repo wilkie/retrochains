@@ -476,6 +476,26 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
         }
         Expr::Local(idx) => {
             let disp = locals.disp(*idx);
+            // A char local passed as an int arg widens: `mov al,[c]; cbw|sub
+            // ah,ah; push ax`. If a `mov [c],al` (88 /0) just stored it, AL is
+            // still live — reuse it (`cbw; push ax`) without reloading, like the
+            // word-AX reuse below. Fixture 4324.
+            if locals.size(*idx) == 1 {
+                let self_store_b = { let mut v = vec![0x88, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+                let al_live = out.len() >= self_store_b.len()
+                    && out[out.len() - self_store_b.len()..] == *self_store_b;
+                if !al_live {
+                    out.extend_from_slice(&[0x8A, bp_modrm(0x46, disp)]); // mov al,[bp-disp]
+                    push_bp_disp(out, disp);
+                }
+                if locals.is_unsigned_local(*idx) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah
+                } else {
+                    out.push(0x98); // cbw
+                }
+                out.push(0x50); // push ax
+                return;
+            }
             // Reuse AX when the local was just stored from it (`mov [l],ax`
             // immediately precedes) — `push ax` instead of reloading. The
             // `mov [l],ax` left the value live. Fixture 3975 (`p = malloc();
