@@ -94,6 +94,13 @@ pub enum Place {
     /// `[reg + disp]` — a pointer dereference at a constant byte offset, the
     /// `p[K]` / `*(p+K)` addressing mode (`mov ax,[bx+4]`).
     DerefDisp(Reg, i16),
+    /// `[index + disp16]` where `disp16` is a near-global data-segment offset
+    /// (`mov ax, _a[bx]` = `8b 87 lo hi`, modrm mod=10 rm∈{si,di,bx}). The
+    /// `base` is the global's offset; `index` holds the scaled element index
+    /// (`i << log2(stride)`). The global-array indexed-access addressing mode —
+    /// distinct from [`DerefDisp`] (a *runtime* pointer + a small byte offset),
+    /// since here the displacement IS the (fixup) base of a file-scope array.
+    GlobalIndexed { base: u16, index: Reg },
     /// An immediate constant.
     Imm(i32),
     /// The flags register — the result side of a `cmp`/`test`.
@@ -397,6 +404,14 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
         Idiom::StoreGlobal => vec![LoOp::Store { dst: Global(u16_at(bytes, 2)), src: R(reg_of(1)) }],
         Idiom::StoreImmGlobal => {
             vec![LoOp::Store { dst: Global(u16_at(bytes, 2)), src: Imm(i32::from(u16_at(bytes, 4))) }]
+        }
+        // `8b /r _a[idx]` (`8b 87 lo hi`) — load a global-array element through a
+        // scaled index register. `reg` field = dst, `rm` field (4/5/7) = index
+        // (si/di/bx); the disp16 is the array's data-segment base.
+        Idiom::LoadGlobalIndexed => {
+            let m = modrm(1);
+            let src = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
+            vec![LoOp::Load { dst: R(reg_of(1)), src }]
         }
 
         // ---- register moves and ALU ----------------------------------------

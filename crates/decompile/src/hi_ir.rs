@@ -154,6 +154,12 @@ pub enum Expr {
     /// field set is carried on the [`Function`] so the emitter can synthesize the
     /// `struct { unsigned :pad; unsigned fK:w; … } gvN;` declaration.
     Bitfield { global: u16, bit_off: u8, width: u8 },
+    /// `gvN[i]` — read an element of a file-scope (global) array. Recovered from
+    /// `mov reg,<i>; shl reg,log2(stride); mov ax,_a[reg]` (`8b 87 lo hi`):
+    /// `base` is the array's data-segment offset, `index` the de-scaled element
+    /// index. The array's element type/length is carried on the [`Function`]
+    /// (`global_arrays`) so the emitter declares `int gvN[len];`.
+    GlobalIndex { base: u16, index: Box<Expr> },
 }
 
 /// Does an expression contain a (side-effecting) call anywhere?
@@ -163,6 +169,7 @@ fn contains_call(e: &Expr) -> bool {
         Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => contains_call(a) || contains_call(b),
         Expr::Ternary(a, b, c) => contains_call(a) || contains_call(b) || contains_call(c),
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => contains_call(a),
+        Expr::GlobalIndex { index, .. } => contains_call(index),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Var(_) | Expr::AddrOf(_)
         | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } | Expr::StrLit => false,
     }
@@ -184,7 +191,8 @@ fn is_simple_compound_rhs(e: &Expr) -> bool {
             is_simple_compound_rhs(a) && is_simple_compound_rhs(b) && is_simple_compound_rhs(c)
         }
         Expr::Not(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => is_simple_compound_rhs(a),
-        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::IncDec { .. } | Expr::StrLit => false,
+        Expr::Deref(_) | Expr::PostIncDeref(..) | Expr::Call(..) | Expr::IncDec { .. }
+        | Expr::StrLit | Expr::GlobalIndex { .. } => false,
     }
 }
 
@@ -298,6 +306,7 @@ fn expr_mentions(expr: &Expr, var: Var) -> bool {
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => expr_mentions(a, var),
         Expr::Call(_, args) => args.iter().any(|a| expr_mentions(a, var)),
+        Expr::GlobalIndex { index, .. } => expr_mentions(index, var),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Bitfield { .. } => false,
     }
 }
@@ -374,6 +383,7 @@ fn walk_vars_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Var)) {
         }
         Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => walk_vars_expr(a, f),
         Expr::Call(_, args) => args.iter_mut().for_each(|a| walk_vars_expr(a, f)),
+        Expr::GlobalIndex { index, .. } => walk_vars_expr(index, f),
         Expr::Const(_) | Expr::LongConst(_) | Expr::Bitfield { .. } => {}
     }
 }
@@ -596,6 +606,11 @@ pub struct Function {
     /// `(bit_off, width)` fields. The emitter synthesizes a `struct { … } gvN;`
     /// per entry and renders [`Expr::Bitfield`] as `gvN.fK`.
     pub bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeMap<(u8, u8), bool>>,
+    /// File-scope arrays: data-segment base offset → element count. The emitter
+    /// declares `int gvN[len];` per entry and renders [`Expr::GlobalIndex`] as
+    /// `gvN[i]`. A global that is array-indexed must not also be a scalar
+    /// `Var::Global` (the merge is a later slice — recovery declines the mix).
+    pub global_arrays: std::collections::BTreeMap<u16, u16>,
     /// to a direct `[bp+disp]` slot access, so an `int a[M]` looks like scalar
     /// slots; when those slots can't be the whole top-packed scalar layout the
     /// frame is modelled as an array instead (see [`recover`]).
@@ -796,6 +811,9 @@ struct Ctx {
     /// per entry; a global that ALSO has a non-bit-field access makes recovery
     /// incomplete (the raw access can't live on a struct).
     bitfield_globals: std::collections::HashMap<u16, std::collections::BTreeMap<(u8, u8), bool>>,
+    /// File-scope arrays observed via an indexed access (`_a[idx]`): base
+    /// offset → element count. Mirrors [`Function::global_arrays`].
+    global_arrays: std::collections::BTreeMap<u16, u16>,
     /// Local-array bases (`lea` offsets) dereferenced at byte width — `char`
     /// arrays. The element type of a purely variable-indexed array isn't in any
     /// slot, only in the byte-vs-word deref, so this carries that signal to the
@@ -1051,6 +1069,7 @@ impl Ctx {
                 self.mark_unsigned(c);
             }
             Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => self.mark_unsigned(a),
+            Expr::GlobalIndex { .. } => {}
             Expr::Const(_) | Expr::LongConst(_) | Expr::AddrOf(_) | Expr::Call(..)
             | Expr::PostIncDeref(..) | Expr::Bitfield { .. } | Expr::IncDec { .. } | Expr::StrLit => {}
         }
@@ -1758,6 +1777,48 @@ impl Ctx {
                     self.note_long_array_base(&ptr);
                     acc = Some(Expr::Deref(Box::new(ptr)));
                     acc_long = true;
+                }
+
+                // `mov ax, _a[bx]` — read a global-array element through a scaled
+                // index in bx (`8b 87 lo hi`). bx holds `i << log2(stride)`; the
+                // de-scaled `i` is the C index. Slice 1: int arrays (stride 2 →
+                // one `shl`) only; a non-scaled bx is some other use → decline.
+                LoOp::Load {
+                    dst: Place::Reg(Reg::Ax),
+                    src: Place::GlobalIndexed { base, index: Reg::Bx },
+                } => {
+                    flush_call(&mut acc, out);
+                    // A NEGATIVE displacement (`8b 87 fe ff` = `[bx-2]`) is the
+                    // folded `a[i-K]` form — the access lands *below* the array
+                    // base, so `base` isn't a standalone global offset (it's
+                    // `array_base - K`). And a huge positive `base` would declare
+                    // thousands of scalar globals. Decline both: only a small,
+                    // non-negative offset is a real array base in this slice.
+                    let plausible_base = (base as i16) >= 0 && base <= 0x200 && base % 2 == 0;
+                    match bx.clone() {
+                        Some(idx_expr) if plausible_base => {
+                            let (idx, shifts) = strip_scale(idx_expr);
+                            if shifts == 1 {
+                                // Track the highest constant index seen so the
+                                // declared length covers it (default 1).
+                                let elems = match &idx {
+                                    Expr::Const(k) if *k >= 0 => {
+                                        u16::try_from(*k + 1).unwrap_or(1)
+                                    }
+                                    _ => 1,
+                                };
+                                let e = self.global_arrays.entry(base).or_insert(1);
+                                *e = (*e).max(elems);
+                                acc = Some(Expr::GlobalIndex {
+                                    base,
+                                    index: Box::new(idx),
+                                });
+                            } else {
+                                self.cant();
+                            }
+                        }
+                        _ => self.cant(),
+                    }
                 }
 
                 // `mov ax, [bx]` — dereference the pointer held in bx (`*p`).
@@ -4054,6 +4115,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         word_slots,
         word_globals,
         bitfield_globals: std::collections::HashMap::new(),
+        global_arrays: std::collections::BTreeMap::new(),
         char_array_bases: Vec::new(),
         long_array_bases: Vec::new(),
         in_prologue: true,
@@ -4102,6 +4164,16 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
     {
         ctx.cant_for("bitfield-global-mixed-access");
     }
+    // A global array's elements can also be reached by a *constant* index, which
+    // BCC folds to a direct `[base+k]` load — recovered as a scalar `Var::Global`.
+    // Reconciling those into the array is a later slice; for now, if any scalar
+    // global access coexists with an array, leave the function incomplete rather
+    // than emit a conflicting scalar-plus-array data segment.
+    if !ctx.global_arrays.is_empty()
+        && ctx.vars.iter().any(|v| matches!(v, Var::Global(_)))
+    {
+        ctx.cant_for("global-array-mixed-access");
+    }
     let ret = if ctx.returns_long {
         Type::Long
     } else if ctx.returns_char {
@@ -4132,6 +4204,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         long_vars: ctx.long_vars,
         unsigned_vars: ctx.unsigned_vars,
         bitfield_globals: ctx.bitfield_globals,
+        global_arrays: ctx.global_arrays,
         arrays,
         body,
         complete,
@@ -4559,6 +4632,31 @@ mod tests {
         assert!(f.complete, "scalar near globals are recovered");
         assert!(f.vars.contains(&Var::Global(0)), "a is at offset 0");
         assert!(f.vars.contains(&Var::Global(2)), "b is at offset 2");
+    }
+
+    #[test]
+    fn global_int_array_variable_index_read() {
+        // `return a[i]` = `mov bx,[bp+4]; shl bx,1; mov ax,_a[bx]` — the scaled
+        // index in bx de-scales to the C index, and `_a[bx]` recovers as the
+        // array element `gv1[p1]` (the array at offset 0).
+        let f = recover_c("int a[5]; int f(int i) { return a[i]; }\n");
+        assert!(f.complete, "a variable-index global-array read is recovered");
+        assert!(f.global_arrays.contains_key(&0), "the array is at offset 0");
+        let Some(Stmt::Return(Some(Expr::GlobalIndex { base, index }))) = f.body.last() else {
+            panic!("expected `return gvN[i]`, got {:?}", f.body);
+        };
+        assert_eq!(*base, 0);
+        assert_eq!(**index, Expr::Var(Var::Param(4)), "the de-scaled index is the param");
+    }
+
+    #[test]
+    fn global_array_negative_fold_declines() {
+        // `a[i-1]` folds the `-1` into the displacement (`8b 87 fe ff` = `[bx-2]`):
+        // a NEGATIVE base that isn't a standalone global offset. Recovery must
+        // decline (not declare 32768 scalar globals and crash the recompiler).
+        let f = recover_c("int a[10]; int f(int i) { return a[i-1]; }\n");
+        assert!(!f.complete, "a negative folded array index stays incomplete");
+        assert!(f.global_arrays.is_empty(), "no global array is recorded");
     }
 
     #[test]

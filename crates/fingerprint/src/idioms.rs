@@ -100,6 +100,11 @@ pub enum Idiom {
     StoreImmGlobal,
     /// `a1 aa aa` — `mov ax, [mem]`: load a global into ax.
     LoadGlobal,
+    /// `8b /r [idx+disp16]` (`8b 87 lo hi`, modrm mod=10 rm∈{si,di,bx}) — load a
+    /// global-array element `_a[idx]` through a scaled index register. The
+    /// disp16 is the array's data-segment base (a fixup), distinct from a
+    /// `[bx+disp8]` pointer-offset deref (`PointerLoadDisp8`, mod=01).
+    LoadGlobalIndexed,
     /// `a3 aa aa` — `mov [mem], ax`: store ax to a global.
     StoreGlobal,
     /// `eb rr` — `jmp rel8`: a short jump (control flow; `eb 00` is the exit jump).
@@ -289,6 +294,7 @@ impl Idiom {
             Idiom::StoreImmLocal => "store imm to local (mov [bp±N], imm16)",
             Idiom::StoreImmGlobal => "store imm to global (mov [mem], imm16)",
             Idiom::LoadGlobal => "load global (mov ax, [mem])",
+            Idiom::LoadGlobalIndexed => "load global-array elem (mov r, _a[idx])",
             Idiom::StoreGlobal => "store global (mov [mem], ax)",
             Idiom::ShortJump => "short jump (jmp rel8)",
             Idiom::MovReg => "mov reg, reg",
@@ -459,6 +465,12 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::StoreGlobalByte, pat: &[L(0xa2), A, A] },
     Def { idiom: Idiom::LoadGlobal, pat: &[L(0x8b), DISP16, A, A] },
     Def { idiom: Idiom::StoreGlobal, pat: &[L(0x89), DISP16, A, A] },
+    // `8b /r _a[idx]` (`8b 87/84/85 lo hi`) — load a global-array element via a
+    // scaled index (mod=10, rm = bx/si/di). Before the mod=11 MovReg; disjoint
+    // from the mod=01 `[bx+disp8]` PointerLoadDisp8 and the mod=00 DISP16 forms.
+    Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x85), A, A] },
     // byte reg-reg mov (mov r8,r8, mod=11) — before nothing else uses 8a/88 REG.
     Def { idiom: Idiom::MovByteReg, pat: &[L(0x8a), REG] },
     Def { idiom: Idiom::MovByteReg, pat: &[L(0x88), REG] },
