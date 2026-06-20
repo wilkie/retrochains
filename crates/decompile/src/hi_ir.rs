@@ -2382,6 +2382,43 @@ impl Ctx {
                     _ => self.cant(),
                 },
 
+                // `<op> ax, _a[bx]` — combine the accumulator with a global-array
+                // element (`… + a[i]`).
+                LoOp::Bin {
+                    dst: Place::Reg(Reg::Ax),
+                    op,
+                    lhs: Place::Reg(Reg::Ax),
+                    rhs: Place::GlobalIndexed { base, index: Reg::Bx },
+                } if is_foldable(op) => {
+                    match (acc.take(), self.global_array_index(base, bx.clone())) {
+                        (Some(l), Some(idx)) => {
+                            let elem = Expr::GlobalIndex { base, index: Box::new(idx) };
+                            acc = Some(Expr::Binary(op, Box::new(l), Box::new(elem)));
+                        }
+                        _ => self.cant(),
+                    }
+                }
+
+                // `<op> <regvar>, _a[bx]` — an in-place compound to a register
+                // variable reading a global-array element (`t += a[k]`). Distinct
+                // from the ax-accumulator fold above; the reg-var is the lvalue.
+                LoOp::Bin {
+                    dst: Place::Reg(d),
+                    op,
+                    lhs: Place::Reg(l),
+                    rhs: Place::GlobalIndexed { base, index: Reg::Bx },
+                } if d == l && is_reg_var(d) && Self::is_compound_op(op) => {
+                    match self.global_array_index(base, bx.clone()) {
+                        Some(idx) => {
+                            let v = Var::Reg(d);
+                            self.note(v);
+                            let elem = Expr::GlobalIndex { base, index: Box::new(idx) };
+                            out.push(Stmt::Compound(LValue::Var(v), op, elem));
+                        }
+                        None => self.cant(),
+                    }
+                }
+
                 // `<op> ax, dx` — combine the restored left operand (in `ax`)
                 // with the right operand saved in `dx`: `left <op> right`. The
                 // tail of the binary-operand spill (`push ax` … `pop ax`).
@@ -4690,6 +4727,18 @@ mod tests {
         assert_eq!(*base, 0);
         assert_eq!(**index, Expr::Var(Var::Param(4)));
         assert_eq!(*rhs, Expr::Const(7));
+    }
+
+    #[test]
+    fn global_array_loop_accumulate() {
+        // `for(k…) t += a[k]` is `mov bx,si; shl bx,1; add di,_a[bx]` — the ALU
+        // read folds into the reg-var compound `t += gv1[k]`. Recovers complete
+        // (previously the `03 bf` ALU-read mis-decoded the instruction stream).
+        let f = recover_c(
+            "int a[5]; int s(void) { int t=0,k; for(k=0;k<5;k++) t+=a[k]; return t; }\n",
+        );
+        assert!(f.complete, "the loop-accumulate over a global array is recovered");
+        assert!(f.global_arrays.contains_key(&0));
     }
 
     #[test]

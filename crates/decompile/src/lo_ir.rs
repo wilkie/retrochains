@@ -425,6 +425,14 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let dst = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
             vec![LoOp::Store { dst, src: Imm(i32::from(u16_at(bytes, 4))) }]
         }
+        // `<op> reg, _a[idx]` — an ALU op reading a global-array element.
+        Idiom::AluGlobalIndexed => {
+            let m = modrm(1);
+            let op = alu_op(bytes[0]);
+            let rhs = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
+            let dst = if op == BinOp::Cmp { Place::Flags } else { R(reg_of(1)) };
+            vec![LoOp::Bin { dst, op, lhs: R(reg_of(1)), rhs }]
+        }
 
         // ---- register moves and ALU ----------------------------------------
         Idiom::MovReg if bytes[0] == 0x8b => vec![LoOp::Load { dst: R(reg_of(1)), src: R(rm_of(1)) }],

@@ -111,6 +111,10 @@ pub enum Idiom {
     /// `c7 /0 [idx+disp16] iw` (`c7 87 lo hi imm`) — store a word immediate to a
     /// global-array element (`_a[idx] = K`).
     StoreImmGlobalIndexed,
+    /// `03/2b/0b/23/33/3b /r [idx+disp16]` (`03 bf lo hi`) — an ALU op reading a
+    /// global-array element (`t += a[k]`, `… + a[i]`). The ALU sibling of
+    /// [`LoadGlobalIndexed`].
+    AluGlobalIndexed,
     /// `a3 aa aa` — `mov [mem], ax`: store ax to a global.
     StoreGlobal,
     /// `eb rr` — `jmp rel8`: a short jump (control flow; `eb 00` is the exit jump).
@@ -303,6 +307,7 @@ impl Idiom {
             Idiom::LoadGlobalIndexed => "load global-array elem (mov r, _a[idx])",
             Idiom::StoreGlobalIndexed => "store global-array elem (mov _a[idx], r)",
             Idiom::StoreImmGlobalIndexed => "store imm to global-array elem (mov _a[idx], K)",
+            Idiom::AluGlobalIndexed => "alu reg, global-array elem (op r, _a[idx])",
             Idiom::StoreGlobal => "store global (mov [mem], ax)",
             Idiom::ShortJump => "short jump (jmp rel8)",
             Idiom::MovReg => "mov reg, reg",
@@ -488,6 +493,26 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x87), A, A, A, A] },
     Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x84), A, A, A, A] },
     Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x85), A, A, A, A] },
+    // `03/2b/0b/23/33/3b /r _a[idx]` — an ALU op reading a global-array element
+    // (`add/sub/or/and/xor/cmp r, _a[idx]`). rm = bx/si/di. Before AluReg (mod=11).
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x03), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x03), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x03), M(0xc7, 0x85), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x2b), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x2b), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x2b), M(0xc7, 0x85), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x0b), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x0b), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x0b), M(0xc7, 0x85), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x23), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x23), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x23), M(0xc7, 0x85), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x33), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x33), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x33), M(0xc7, 0x85), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x3b), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x3b), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::AluGlobalIndexed, pat: &[L(0x3b), M(0xc7, 0x85), A, A] },
     // byte reg-reg mov (mov r8,r8, mod=11) — before nothing else uses 8a/88 REG.
     Def { idiom: Idiom::MovByteReg, pat: &[L(0x8a), REG] },
     Def { idiom: Idiom::MovByteReg, pat: &[L(0x88), REG] },
