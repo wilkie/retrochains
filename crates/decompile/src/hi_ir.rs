@@ -4440,10 +4440,11 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
             ctx.vars.retain(|v| !matches!(v, Var::Global(off) if *off >= base));
         }
     }
-    // Any scalar global still coexisting with an array (a global below the base,
-    // a second array, or an unaligned access the merge couldn't absorb) is an
-    // unmodelled data-segment layout — leave it incomplete rather than emit a
-    // conflicting scalar-plus-array segment. (Offset coupling is a later slice.)
+    // Any scalar global still coexisting with an array after the merge (a second
+    // array, or an unaligned access the merge couldn't absorb) is an unmodelled
+    // data-segment layout — leave it incomplete. (BCC lays arrays out first, so
+    // aligned trailing scalars are absorbed as elements above and a scalar below
+    // the base never arises in practice — offset coupling never reaches here.)
     if !ctx.global_arrays.is_empty()
         && ctx.vars.iter().any(|v| matches!(v, Var::Global(_)))
     {
