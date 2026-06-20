@@ -1317,6 +1317,26 @@ impl Ctx {
         Some((var, matches!(op, UnOp::Dec)))
     }
 
+    /// A char register-variable postfix `d = c++` whose accumulator (`acc`) is
+    /// the reg-var `c` and whose NEXT op steps it: `mov al,c; mov [d],al; inc c`.
+    /// Unlike the int form (load-inc-store, [`reg_postinc_at`]), the char order
+    /// is load-STORE-inc — the old value is stored before the step. Returns
+    /// `(var, is_dec)` for the store arm to emit `d = c++`. (Byte-identical to a
+    /// split `d=c; c++`, but the postfix recovery avoids the mis-typed plain copy
+    /// the split emits — an extra `cbw` — so it round-trips.)
+    fn char_reg_postinc_after(&self, i: usize, acc: Option<&Expr>) -> Option<(Var, bool)> {
+        let Some(Expr::Var(var @ Var::ByteReg(br))) = acc else {
+            return None;
+        };
+        let LoOp::Un { dst: Place::Byte(ud), op, operand: Place::Byte(uo) } =
+            &self.insns.get(i + 1)?.op
+        else {
+            return None;
+        };
+        (*ud == *br && *uo == *br && matches!(op, UnOp::Inc | UnOp::Dec))
+            .then(|| (*var, matches!(op, UnOp::Dec)))
+    }
+
     /// A prefix `++v`/`--v` as a value: `inc/dec v; mov ax,v` — the register
     /// variable steps, then its NEW value is read into `ax`. Returns
     /// `(var, is_dec)`.
@@ -3358,9 +3378,24 @@ impl Ctx {
 
                 // `mov [dst], al` — store the accumulator to a `char`.
                 LoOp::Store { dst, src: Place::Byte(_) } => {
-                    match (self.char_dest(dst), acc.take()) {
-                        (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
-                        _ => self.cant(),
+                    if let Some((var, dec)) = self.char_reg_postinc_after(i, acc.as_ref()) {
+                        // `mov al,c; mov [d],al; inc c` — a char postfix `d = c++`.
+                        match self.char_dest(dst) {
+                            Some(lv) => {
+                                acc = None;
+                                out.push(Stmt::Assign(
+                                    lv,
+                                    Expr::IncDec { var, prefix: false, dec },
+                                ));
+                                skip = 1; // the inc/dec
+                            }
+                            None => self.cant(),
+                        }
+                    } else {
+                        match (self.char_dest(dst), acc.take()) {
+                            (Some(lv), Some(e)) => out.push(Stmt::Assign(lv, e)),
+                            _ => self.cant(),
+                        }
                     }
                 }
 
@@ -4983,6 +5018,24 @@ mod tests {
         // promote to int (`cbw`) and mismatch — decline it.
         let f = recover_c("char a[5]; void g(int i) { a[i] += 1; }\n");
         assert!(!f.complete, "the char-array self-compound stays incomplete");
+    }
+
+    #[test]
+    fn char_reg_var_postfix_as_value() {
+        // `char c,d; d = c++;` — a char reg-var postfix used as a value codes
+        // load-STORE-inc (`mov al,c; mov [d],al; inc c`), unlike the int
+        // load-inc-store. Recover it as `d = c++` (not a split `d=c; c++`, which
+        // mis-types the copy with a stray cbw and mismatches).
+        let f = recover_c("int main(){char c,d; c=5; d=c++; return d;}\n");
+        assert!(f.complete);
+        assert!(
+            f.body.iter().any(|s| matches!(
+                s,
+                Stmt::Assign(_, Expr::IncDec { var: Var::ByteReg(_), prefix: false, dec: false })
+            )),
+            "the char postfix is a value, got {:?}",
+            f.body
+        );
     }
 
     #[test]
