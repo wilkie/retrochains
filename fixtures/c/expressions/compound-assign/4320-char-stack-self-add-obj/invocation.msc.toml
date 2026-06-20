@@ -1,0 +1,5 @@
+description = "char stack-resident local self-add compound (c = c + 1, c survives a call). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
+inputs = ["HELLO.C"]

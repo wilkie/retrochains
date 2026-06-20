@@ -1709,6 +1709,46 @@ impl<'a> super::FunctionEmitter<'a> {
             );
             return;
         }
+        // Stack-resident CHAR local compound with a constant rhs. BCC codes both
+        // arith (`+=`/`-=`) and bitwise (`&=`/`|=`/`^=`) AL-through for a char
+        // STACK local (`mov al,[c]; <op> al,K; mov [c],al`), with the ±1 inc/dec
+        // peephole for arith. (Char GLOBALs differ — bitwise is memory-direct
+        // there — so this is stack-local-specific.) Fixtures 4320 (`c = c + 1`),
+        // 4321 (`c = c | 8`).
+        if local_ty.is_char_like()
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            && let Some(v) = try_const_eval(value)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let dest = bp_addr(off);
+            let vm = (v & 0xFF) as u8;
+            let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
+            match op {
+                BinOp::Add if vm == 1 => self.out.extend_from_slice(b"\tinc\tal\r\n"),
+                BinOp::Sub if vm == 1 => self.out.extend_from_slice(b"\tdec\tal\r\n"),
+                BinOp::Add => {
+                    let _ = write!(self.out, "\tadd\tal,{vm}\r\n");
+                }
+                BinOp::Sub => {
+                    let _ = write!(self.out, "\tadd\tal,{}\r\n", vm.wrapping_neg());
+                }
+                BinOp::BitAnd => {
+                    let _ = write!(self.out, "\tand\tal,{vm}\r\n");
+                }
+                BinOp::BitOr => {
+                    let _ = write!(self.out, "\tor\tal,{vm}\r\n");
+                }
+                BinOp::BitXor => {
+                    let _ = write!(self.out, "\txor\tal,{vm}\r\n");
+                }
+                _ => unreachable!(),
+            }
+            let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+            return;
+        }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
