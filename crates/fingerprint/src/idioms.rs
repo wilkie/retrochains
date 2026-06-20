@@ -105,6 +105,12 @@ pub enum Idiom {
     /// disp16 is the array's data-segment base (a fixup), distinct from a
     /// `[bx+disp8]` pointer-offset deref (`PointerLoadDisp8`, mod=01).
     LoadGlobalIndexed,
+    /// `89 /r [idx+disp16]` (`89 87 lo hi`) — store a register to a global-array
+    /// element (`_a[idx] = r`). The store sibling of [`LoadGlobalIndexed`].
+    StoreGlobalIndexed,
+    /// `c7 /0 [idx+disp16] iw` (`c7 87 lo hi imm`) — store a word immediate to a
+    /// global-array element (`_a[idx] = K`).
+    StoreImmGlobalIndexed,
     /// `a3 aa aa` — `mov [mem], ax`: store ax to a global.
     StoreGlobal,
     /// `eb rr` — `jmp rel8`: a short jump (control flow; `eb 00` is the exit jump).
@@ -295,6 +301,8 @@ impl Idiom {
             Idiom::StoreImmGlobal => "store imm to global (mov [mem], imm16)",
             Idiom::LoadGlobal => "load global (mov ax, [mem])",
             Idiom::LoadGlobalIndexed => "load global-array elem (mov r, _a[idx])",
+            Idiom::StoreGlobalIndexed => "store global-array elem (mov _a[idx], r)",
+            Idiom::StoreImmGlobalIndexed => "store imm to global-array elem (mov _a[idx], K)",
             Idiom::StoreGlobal => "store global (mov [mem], ax)",
             Idiom::ShortJump => "short jump (jmp rel8)",
             Idiom::MovReg => "mov reg, reg",
@@ -471,6 +479,15 @@ const IDIOMS: &[Def] = &[
     Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x87), A, A] },
     Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x84), A, A] },
     Def { idiom: Idiom::LoadGlobalIndexed, pat: &[L(0x8b), M(0xc7, 0x85), A, A] },
+    // `89 /r _a[idx]` — store a register to a global-array element. Any `reg`
+    // field (the source register), rm = bx/si/di (the scaled index).
+    Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x89), M(0xc7, 0x87), A, A] },
+    Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x89), M(0xc7, 0x84), A, A] },
+    Def { idiom: Idiom::StoreGlobalIndexed, pat: &[L(0x89), M(0xc7, 0x85), A, A] },
+    // `c7 /0 _a[idx] iw` — store a word immediate to a global-array element.
+    Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x87), A, A, A, A] },
+    Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x84), A, A, A, A] },
+    Def { idiom: Idiom::StoreImmGlobalIndexed, pat: &[L(0xc7), M(0xc7, 0x85), A, A, A, A] },
     // byte reg-reg mov (mov r8,r8, mod=11) — before nothing else uses 8a/88 REG.
     Def { idiom: Idiom::MovByteReg, pat: &[L(0x8a), REG] },
     Def { idiom: Idiom::MovByteReg, pat: &[L(0x88), REG] },

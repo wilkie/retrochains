@@ -937,6 +937,9 @@ fn lvalue_str(lv: &LValue, names: &Names) -> String {
         LValue::Bitfield { global, bit_off, width } => {
             names.bitfield_str(*global, *bit_off, *width)
         }
+        LValue::GlobalIndex { base, index } => {
+            format!("gv{}[{}]", global_index(*base), expr_str(index, names))
+        }
     }
 }
 

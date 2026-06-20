@@ -413,6 +413,18 @@ fn decode(idiom: Idiom, bytes: &[u8], off: usize) -> Vec<LoOp> {
             let src = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
             vec![LoOp::Load { dst: R(reg_of(1)), src }]
         }
+        // `89 /r _a[idx]` — store register `reg` to a global-array element.
+        Idiom::StoreGlobalIndexed => {
+            let m = modrm(1);
+            let dst = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
+            vec![LoOp::Store { dst, src: R(reg_of(1)) }]
+        }
+        // `c7 /0 _a[idx] iw` — store a word immediate to a global-array element.
+        Idiom::StoreImmGlobalIndexed => {
+            let m = modrm(1);
+            let dst = Place::GlobalIndexed { base: u16_at(bytes, 2), index: deref_base(m) };
+            vec![LoOp::Store { dst, src: Imm(i32::from(u16_at(bytes, 4))) }]
+        }
 
         // ---- register moves and ALU ----------------------------------------
         Idiom::MovReg if bytes[0] == 0x8b => vec![LoOp::Load { dst: R(reg_of(1)), src: R(rm_of(1)) }],

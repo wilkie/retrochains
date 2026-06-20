@@ -231,6 +231,9 @@ pub enum LValue {
     /// struct. Recovered from the clear+set pair `and byte[g],~mask; or
     /// byte[g],v<<bit_off`. Mirrors [`Expr::Bitfield`].
     Bitfield { global: u16, bit_off: u8, width: u8 },
+    /// `gvN[i] = …` — assign a file-scope array element. The write sibling of
+    /// [`Expr::GlobalIndex`]; recovered from `mov _a[idx], r|imm` (`89/c7 87`).
+    GlobalIndex { base: u16, index: Box<Expr> },
 }
 
 /// What the `dx` register holds while a 32-bit `long` is being assembled (its
@@ -393,6 +396,7 @@ fn walk_vars_lvalue(lv: &mut LValue, f: &mut dyn FnMut(&mut Var)) {
     match lv {
         LValue::Var(v) => f(v),
         LValue::Deref(e) => walk_vars_expr(e, f),
+        LValue::GlobalIndex { index, .. } => walk_vars_expr(index, f),
         LValue::Bitfield { .. } => {}
     }
 }
@@ -1497,6 +1501,32 @@ impl Ctx {
         Some(LValue::Var(var))
     }
 
+    /// De-scale a global-array element index held in `bx` for an access at
+    /// `base`, recording the array. Returns the C-level index expression, or
+    /// `None` (decline) when `base` isn't a plausible array offset or `bx`
+    /// doesn't hold an int-scaled index. Shared by the read and write arms.
+    fn global_array_index(&mut self, base: u16, bx: Option<Expr>) -> Option<Expr> {
+        // A NEGATIVE displacement (`8b 87 fe ff` = `[bx-2]`) is the folded
+        // `a[i-K]` form — `base` is `array_base - K`, not a standalone offset; a
+        // huge `base` would declare thousands of scalar globals. Only a small,
+        // even, non-negative offset is a real array base in this slice.
+        if (base as i16) < 0 || base > 0x200 || base % 2 != 0 {
+            return None;
+        }
+        let (idx, shifts) = strip_scale(bx?);
+        if shifts != 1 {
+            return None; // int stride 2 (one `shl`) only
+        }
+        // Track the highest constant index so the declared length covers it.
+        let elems = match &idx {
+            Expr::Const(k) if *k >= 0 => u16::try_from(*k + 1).unwrap_or(1),
+            _ => 1,
+        };
+        let e = self.global_arrays.entry(base).or_insert(1);
+        *e = (*e).max(elems);
+        Some(idx)
+    }
+
     /// Fold a straight-line instruction range `[lo, hi)` into statements,
     /// symbolically tracking the accumulator. Any op it can't model marks the
     /// function incomplete.
@@ -1788,35 +1818,33 @@ impl Ctx {
                     src: Place::GlobalIndexed { base, index: Reg::Bx },
                 } => {
                     flush_call(&mut acc, out);
-                    // A NEGATIVE displacement (`8b 87 fe ff` = `[bx-2]`) is the
-                    // folded `a[i-K]` form — the access lands *below* the array
-                    // base, so `base` isn't a standalone global offset (it's
-                    // `array_base - K`). And a huge positive `base` would declare
-                    // thousands of scalar globals. Decline both: only a small,
-                    // non-negative offset is a real array base in this slice.
-                    let plausible_base = (base as i16) >= 0 && base <= 0x200 && base % 2 == 0;
-                    match bx.clone() {
-                        Some(idx_expr) if plausible_base => {
-                            let (idx, shifts) = strip_scale(idx_expr);
-                            if shifts == 1 {
-                                // Track the highest constant index seen so the
-                                // declared length covers it (default 1).
-                                let elems = match &idx {
-                                    Expr::Const(k) if *k >= 0 => {
-                                        u16::try_from(*k + 1).unwrap_or(1)
-                                    }
-                                    _ => 1,
-                                };
-                                let e = self.global_arrays.entry(base).or_insert(1);
-                                *e = (*e).max(elems);
-                                acc = Some(Expr::GlobalIndex {
-                                    base,
-                                    index: Box::new(idx),
-                                });
-                            } else {
-                                self.cant();
-                            }
+                    match self.global_array_index(base, bx.clone()) {
+                        Some(idx) => acc = Some(Expr::GlobalIndex { base, index: Box::new(idx) }),
+                        None => self.cant(),
+                    }
+                }
+
+                // `mov _a[bx], r|imm` — store to a global-array element
+                // (`a[i] = v`). The value is an immediate, the accumulator (a
+                // value computed into `ax`), or a register variable; the index in
+                // bx de-scales like the read.
+                LoOp::Store { dst: Place::GlobalIndexed { base, index: Reg::Bx }, src } => {
+                    let value = match src {
+                        Place::Reg(Reg::Ax) => acc.take(),
+                        Place::Imm(v) => {
+                            flush_call(&mut acc, out);
+                            Some(Expr::Const(v))
                         }
+                        other => {
+                            flush_call(&mut acc, out);
+                            self.operand(other)
+                        }
+                    };
+                    match (self.global_array_index(base, bx.clone()), value) {
+                        (Some(idx), Some(e)) => out.push(Stmt::Assign(
+                            LValue::GlobalIndex { base, index: Box::new(idx) },
+                            e,
+                        )),
                         _ => self.cant(),
                     }
                 }
@@ -4647,6 +4675,21 @@ mod tests {
         };
         assert_eq!(*base, 0);
         assert_eq!(**index, Expr::Var(Var::Param(4)), "the de-scaled index is the param");
+    }
+
+    #[test]
+    fn global_int_array_variable_index_write() {
+        // `a[i] = 7` = `mov bx,[bp+4]; shl bx,1; mov word _a[bx],7` — the store
+        // recovers as `gv1[p1] = 7`.
+        let f = recover_c("int a[5]; void g(int i) { a[i] = 7; }\n");
+        assert!(f.complete, "a variable-index global-array write is recovered");
+        assert!(f.global_arrays.contains_key(&0));
+        let Some(Stmt::Assign(LValue::GlobalIndex { base, index }, rhs)) = f.body.first() else {
+            panic!("expected `gvN[i] = …`, got {:?}", f.body);
+        };
+        assert_eq!(*base, 0);
+        assert_eq!(**index, Expr::Var(Var::Param(4)));
+        assert_eq!(*rhs, Expr::Const(7));
     }
 
     #[test]
