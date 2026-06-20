@@ -3060,6 +3060,22 @@ impl<'a> super::FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tpush\tax\r\n");
             return;
         }
+        // `-<long>` — negate a long lvalue and push it. Load the value into
+        // AX:DX (high:low), apply the 32-bit negation idiom (negate both halves,
+        // propagate the borrow into the high half via `sbb ax,0`), then push
+        // high-half first. Fixture 4318 (`sink(-a)`).
+        if let ExprKind::Unary { op: UnaryOp::Neg, operand } = &arg.kind
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(operand)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
+            self.out.extend_from_slice(b"\tneg\tax\r\n");
+            self.out.extend_from_slice(b"\tneg\tdx\r\n");
+            self.out.extend_from_slice(b"\tsbb\tax,0\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            return;
+        }
         // `(long)<int>` — an int/char value widened to a long argument. Load it
         // into AX, sign-extend (`cwd`) or zero-extend (`xor dx,dx`) into DX:AX,
         // then push the long high-half first (`push dx; push ax`). Fixture 4317
