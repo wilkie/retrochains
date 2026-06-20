@@ -1,0 +1,5 @@
+description = "char const-indexed array element assigned a non-constant char rhs (a[1] = a[0]). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
+inputs = ["HELLO.C"]

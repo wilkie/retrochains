@@ -2445,7 +2445,41 @@ impl<'a> super::FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                 return;
             }
-            panic!("non-constant rhs in constant-indexed array assign not yet supported (no fixture)");
+            // Non-constant RHS for a CHAR element. A simple char source —
+            // another const-index char array element — loads straight to AL
+            // with NO widening (`mov al, <src>`); an arithmetic RHS widens its
+            // char operands through emit_expr_to_ax (the `cbw`/`imul` shape).
+            // Either way the low byte is stored. Fixtures 4314 (`a[1] = a[0]`),
+            // 4315 (`a[0] = a[0] * 5`).
+            if let ExprKind::ArrayIndex { array: src_arr, index: src_idx } = &value.kind
+                && let ExprKind::Ident(src_name) = &src_arr.kind
+            {
+                if let Some(gty) = self.globals.type_of(src_name)
+                    && gty.array_elem().is_some_and(|e| e.is_char_like())
+                    && let Some((src_off, _)) =
+                        try_const_array_offset(gty, std::iter::once(&**src_idx))
+                {
+                    let addr = global_offset_addr(src_name, src_off as i32);
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    return;
+                }
+                if self.locals.has(src_name)
+                    && let src_ty = self.locals.type_of(src_name).clone()
+                    && src_ty.array_elem().is_some_and(|e| e.is_char_like())
+                    && let Some((src_const_off, _)) =
+                        try_const_array_offset(&src_ty, std::iter::once(&**src_idx))
+                    && let LocalLocation::Stack(src_base) = self.locals.location_of(src_name)
+                {
+                    let src_off = src_base + i16::try_from(src_const_off).unwrap_or(i16::MAX);
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(src_off));
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    return;
+                }
+            }
+            self.emit_expr_to_ax(value);
+            let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+            return;
         }
         // 2D variable-index write: `a[i][j] = v` for `int a[M][N]`.
         // Same chain as the read path (fixture 198), with a store

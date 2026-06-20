@@ -1,0 +1,5 @@
+description = "char const-indexed array element assigned an arithmetic char rhs (a[0] = a[0] * 5). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
+inputs = ["HELLO.C"]
