@@ -3076,13 +3076,25 @@ impl<'a> super::FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tpush\tdx\r\n");
             return;
         }
-        // `(long)<int>` — an int/char value widened to a long argument. Load it
-        // into AX, sign-extend (`cwd`) or zero-extend (`xor dx,dx`) into DX:AX,
-        // then push the long high-half first (`push dx; push ax`). Fixture 4317
-        // (`sink((long)i)`).
-        if let ExprKind::Cast { ty, operand } = &arg.kind
-            && ty.is_long_like()
-        {
+        // An int/char value widened to a long argument — either an explicit
+        // `(long)i` cast or a bare int expression the call widens implicitly.
+        // Load it into AX, sign-extend (`cwd`) or zero-extend (`xor dx,dx`) into
+        // DX:AX, then push the long high-half first (`push dx; push ax`).
+        // Fixtures 4317 (`sink((long)i)`), 4322 (`sink(i)`).
+        let int_operand: Option<&Expr> = match &arg.kind {
+            ExprKind::Cast { ty, operand } if ty.is_long_like() => Some(operand),
+            // A bare int/char ident in a long-arg slot (a long ident/memory/call
+            // would have been handled above) — the implicit int→long widen.
+            ExprKind::Ident(name) => {
+                let ty = self
+                    .globals
+                    .type_of(name)
+                    .or_else(|| self.locals.has(name).then(|| self.locals.type_of(name)));
+                ty.filter(|t| t.is_int_like() || t.is_char_like()).map(|_| arg)
+            }
+            _ => None,
+        };
+        if let Some(operand) = int_operand {
             self.emit_expr_to_ax(operand);
             if self.expr_int_is_unsigned(operand) {
                 self.out.extend_from_slice(b"\txor\tdx,dx\r\n");

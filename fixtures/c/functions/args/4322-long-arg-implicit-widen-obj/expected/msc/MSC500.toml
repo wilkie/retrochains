@@ -1,0 +1,32 @@
+[run]
+exit_code = 0
+stdout_sha256 = "36815bbc8d9e6da598458803155bc3b3811e91c8be54411e35d69ea389ac7063"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "HELLO.ASM"
+size = 874
+sha256 = "1bea067682f5464c75951ac45d629d51ad59019a8c464cb47a6646c98f8e2ae4"
+mtime = "1987-10-15T12:00:00Z"
+
+[[outputs]]
+name = "HELLO.EXE"
+size = 2343
+sha256 = "e9b9c83f92a453ec0d69c1c67a8e15a92ad324c84d6016255531641d1a9c4c05"
+mtime = "1987-10-15T12:00:00Z"
+
+[[outputs]]
+name = "HELLO.OBJ"
+size = 307
+sha256 = "4fd3c8a8bbd4542d082cc3617dc7239434999bc117c693b9ebded4f3dd0d365d"
+mtime = "1987-10-15T12:00:00Z"
+
+[oracle]
+tool = "cl"
+args = [
+    "/c",
+    "/Fa",
+    "/AS",
+    "HELLO.C",
+]
+fake_time = "1987-10-15T12:00:00Z"
