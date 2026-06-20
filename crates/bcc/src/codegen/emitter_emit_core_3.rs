@@ -152,6 +152,12 @@ impl<'a> super::FunctionEmitter<'a> {
                             let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(p_off));
                             return OperandSource::DerefReg(Reg::Bx);
                         }
+                    } else if self.globals.type_of(name).is_some_and(|t| t.pointee().is_some()) {
+                        // `*p` where p is a FILE-SCOPE pointer — load the pointer
+                        // value into BX (`mov bx, word ptr DGROUP:_p`), then the
+                        // deref reads `[bx]`. Fixture 4316 (`g + *p`).
+                        let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}\r\n");
+                        return OperandSource::DerefReg(Reg::Bx);
                     }
                 }
                 // `*(p + K)` where p is a register-resident pointer
