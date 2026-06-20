@@ -1,0 +1,5 @@
+description = "int widened to a non-constant long call argument (sink((long)i)). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
+link_args = ['/AS', 'HELLO.C']
+inputs = ["HELLO.C"]

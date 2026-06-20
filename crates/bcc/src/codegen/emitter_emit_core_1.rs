@@ -3060,6 +3060,23 @@ impl<'a> super::FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tpush\tax\r\n");
             return;
         }
+        // `(long)<int>` — an int/char value widened to a long argument. Load it
+        // into AX, sign-extend (`cwd`) or zero-extend (`xor dx,dx`) into DX:AX,
+        // then push the long high-half first (`push dx; push ax`). Fixture 4317
+        // (`sink((long)i)`).
+        if let ExprKind::Cast { ty, operand } = &arg.kind
+            && ty.is_long_like()
+        {
+            self.emit_expr_to_ax(operand);
+            if self.expr_int_is_unsigned(operand) {
+                self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+            }
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            return;
+        }
         panic!("non-constant long argument not yet supported (no fixture)");
     }
 }
