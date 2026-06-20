@@ -1853,6 +1853,29 @@ impl Ctx {
                     skip = 4; // the other three args and the call
                 }
 
+                // A `long` argument is pushed as two words — `push [hi]; push
+                // [lo]` (high word first, then low; `lo == hi-2`, a long slot).
+                // Recover it as ONE long argument (the long var at the low slot),
+                // not two ints. Fixture 4037 (`doubled(g)` for a `long g`).
+                LoOp::Arg { src: Place::Local(hi) }
+                    if self.long_slots.contains(&(hi - 2))
+                        && matches!(
+                            self.insns.get(i + 1).map(|n| &n.op),
+                            Some(LoOp::Arg { src: Place::Local(lo) }) if *lo == hi - 2
+                        ) =>
+                {
+                    flush_call(&mut acc, out);
+                    match Self::var_of(Place::Local(hi - 2)) {
+                        Some(var) => {
+                            self.note(var);
+                            self.note_long(var);
+                            pending_args.push(Expr::Var(var));
+                            skip = 1; // the low-half push
+                        }
+                        None => self.cant(),
+                    }
+                }
+
                 LoOp::Arg { src: Place::Reg(Reg::Ax) } => match acc.take() {
                     Some(e) => pending_args.push(e),
                     None => self.cant(),
@@ -4351,14 +4374,110 @@ pub fn recover_program(code: &[u8]) -> Vec<Function> {
     if starts.len() <= 1 {
         return vec![recover_window(&insns, code, 0, insns.len())];
     }
-    starts
+    let mut funcs: Vec<Function> = starts
         .iter()
         .enumerate()
         .map(|(k, &lo)| {
             let hi = starts.get(k + 1).copied().unwrap_or(insns.len());
             recover_window(&insns, code, lo, hi)
         })
-        .collect()
+        .collect();
+    reconcile_long_params(&mut funcs);
+    funcs
+}
+
+/// Visit every `Call(target, args)` in a statement (recursing into blocks and
+/// nested expressions).
+fn visit_calls_stmt(s: &Stmt, on_call: &mut dyn FnMut(usize, &[Expr])) {
+    match s {
+        Stmt::Assign(_, e) | Stmt::Compound(_, _, e) | Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => {
+            visit_calls_expr(e, on_call);
+        }
+        Stmt::Return(None) | Stmt::Break => {}
+        Stmt::If(c, t, el) => {
+            visit_calls_expr(c, on_call);
+            t.iter().chain(el).for_each(|s| visit_calls_stmt(s, on_call));
+        }
+        Stmt::While(c, b) | Stmt::Do(c, b) => {
+            visit_calls_expr(c, on_call);
+            b.iter().for_each(|s| visit_calls_stmt(s, on_call));
+        }
+        Stmt::For(init, c, step, b) => {
+            visit_calls_stmt(init, on_call);
+            visit_calls_expr(c, on_call);
+            visit_calls_stmt(step, on_call);
+            b.iter().for_each(|s| visit_calls_stmt(s, on_call));
+        }
+        Stmt::Switch(sc, arms, def, _) => {
+            visit_calls_expr(sc, on_call);
+            arms.iter().flat_map(|(_, b)| b).chain(def).for_each(|s| visit_calls_stmt(s, on_call));
+        }
+    }
+}
+
+fn visit_calls_expr(e: &Expr, on_call: &mut dyn FnMut(usize, &[Expr])) {
+    match e {
+        Expr::Call(target, args) => {
+            on_call(*target, args);
+            args.iter().for_each(|a| visit_calls_expr(a, on_call));
+        }
+        Expr::Binary(_, a, b) | Expr::Rel(_, a, b) => {
+            visit_calls_expr(a, on_call);
+            visit_calls_expr(b, on_call);
+        }
+        Expr::Ternary(a, b, c) => {
+            visit_calls_expr(a, on_call);
+            visit_calls_expr(b, on_call);
+            visit_calls_expr(c, on_call);
+        }
+        Expr::Not(a) | Expr::Deref(a) | Expr::Cast(_, a) | Expr::Unary(_, a) => {
+            visit_calls_expr(a, on_call);
+        }
+        Expr::GlobalIndex { index, .. } => visit_calls_expr(index, on_call),
+        _ => {}
+    }
+}
+
+/// Cross-function reconciliation: a local function called with a `long` argument
+/// has a `long` parameter at that position — even when its body only reads the
+/// low word (and so was recovered with an `int` param). Without this, the
+/// caller's `f(long_v)` truncates to a one-word push and mis-matches the
+/// original two-word `long` push. Fixtures 4037, 1926.
+fn reconcile_long_params(funcs: &mut [Function]) {
+    let start_idx: std::collections::HashMap<usize, usize> =
+        funcs.iter().enumerate().map(|(i, f)| (f.start, i)).collect();
+    let mut to_mark: Vec<(usize, i16)> = Vec::new();
+    for f in funcs.iter() {
+        let longs = &f.long_vars;
+        for s in &f.body {
+            visit_calls_stmt(s, &mut |target, args| {
+                let Some(&idx) = start_idx.get(&target) else { return };
+                // Walk the args, sizing each (a long arg occupies two param
+                // slots), to map each long arg to its callee parameter offset.
+                let mut off = 4i16;
+                for a in args {
+                    let is_long = matches!(a, Expr::LongConst(_))
+                        || matches!(a, Expr::Var(v) if longs.contains(v));
+                    if is_long {
+                        to_mark.push((idx, off));
+                        off += 4;
+                    } else {
+                        off += 2;
+                    }
+                }
+            });
+        }
+    }
+    for (idx, off) in to_mark {
+        let p = Var::Param(off);
+        // Only a param the callee actually reads (so it's in `vars`) can be
+        // re-typed; declaring it `long` keeps the body (it reads the low word as
+        // an int, which `int = long` reproduces) but makes the call push the full
+        // long.
+        if funcs[idx].vars.contains(&p) && !funcs[idx].long_vars.contains(&p) {
+            funcs[idx].long_vars.push(p);
+        }
+    }
 }
 
 /// Recover the single function occupying instruction window `[lo, hi)` of `all`.
@@ -4371,16 +4490,42 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
     // (`mov dx,[lo+2]; mov ax,[lo]`). This lets the store side fold a `long`
     // constant store pair without mistaking two adjacent `int` stores for one.
     let mut long_slots = std::collections::HashSet::new();
+    // A slot stored high-half-first as an immediate pair (`mov [hi],imm; mov
+    // [lo=hi-2],imm`) — the long-CONSTANT store shape. A by-value struct stores
+    // its fields LOW-first (source order), so this order tells a `long` apart
+    // from a struct pushed identically (fixtures 4037 vs 1688).
+    let mut long_const_store_lo: std::collections::HashSet<i16> = std::collections::HashSet::new();
+    // A slot pushed as a two-word pair high-first (`push [hi]; push [lo=hi-2]`).
+    let mut arg_pair_lo: std::collections::HashSet<i16> = std::collections::HashSet::new();
     for pair in insns.windows(2) {
-        if let (
-            LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Local(hi) },
-            LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Local(lo) },
-        ) = (&pair[0].op, &pair[1].op)
-            && *hi == lo + 2
-        {
-            long_slots.insert(*lo);
+        match (&pair[0].op, &pair[1].op) {
+            // Read pair: `mov dx,[lo+2]; mov ax,[lo]`.
+            (
+                LoOp::Load { dst: Place::Reg(Reg::Dx), src: Place::Local(hi) },
+                LoOp::Load { dst: Place::Reg(Reg::Ax), src: Place::Local(lo) },
+            ) if *hi == lo + 2 => {
+                long_slots.insert(*lo);
+            }
+            (
+                LoOp::Store { dst: Place::Local(hi), src: Place::Imm(_) },
+                LoOp::Store { dst: Place::Local(lo), src: Place::Imm(_) },
+            ) if *hi == lo + 2 => {
+                long_const_store_lo.insert(*lo);
+            }
+            (
+                LoOp::Arg { src: Place::Local(hi) },
+                LoOp::Arg { src: Place::Local(lo) },
+            ) if *hi == lo + 2 => {
+                arg_pair_lo.insert(*lo);
+            }
+            _ => {}
         }
     }
+    // A constant `long` only stored then passed (never read as a dx:ax pair) is a
+    // `long` iff BOTH the high-first store pair AND the high-first arg-push pair
+    // are present — distinguishing it from a by-value struct (low-first stores)
+    // or two unrelated int args. Fixture 4037.
+    long_slots.extend(long_const_store_lo.intersection(&arg_pair_lo));
     // Pre-scan for word-accessed slots/globals — an `int` (or wider). A byte load
     // of such a slot (`mov al,[n]`) is reading the low byte of an `int`, not a
     // `char`, so the char-marking that load does must be undone afterward. (Byte
@@ -5035,6 +5180,38 @@ mod tests {
         // promote to int (`cbw`) and mismatch — decline it.
         let f = recover_c("char a[5]; void g(int i) { a[i] += 1; }\n");
         assert!(!f.complete, "the char-array self-compound stays incomplete");
+    }
+
+    #[test]
+    fn long_arg_recovers_as_one_long_not_two_ints() {
+        // `long g=1000L; doubled(g)` pushes the long as two words (`push [hi];
+        // push [lo]`). It must recover as ONE long argument (the callee `doubled`
+        // takes a long), not two int args. The store pair folds to `long g` and
+        // the arg pair to `f0(g)`. Fixture 4037.
+        let code = recompile_text(
+            "long doubled(long x){return x+x;}\nint main(void){long g=1000L;return (int)doubled(g);}\n",
+            &CompileOpts::default(),
+        )
+        .unwrap();
+        let funcs = recover_program(&code);
+        assert_eq!(funcs.len(), 2);
+        assert!(funcs.iter().all(|f| f.complete));
+        assert!(funcs[0].long_vars.contains(&Var::Param(4)), "callee param is long");
+    }
+
+    #[test]
+    fn long_arg_reconciles_a_truncating_callee_param() {
+        // The callee reads only the low word of its long param (`return (int)x`),
+        // so it's recovered with an int param — but the caller passes a long, so
+        // cross-function reconciliation re-types the param `long`. Without it the
+        // call would truncate (a one-word push) and mismatch. Fixture 1926.
+        let code = recompile_text(
+            "int trunc(long x){return (int)x;}\nint main(void){long y=0x1234L;return trunc(y);}\n",
+            &CompileOpts::default(),
+        )
+        .unwrap();
+        let funcs = recover_program(&code);
+        assert!(funcs[0].long_vars.contains(&Var::Param(4)), "truncating callee's param re-typed long");
     }
 
     #[test]
