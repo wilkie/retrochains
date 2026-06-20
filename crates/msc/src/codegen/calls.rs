@@ -545,16 +545,36 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             out.push(0x50);
         }
         Expr::Global(idx) => {
-            // `ff 36 <addr>` — push word ptr [imm16]. The placeholder
-            // gets the global's _DATA offset; the FIXUP carries the
-            // base. Fixture 4131.
-            out.push(0xFF);
-            let body_offset = out.len();
-            out.extend_from_slice(&[0x36, 0x00, 0x00]);
-            fixups.push(Fixup {
-                body_offset,
-                kind: FixupKind::GlobalAddr { global_idx: *idx },
-            });
+            if locals.is_char_global(*idx) {
+                // A char global passed as an int arg widens first: `mov al,[g];
+                // cbw|sub ah,ah; push ax` (pushing the raw word would carry the
+                // adjacent byte). The byte sibling of the char-param case.
+                // Fixture 4323.
+                let body_offset = out.len();
+                out.push(0xA0); // mov al, moffs16
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup {
+                    body_offset,
+                    kind: FixupKind::GlobalAddr { global_idx: *idx },
+                });
+                if locals.is_unsigned_global(*idx) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah
+                } else {
+                    out.push(0x98); // cbw
+                }
+                out.push(0x50); // push ax
+            } else {
+                // `ff 36 <addr>` — push word ptr [imm16]. The placeholder
+                // gets the global's _DATA offset; the FIXUP carries the
+                // base. Fixture 4131.
+                out.push(0xFF);
+                let body_offset = out.len();
+                out.extend_from_slice(&[0x36, 0x00, 0x00]);
+                fixups.push(Fixup {
+                    body_offset,
+                    kind: FixupKind::GlobalAddr { global_idx: *idx },
+                });
+            }
         }
         Expr::PostMutateLocal { local_idx, step } => {
             // Push the OLD value of the local, then mutate it in place.
