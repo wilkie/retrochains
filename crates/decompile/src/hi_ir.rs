@@ -698,6 +698,10 @@ pub struct Function {
     /// The subset of pointers dereferenced at byte width — declared `char *`.
     /// Disjoint from `ptr_vars` (a `char *` is never also an `int *`).
     pub char_ptr_vars: Vec<Var>,
+    /// Pointers dereferenced as a `dx:ax` long pair (`mov bx,p; mov dx,[bx+2];
+    /// mov ax,[bx]`) — declared `long *`. Disjoint from `ptr_vars`/`char_ptr_vars`
+    /// and from `long_vars` (the pointer is not itself a long).
+    pub long_ptr_vars: Vec<Var>,
     /// The subset of `vars` that are 32-bit `long` (loaded as a `dx:ax` pair).
     pub long_vars: Vec<Var>,
     /// The subset of `vars` that are `unsigned` (compared with `jb`/`ja` or
@@ -899,6 +903,7 @@ struct Ctx {
     char_vars: Vec<Var>,
     ptr_vars: Vec<Var>,
     char_ptr_vars: Vec<Var>,
+    long_ptr_vars: Vec<Var>,
     long_vars: Vec<Var>,
     unsigned_vars: Vec<Var>,
     /// The low-word offsets of stack slots read back as a `dx:ax` pair
@@ -1155,6 +1160,13 @@ impl Ctx {
     fn note_long(&mut self, var: Var) {
         if !self.long_vars.contains(&var) {
             self.long_vars.push(var);
+        }
+    }
+
+    /// Note a pointer dereferenced as a `dx:ax` long pair — it's a `long *`.
+    fn note_long_ptr(&mut self, var: Var) {
+        if !self.long_ptr_vars.contains(&var) {
+            self.long_ptr_vars.push(var);
         }
     }
 
@@ -1949,7 +1961,10 @@ impl Ctx {
                     flush_call(&mut acc, out);
                     let ptr = long_deref.take().unwrap();
                     if let Expr::Var(v) = &ptr {
-                        self.note_long(*v);
+                        // `bx` holds the pointer value `p`; `*p` reads a long, so
+                        // `p` is a `long *` — NOT a `long` (a long scalar can't be
+                        // dereferenced; that mis-recovery emits an invalid `*g`).
+                        self.note_long_ptr(*v);
                     }
                     self.note_long_array_base(&ptr);
                     acc = Some(Expr::Deref(Box::new(ptr)));
@@ -4393,6 +4408,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         char_vars: Vec::new(),
         ptr_vars: Vec::new(),
         char_ptr_vars: Vec::new(),
+        long_ptr_vars: Vec::new(),
         long_vars: Vec::new(),
         unsigned_vars: Vec::new(),
         long_slots,
@@ -4512,6 +4528,7 @@ fn recover_window(all: &[LoInsn], code: &[u8], lo: usize, hi: usize) -> Function
         char_vars: ctx.char_vars,
         ptr_vars: ctx.ptr_vars,
         char_ptr_vars: ctx.char_ptr_vars,
+        long_ptr_vars: ctx.long_ptr_vars,
         long_vars: ctx.long_vars,
         unsigned_vars: ctx.unsigned_vars,
         bitfield_globals: ctx.bitfield_globals,
@@ -5018,6 +5035,19 @@ mod tests {
         // promote to int (`cbw`) and mismatch — decline it.
         let f = recover_c("char a[5]; void g(int i) { a[i] += 1; }\n");
         assert!(!f.complete, "the char-array self-compound stays incomplete");
+    }
+
+    #[test]
+    fn long_pointer_deref_types_the_pointer() {
+        // `long *p; return *p;` reads the long through bx (`mov bx,p; mov dx,
+        // [bx+2]; mov ax,[bx]`). The pointer p must be typed `long *`, NOT `long`
+        // — a long scalar can't be dereferenced (`*g` is invalid C and crashed
+        // the recompiler). The global is recorded in long_ptr_vars.
+        let f = recover_c("long v; long *p = &v; long peek(void) { return *p; }\n");
+        assert!(f.complete, "a long-pointer deref is recovered");
+        assert!(f.long_ptr_vars.contains(&Var::Global(0)), "p is a long *");
+        assert!(!f.long_vars.contains(&Var::Global(0)), "p is not a long scalar");
+        assert!(matches!(f.body.last(), Some(Stmt::Return(Some(Expr::Deref(_))))));
     }
 
     #[test]

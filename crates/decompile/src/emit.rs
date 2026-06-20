@@ -52,6 +52,8 @@ struct Names {
     ptrs: Vec<Var>,
     /// Pointers dereferenced at byte width — declared `char *`.
     char_ptrs: Vec<Var>,
+    /// Pointers dereferenced as a `dx:ax` long pair — declared `long *`.
+    long_ptrs: Vec<Var>,
     /// Variables loaded as a `dx:ax` pair — declared `long`.
     longs: Vec<Var>,
     /// Variables compared/shifted as unsigned — declared `unsigned`.
@@ -87,11 +89,15 @@ fn decl_str(
     chars: &[Var],
     ptrs: &[Var],
     char_ptrs: &[Var],
+    long_ptrs: &[Var],
     longs: &[Var],
     unsigneds: &[Var],
 ) -> String {
     if char_ptrs.contains(&var) {
         return format!("char *{name}");
+    }
+    if long_ptrs.contains(&var) {
+        return format!("long *{name}");
     }
     if ptrs.contains(&var) {
         return format!("int *{name}");
@@ -123,6 +129,7 @@ impl Names {
         char_vars: &[Var],
         ptr_vars: &[Var],
         char_ptr_vars: &[Var],
+        long_ptr_vars: &[Var],
         long_vars: &[Var],
         unsigned_vars: &[Var],
         arrays: &[ArraySpec],
@@ -157,6 +164,7 @@ impl Names {
                         char_vars,
                         ptr_vars,
                         char_ptr_vars,
+                        long_ptr_vars,
                         long_vars,
                         unsigned_vars,
                     ));
@@ -187,6 +195,7 @@ impl Names {
             chars: char_vars.to_vec(),
             ptrs: ptr_vars.to_vec(),
             char_ptrs: char_ptr_vars.to_vec(),
+            long_ptrs: long_ptr_vars.to_vec(),
             longs: long_vars.to_vec(),
             unsigneds: unsigned_vars.to_vec(),
             signature: sig_parts.join(", "),
@@ -221,7 +230,16 @@ impl Names {
 
     /// A full typed declaration `<type> <name>`.
     fn decl(&self, var: Var, name: &str) -> String {
-        decl_str(var, name, &self.chars, &self.ptrs, &self.char_ptrs, &self.longs, &self.unsigneds)
+        decl_str(
+            var,
+            name,
+            &self.chars,
+            &self.ptrs,
+            &self.char_ptrs,
+            &self.long_ptrs,
+            &self.longs,
+            &self.unsigneds,
+        )
     }
 
     /// The pre-rendered parameter list (`int p1, long p2`).
@@ -630,6 +648,7 @@ fn emit_function(
         &f.char_vars,
         &f.ptr_vars,
         &f.char_ptr_vars,
+        &f.long_ptr_vars,
         &f.long_vars,
         &f.unsigned_vars,
         &f.arrays,
@@ -686,6 +705,7 @@ pub(crate) fn to_c_full(f: &Function, form: AccessForm, mode: FoldMode) -> Optio
         &f.char_vars,
         &f.ptr_vars,
         &f.char_ptr_vars,
+        &f.long_ptr_vars,
         &f.long_vars,
         &f.unsigned_vars,
         &f.arrays,
